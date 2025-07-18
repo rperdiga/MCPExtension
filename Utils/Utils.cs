@@ -1,0 +1,57 @@
+using Mendix.StudioPro.ExtensionsAPI.Model;
+using Mendix.StudioPro.ExtensionsAPI.Model.Projects;
+using Mendix.StudioPro.ExtensionsAPI.Model.DomainModels;
+using System.Collections.Generic;
+
+namespace MCPExtension.Utils;
+
+public class Utils
+{
+    /// <summary>
+    /// Gets the first non-AppStore module or the "MyFirstModule" if it exists
+    /// </summary>
+    public static IModule? GetMyFirstModule(IModel? model)
+    {
+        if (model == null)
+            return null;
+
+        var modules = model.Root.GetModules();
+        return modules.FirstOrDefault(module => module?.Name == "MyFirstModule", null) ??
+               modules.First(module => module.FromAppStore == false);
+    }
+
+    /// <summary>
+    /// Gets the domain model for a given module safely
+    /// </summary>
+    public static IDomainModel? GetDomainModel(IModule? module)
+    {
+        return module?.DomainModel;
+    }
+
+    /// <summary>
+    /// Safely gets all entities from a domain model
+    /// </summary>
+    public static IEnumerable<IEntity> GetEntities(IDomainModel? domainModel)
+    {
+        return domainModel?.GetEntities() ?? Enumerable.Empty<IEntity>();
+    }
+
+    /// <summary>
+    /// Validates if a model and its components are available
+    /// </summary>
+    public static (bool isValid, string errorMessage) ValidateModel(IModel? model)
+    {
+        if (model == null)
+            return (false, "No current application available.");
+
+        var module = GetMyFirstModule(model);
+        if (module == null)
+            return (false, "No module found in the application.");
+
+        var domainModel = GetDomainModel(module);
+        if (domainModel == null)
+            return (false, "No domain model found in the module.");
+
+        return (true, string.Empty);
+    }
+}

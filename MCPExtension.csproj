@@ -1,0 +1,62 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>preview</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="Presentation Resources\**" />
+    <EmbeddedResource Remove="Presentation Resources\**" />
+    <None Remove="Presentation Resources\**" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="AIPanel.cs" />
+    <Compile Remove="AIWebViewDockablePaneViewModel.cs" />
+    <Compile Remove="ArrangerHandler.cs" />
+    <Compile Remove="DomainModelCreator.cs" />
+    <Compile Remove="DomainTreeView.cs" />
+    <Compile Remove="DomainTreeViewWebViewDockablePaneViewModel.cs" />
+    <Compile Remove="MicroflowBuilder.cs" />
+    <Compile Remove="MicroflowCreator.cs" />
+    <Compile Remove="MicroflowTest.cs" />
+    <Compile Remove="Access Schema Converter\**" />
+    <Compile Remove="Helpers\**" />
+    <Compile Remove="MessageHandlers\**" />
+    <Compile Remove="Model\**" />
+    <Compile Remove="Models\**" />
+    <Compile Remove="Utils\EntityArranger.cs" />
+    <Compile Remove="Utils\UniqueNamesFinder.cs" />
+    <Compile Remove="Handlers\SampleDataGenerator.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Eto.Forms" Version="2.9.0" />
+    <PackageReference Include="Mendix.StudioPro.ExtensionsAPI" Version="10.21.1" />
+    <PackageReference Include="Microsoft.AspNetCore" Version="2.2.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.1" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- <ProjectReference Include="..\csharp-sdk\src\ModelContextProtocol.Core\ModelContextProtocol.Core.csproj" />
+    <ProjectReference Include="..\csharp-sdk\src\ModelContextProtocol\ModelContextProtocol.csproj" /> -->
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="Mendix.StudioPro.ExtensionsAPI">
+      <HintPath>bin\Debug\net6.0\Mendix.StudioPro.ExtensionsAPI.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="manifest.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+	<ItemGroup>
+		<None Remove="Resources\**" />
+	</ItemGroup>
+	<Target Name="PostBuild" AfterTargets="PostBuildEvent">
+    <Exec Command="xcopy /y /s /i &quot;$(TargetDir)&quot; &quot;C:\Mendix Projects\Sample\extensions\MCP&quot;" />
+  </Target>
+</Project>
