@@ -1,4 +1,4 @@
-# MCPExtension
+# Mendix Studio Pro MCPExtension
 
 ## Overview
 
