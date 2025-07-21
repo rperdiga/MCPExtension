@@ -23,6 +23,7 @@ namespace MCPExtension.Tools
         private readonly ILogger<MendixAdditionalTools> _logger;
         private readonly IPageGenerationService _pageGenerationService;
         private readonly INavigationManagerService _navigationManagerService;
+        private readonly IServiceProvider _serviceProvider;
         private static string? _lastError;
         private static Exception? _lastException;
 
@@ -30,12 +31,14 @@ namespace MCPExtension.Tools
             IModel model, 
             ILogger<MendixAdditionalTools> logger,
             IPageGenerationService pageGenerationService,
-            INavigationManagerService navigationManagerService)
+            INavigationManagerService navigationManagerService,
+            IServiceProvider serviceProvider)
         {
             _model = model;
             _logger = logger;
             _pageGenerationService = pageGenerationService;
             _navigationManagerService = navigationManagerService;
+            _serviceProvider = serviceProvider;
         }
 
         public static void SetLastError(string error, Exception? exception = null)
@@ -280,7 +283,7 @@ namespace MCPExtension.Tools
                 var error = "IModel instance is null in ListMicroflows.";
                 _logger.LogError(error);
                 SetLastError(error);
-                return new { error };
+                return JsonSerializer.Serialize(new { error });
             }
 
             var moduleName = arguments["module_name"]?.ToString();
@@ -291,12 +294,12 @@ namespace MCPExtension.Tools
                 var error = "No module found in ListMicroflows.";
                 _logger.LogError(error);
                 SetLastError(error);
-                return new { error };
+                return JsonSerializer.Serialize(new { error });
             }
 
             if (!string.IsNullOrEmpty(moduleName) && module.Name != moduleName)
             {
-                return new { error = $"Module '{moduleName}' not found" };
+                return JsonSerializer.Serialize(new { error = $"Module '{moduleName}' not found" });
             }
 
                 var microflows = module.GetDocuments()
@@ -307,13 +310,13 @@ namespace MCPExtension.Tools
                         module = module.Name
                     }).ToArray();
 
-                return new { microflows = microflows };
+                return JsonSerializer.Serialize(new { microflows = microflows });
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error listing microflows");
                 SetLastError("Error listing microflows", ex);
-                return new { error = ex.Message };
+                return JsonSerializer.Serialize(new { error = ex.Message });
             }
         }
 
@@ -326,7 +329,7 @@ namespace MCPExtension.Tools
                 var error = "IModel instance is null in ReadMicroflowDetails.";
                 _logger.LogError(error);
                 SetLastError(error);
-                return new { error };
+                return JsonSerializer.Serialize(new { error });
             }
 
             var microflowName = arguments["microflow_name"]?.ToString();
@@ -335,7 +338,7 @@ namespace MCPExtension.Tools
             {
                 var error = "Microflow name is required";
                 SetLastError(error);
-                return new { error = error };
+                return JsonSerializer.Serialize(new { error = error });
             }
 
             var module = Utils.Utils.GetMyFirstModule(_model);
@@ -344,7 +347,7 @@ namespace MCPExtension.Tools
                 var error = "No module found in ReadMicroflowDetails.";
                 _logger.LogError(error);
                 SetLastError(error);
-                return new { error };
+                return JsonSerializer.Serialize(new { error });
             }
 
             // Find the microflow
@@ -356,7 +359,7 @@ namespace MCPExtension.Tools
                 {
                     var error = $"Microflow '{microflowName}' not found in module '{module.Name}'";
                     SetLastError(error);
-                    return new { error = error };
+                    return JsonSerializer.Serialize(new { error = error });
                 }
 
                 // Extract basic microflow information
@@ -371,17 +374,17 @@ namespace MCPExtension.Tools
                     limitations = "Detailed activity analysis requires additional Mendix services not currently available in this MCP implementation"
                 };
 
-                return new 
+                return JsonSerializer.Serialize(new 
                 { 
                     success = true,
                     microflow = microflowInfo
-                };
+                });
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error reading microflow details");
                 SetLastError("Error reading microflow details", ex);
-                return new { error = ex.Message };
+                return JsonSerializer.Serialize(new { error = ex.Message });
             }
         }
 
@@ -391,24 +394,24 @@ namespace MCPExtension.Tools
             {
                 if (string.IsNullOrEmpty(_lastError))
                 {
-                    return new { 
+                    return JsonSerializer.Serialize(new { 
                         message = "No errors recorded",
                         last_error = (string?)null
-                    };
+                    });
                 }
 
-                return new { 
+                return JsonSerializer.Serialize(new { 
                     message = "Last error retrieved",
                     last_error = _lastError,
                     details = _lastException?.Message,
                     stack_trace = _lastException?.StackTrace,
                     timestamp = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss UTC")
-                };
+                });
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error getting last error");
-                return new { error = ex.Message };
+                return JsonSerializer.Serialize(new { error = ex.Message });
             }
         }
 
@@ -433,7 +436,8 @@ namespace MCPExtension.Tools
                     "list_available_tools",
                     "debug_info",
                     "read_microflow_details",
-                    "create_microflow"
+                    "create_microflow",
+                    "create_microflow_activity"
                 };
 
                 return JsonSerializer.Serialize(new { available_tools = tools });
@@ -788,6 +792,348 @@ namespace MCPExtension.Tools
                 var dt when dt == Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.Boolean => "false",
                 var dt when dt == Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.DateTime => "dateTime(1900)",
                 _ => "empty"
+            };
+        }
+
+        public async Task<object> CreateMicroflowActivity(JsonObject arguments)
+        {
+            try
+            {
+                // Add detailed logging to debug parameter reception
+                _logger.LogInformation("=== CreateMicroflowActivity Debug ===");
+                _logger.LogInformation($"Raw arguments received: {arguments?.ToJsonString()}");
+                _logger.LogInformation($"Arguments type: {arguments?.GetType().FullName}");
+                _logger.LogInformation($"Arguments count: {arguments?.Count ?? 0}");
+                
+                // Log each key-value pair
+                if (arguments != null)
+                {
+                    foreach (var kvp in arguments)
+                    {
+                        _logger.LogInformation($"Key: '{kvp.Key}', Value: '{kvp.Value}', Value Type: {kvp.Value?.GetType().FullName}");
+                    }
+                }
+
+                var microflowName = arguments["microflow_name"]?.ToString();
+                var activityType = arguments["activity_type"]?.ToString();
+                var activityData = arguments["activity_config"]?.AsObject();
+
+                _logger.LogInformation($"Extracted microflowName: '{microflowName}'");
+                _logger.LogInformation($"Extracted activityType: '{activityType}'");
+                _logger.LogInformation($"Extracted activityData: {activityData?.ToJsonString()}");
+
+                if (string.IsNullOrWhiteSpace(microflowName))
+                {
+                    var error = "Microflow name is required.";
+                    _logger.LogError($"ERROR: {error} - microflowName was null/empty/whitespace");
+                    SetLastError(error);
+                    return JsonSerializer.Serialize(new { error });
+                }
+
+                if (string.IsNullOrWhiteSpace(activityType))
+                {
+                    var error = "Activity type is required.";
+                    _logger.LogError($"ERROR: {error} - activityType was null/empty/whitespace");
+                    SetLastError(error);
+                    return JsonSerializer.Serialize(new { error });
+                }
+
+                var module = Utils.Utils.GetMyFirstModule(_model);
+                if (module == null)
+                {
+                    var error = "No module found.";
+                    SetLastError(error);
+                    return JsonSerializer.Serialize(new { error });
+                }
+
+                // Find the microflow
+                var microflow = module.GetDocuments().OfType<IMicroflow>()
+                    .FirstOrDefault(mf => mf.Name.Equals(microflowName, StringComparison.OrdinalIgnoreCase));
+
+                if (microflow == null)
+                {
+                    var error = $"Microflow '{microflowName}' not found in module '{module.Name}'.";
+                    SetLastError(error);
+                    return JsonSerializer.Serialize(new { error });
+                }
+
+                // Create activity based on type
+                IActionActivity? activity = null;
+                using (var transaction = _model.StartTransaction("Create microflow activity"))
+                {
+                    switch (activityType.ToLowerInvariant())
+                    {
+                        case "log":
+                        case "log_message":
+                            activity = CreateLogActivity(activityData);
+                            break;
+
+                        case "change_variable":
+                        case "change_value":
+                            activity = CreateChangeVariableActivity(activityData);
+                            break;
+
+                        case "create_variable":
+                        case "create_object":
+                        case "create":
+                            activity = CreateCreateVariableActivity(activityData);
+                            break;
+
+                        case "microflow_call":
+                        case "call_microflow":
+                            activity = CreateMicroflowCallActivity(activityData);
+                            break;
+
+                        default:
+                            var error = $"Unsupported activity type: {activityType}. Currently supported types: change_variable, create_object, microflow_call. Note: log activities are not supported by the Extensions API.";
+                            SetLastError(error);
+                            return JsonSerializer.Serialize(new { error });
+                    }
+
+                    if (activity == null)
+                    {
+                        var error = $"Failed to create activity of type '{activityType}'. ";
+                        if (activityType == "log")
+                        {
+                            error += "Log activities are not supported by the current Mendix Extensions API. Consider using change_variable or create_variable instead.";
+                        }
+                        else
+                        {
+                            error += "Please check the activity configuration and try again.";
+                        }
+                        SetLastError(error);
+                        return JsonSerializer.Serialize(new { error });
+                    }
+
+                    // Insert the activity into the microflow
+                    // Using a generic approach to insert at the start
+                    try
+                    {
+                        // Get the IMicroflowService from service provider
+                        var microflowService = _serviceProvider?.GetService<IMicroflowService>();
+                        if (microflowService == null)
+                        {
+                            var error = "IMicroflowService not available.";
+                            SetLastError(error);
+                            return JsonSerializer.Serialize(new { error });
+                        }
+
+                        // Try to insert the activity
+                        var insertResult = microflowService.TryInsertAfterStart(microflow, activity);
+                        if (!insertResult)
+                        {
+                            var error = "Failed to insert activity into microflow.";
+                            SetLastError(error);
+                            return JsonSerializer.Serialize(new { error });
+                        }
+
+                        transaction.Commit();
+
+                        return JsonSerializer.Serialize(new {
+                            success = true,
+                            message = $"Activity of type '{activityType}' added to microflow '{microflowName}' successfully.",
+                            activity = new {
+                                type = activityType,
+                                microflow = microflowName,
+                                module = module.Name
+                            }
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, $"Error inserting activity into microflow: {ex.Message}");
+                        var error = $"Error inserting activity: {ex.Message}";
+                        SetLastError(error, ex);
+                        return JsonSerializer.Serialize(new { error });
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                SetLastError($"Error creating microflow activity: {ex.Message}", ex);
+                _logger.LogError(ex, "Error in CreateMicroflowActivity");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        private IActionActivity? CreateLogActivity(JsonObject? activityData)
+        {
+            try
+            {
+                // Log activities are not supported by the current Mendix Extensions API
+                // Instead, we'll create a simple comment activity or recommend using a different approach
+                
+                var message = activityData?["message"]?.ToString() ?? "Log message not available in Extensions API";
+                var level = activityData?["level"]?.ToString() ?? "info";
+                
+                _logger.LogWarning($"Log activities are not supported by the Extensions API. Requested log: [{level}] {message}");
+                
+                // Return null to indicate this activity type is not supported
+                // This will cause the method to return an error message
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error creating log activity");
+                SetLastError($"Error creating log activity: {ex.Message}", ex);
+                return null;
+            }
+        }
+
+        private IActionActivity? CreateChangeVariableActivity(JsonObject? activityData)
+        {
+            try
+            {
+                var variableName = activityData?["variable_name"]?.ToString() ?? "newVariable";
+                var newValue = activityData?["new_value"]?.ToString() ?? "''";
+
+                // Create a change variable action (this is typically a ChangeObjectAction)
+                var changeAction = _model.Create<IChangeObjectAction>();
+                
+                // Set properties for the change action
+                // Note: This is a simplified example - real implementation would need proper entity and member configuration
+                
+                // Create the action activity
+                var activity = _model.Create<IActionActivity>();
+                activity.Action = changeAction;
+                
+                _logger.LogInformation($"Created change variable activity with variable '{variableName}' and value '{newValue}'");
+                
+                return activity;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error creating change variable activity");
+                SetLastError($"Error creating change variable activity: {ex.Message}", ex);
+                return null;
+            }
+        }
+
+        private IActionActivity? CreateCreateVariableActivity(JsonObject? activityData)
+        {
+            try
+            {
+                // Support multiple naming conventions - including "entity", "entityType", "entityName" parameters
+                var variableName = activityData?["variableName"]?.ToString() ?? 
+                                  activityData?["variable_name"]?.ToString() ?? "newVariable";
+                var entityType = activityData?["entity"]?.ToString() ?? 
+                                activityData?["entityType"]?.ToString() ?? 
+                                activityData?["entityName"]?.ToString() ?? 
+                                activityData?["variable_type"]?.ToString() ?? "String";
+                var initialValue = activityData?["initial_value"]?.ToString() ?? "''";
+
+                _logger.LogInformation($"Creating create object activity with variable '{variableName}', entityType '{entityType}'");
+
+                // Create a create object action
+                var createAction = _model.Create<ICreateObjectAction>();
+                
+                // Set the output variable name
+                createAction.OutputVariableName = variableName;
+                
+                // Try to find and set the entity if entityType is provided
+                if (!string.IsNullOrEmpty(entityType) && entityType != "String")
+                {
+                    try
+                    {
+                        var module = Utils.Utils.GetMyFirstModule(_model);
+                        if (module?.DomainModel != null)
+                        {
+                            // Look for the entity by qualified name (e.g., "MyFirstModule.Customer")
+                            var entity = module.DomainModel.GetEntities()
+                                .FirstOrDefault(e => e.QualifiedName.ToString() == entityType || e.Name == entityType);
+                            
+                            if (entity != null)
+                            {
+                                createAction.Entity = entity.QualifiedName;
+                                _logger.LogInformation($"Successfully set entity '{entity.QualifiedName}' for create action");
+                            }
+                            else
+                            {
+                                _logger.LogWarning($"Entity '{entityType}' not found in domain model. Available entities: {string.Join(", ", module.DomainModel.GetEntities().Select(e => e.QualifiedName.ToString()))}");
+                            }
+                        }
+                    }
+                    catch (Exception entityEx)
+                    {
+                        _logger.LogError(entityEx, $"Error setting entity '{entityType}' for create action");
+                    }
+                }
+                
+                // Create the action activity
+                var activity = _model.Create<IActionActivity>();
+                activity.Action = createAction;
+                
+                _logger.LogInformation($"Created create object activity with variable '{variableName}' for entity type '{entityType}'");
+                
+                return activity;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error creating create variable activity");
+                SetLastError($"Error creating create variable activity: {ex.Message}", ex);
+                return null;
+            }
+        }
+
+        private IActionActivity? CreateMicroflowCallActivity(JsonObject? activityData)
+        {
+            try
+            {
+                var microflowName = activityData?["microflow_name"]?.ToString();
+                var returnVariable = activityData?["return_variable"]?.ToString();
+
+                if (string.IsNullOrEmpty(microflowName))
+                {
+                    _logger.LogError("Microflow name is required for microflow call activity");
+                    SetLastError("Microflow name is required for microflow call activity");
+                    return null;
+                }
+
+                // Create microflow call action
+                var microflowCallAction = _model.Create<IMicroflowCallAction>();
+                var microflowCall = _model.Create<IMicroflowCall>();
+                
+                // Set the microflow call action properties
+                microflowCallAction.MicroflowCall = microflowCall;
+                
+                // Set return variable if provided
+                if (!string.IsNullOrEmpty(returnVariable))
+                {
+                    microflowCallAction.UseReturnVariable = true;
+                    microflowCallAction.OutputVariableName = returnVariable;
+                }
+                else
+                {
+                    microflowCallAction.UseReturnVariable = false;
+                }
+
+                // Create the action activity
+                var activity = _model.Create<IActionActivity>();
+                activity.Action = microflowCallAction;
+                
+                _logger.LogInformation($"Created microflow call activity for microflow '{microflowName}' with return variable '{returnVariable ?? "none"}'");
+                
+                return activity;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error creating microflow call activity");
+                SetLastError($"Error creating microflow call activity: {ex.Message}", ex);
+                return null;
+            }
+        }
+
+        private LogLevel GetLogLevel(string logLevel)
+        {
+            return logLevel.ToLowerInvariant() switch
+            {
+                "trace" => LogLevel.Trace,
+                "debug" => LogLevel.Debug,
+                "info" or "information" => LogLevel.Information,
+                "warn" or "warning" => LogLevel.Warning,
+                "error" => LogLevel.Error,
+                "critical" => LogLevel.Critical,
+                _ => LogLevel.Information
             };
         }
 

@@ -74,7 +74,8 @@ namespace MCPExtension
                 currentApp, 
                 _serviceProvider.GetRequiredService<ILogger<MendixAdditionalTools>>(),
                 _serviceProvider.GetRequiredService<IPageGenerationService>(),
-                _serviceProvider.GetRequiredService<INavigationManagerService>()
+                _serviceProvider.GetRequiredService<INavigationManagerService>(),
+                _serviceProvider
             );
 
             // Register domain model tools with wrapper functions
@@ -165,6 +166,16 @@ namespace MCPExtension
                 return (object)result;
             });
 
+            // Register create_microflow_activity tool
+            _mcpServer.RegisterTool("create_microflow_activity", async (JsonObject parameters) => 
+            {
+                _logger.LogInformation("=== MCP Tool create_microflow_activity Called ===");
+                _logger.LogInformation($"Parameters received in MCP server: {parameters?.ToJsonString()}");
+                var result = await additionalTools.CreateMicroflowActivity(parameters);
+                _logger.LogInformation($"Result from CreateMicroflowActivity: {result}");
+                return (object)result;
+            });
+
             _logger.LogInformation("MCP tools registered successfully");
         }
 
@@ -204,7 +215,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 16, // Updated number of registered tools (added create_microflow)
+                registeredTools = 17, // Updated number of registered tools (added create_microflow_activity)
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",

@@ -102,7 +102,14 @@ namespace MCPExtension
 
             // Register our tools
             services.AddSingleton<MendixDomainModelTools>();
-            services.AddSingleton<MendixAdditionalTools>();
+            services.AddSingleton<MendixAdditionalTools>(provider => 
+                new MendixAdditionalTools(
+                    provider.GetRequiredService<IModel>(),
+                    provider.GetRequiredService<ILogger<MendixAdditionalTools>>(),
+                    provider.GetRequiredService<IPageGenerationService>(),
+                    provider.GetRequiredService<INavigationManagerService>(),
+                    provider
+                ));
 
             // Build service provider
             _serviceProvider = services.BuildServiceProvider();

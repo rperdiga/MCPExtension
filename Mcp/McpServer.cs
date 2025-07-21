@@ -384,9 +384,13 @@ namespace MCPExtension.MCP
                     return initResponse;
 
                 case "tools/list":
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] === TOOLS/LIST REQUEST ===");
                     LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Handling tools/list request");
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Available tools count: {_tools.Count}");
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Available tools: {string.Join(", ", _tools.Keys)}");
                     var toolsResponse = CreateToolsListResponse(id);
                     LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Tools list response created with {_tools.Count} tools");
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] === END TOOLS/LIST REQUEST ===");
                     return toolsResponse;
 
                 case "tools/call":
@@ -436,15 +440,31 @@ namespace MCPExtension.MCP
             
             foreach (var toolName in _tools.Keys)
             {
-                tools.Add(new
+                var schema = GetToolInputSchema(toolName);
+                var description = GetToolDescription(toolName);
+                
+                var tool = new
                 {
                     name = toolName,
-                    description = GetToolDescription(toolName),
-                    inputSchema = GetToolInputSchema(toolName)
-                });
+                    description = description,
+                    inputSchema = schema
+                };
+                
+                // Special logging for create_microflow_activity
+                if (toolName == "create_microflow_activity")
+                {
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] === create_microflow_activity TOOL DEFINITION ===");
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Tool name: {toolName}");
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Description: {description}");
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Schema: {JsonSerializer.Serialize(schema)}");
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Full tool object: {JsonSerializer.Serialize(tool)}");
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] === END TOOL DEFINITION ===");
+                }
+                
+                tools.Add(tool);
             }
 
-            return new
+            var response = new
             {
                 jsonrpc = "2.0",
                 id = id?.AsValue(),
@@ -453,6 +473,10 @@ namespace MCPExtension.MCP
                     tools = tools
                 }
             };
+            
+            LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Tools list response contains {tools.Count} tools");
+            
+            return response;
         }
 
         private async Task<object> HandleToolCall(JsonNode id, JsonObject paramsObj)
@@ -461,6 +485,25 @@ namespace MCPExtension.MCP
             {
                 var toolName = paramsObj["name"]?.ToString();
                 var arguments = paramsObj["arguments"]?.AsObject();
+
+                // Enhanced logging for create_microflow_activity debugging
+                if (toolName == "create_microflow_activity")
+                {
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] === DEBUGGING create_microflow_activity ===");
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Full paramsObj: {JsonSerializer.Serialize(paramsObj)}");
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Extracted toolName: '{toolName}'");
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Raw arguments object: {arguments}");
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Arguments JSON: {JsonSerializer.Serialize(arguments)}");
+                    
+                    if (arguments != null)
+                    {
+                        foreach (var kvp in arguments)
+                        {
+                            LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Argument Key: '{kvp.Key}', Value: '{kvp.Value}'");
+                        }
+                    }
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] === END DEBUG ===");
+                }
 
                 if (string.IsNullOrEmpty(toolName) || !_tools.ContainsKey(toolName))
                 {
@@ -532,6 +575,7 @@ namespace MCPExtension.MCP
                 "debug_info" => "Get comprehensive debug information about the domain model",
                 "read_microflow_details" => "Get details about a specific microflow",
                 "create_microflow" => "Create a new microflow in the module with parameters and return type",
+                "create_microflow_activity" => "Create a new microflow activity within an existing microflow",
                 _ => "Tool description not available"
             };
         }
@@ -821,6 +865,21 @@ namespace MCPExtension.MCP
                         returnType = new { type = "string" }
                     },
                     required = new[] { "name" }
+                },
+                "create_microflow_activity" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        microflow_name = new { type = "string", description = "Name of the microflow to add activity to" },
+                        activity_type = new { type = "string", description = "Type of activity to create (e.g., 'action_call', 'log', 'retrieve', 'change')" },
+                        activity_config = new { 
+                            type = "object", 
+                            description = "Configuration object for the activity",
+                            additionalProperties = true
+                        }
+                    },
+                    required = new[] { "microflow_name", "activity_type" }
                 },
                 _ => new
                 {
