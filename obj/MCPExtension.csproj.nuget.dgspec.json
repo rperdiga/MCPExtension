@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "C:\\NewExtension\\MCPExtension\\MCPExtension.csproj": {}
+    "C:\\Extensions\\MCPExtension\\MCPExtension.csproj": {}
   },
   "projects": {
-    "C:\\NewExtension\\MCPExtension\\MCPExtension.csproj": {
+    "C:\\Extensions\\MCPExtension\\MCPExtension.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\NewExtension\\MCPExtension\\MCPExtension.csproj",
+        "projectUniqueName": "C:\\Extensions\\MCPExtension\\MCPExtension.csproj",
         "projectName": "MCPExtension",
-        "projectPath": "C:\\NewExtension\\MCPExtension\\MCPExtension.csproj",
+        "projectPath": "C:\\Extensions\\MCPExtension\\MCPExtension.csproj",
         "packagesPath": "C:\\Users\\ricardo.perdigao\\.nuget\\packages\\",
-        "outputPath": "C:\\NewExtension\\MCPExtension\\obj\\",
+        "outputPath": "C:\\Extensions\\MCPExtension\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "C:\\Users\\ricardo.perdigao\\AppData\\Roaming\\NuGet\\NuGet.Config"
