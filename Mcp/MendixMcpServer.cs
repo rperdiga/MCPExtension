@@ -156,6 +156,15 @@ namespace MCPExtension
                 return (object)result;
             });
 
+            // Register create_microflow tool with special handling
+            _mcpServer.RegisterTool("create_microflow", async (JsonObject parameters) => 
+            {
+                // Create a specialized microflow handler that has access to IMicroflowService and IServiceProvider
+                var microflowService = _serviceProvider.GetRequiredService<IMicroflowService>();
+                var result = await additionalTools.CreateMicroflowWithService(parameters, microflowService, _serviceProvider);
+                return (object)result;
+            });
+
             _logger.LogInformation("MCP tools registered successfully");
         }
 
@@ -195,7 +204,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 15, // Updated number of registered tools
+                registeredTools = 16, // Updated number of registered tools (added create_microflow)
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",

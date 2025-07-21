@@ -531,6 +531,7 @@ namespace MCPExtension.MCP
                 "list_available_tools" => "List all available tools",
                 "debug_info" => "Get comprehensive debug information about the domain model",
                 "read_microflow_details" => "Get details about a specific microflow",
+                "create_microflow" => "Create a new microflow in the module with parameters and return type",
                 _ => "Tool description not available"
             };
         }
@@ -796,6 +797,30 @@ namespace MCPExtension.MCP
                         microflow_name = new { type = "string" }
                     },
                     required = new[] { "module_name", "microflow_name" }
+                },
+                "create_microflow" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        name = new { type = "string" },
+                        parameters = new
+                        {
+                            type = "array",
+                            items = new
+                            {
+                                type = "object",
+                                properties = new
+                                {
+                                    name = new { type = "string" },
+                                    type = new { type = "string" }
+                                },
+                                required = new[] { "name", "type" }
+                            }
+                        },
+                        returnType = new { type = "string" }
+                    },
+                    required = new[] { "name" }
                 },
                 _ => new
                 {

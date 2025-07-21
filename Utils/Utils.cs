@@ -1,6 +1,7 @@
 using Mendix.StudioPro.ExtensionsAPI.Model;
 using Mendix.StudioPro.ExtensionsAPI.Model.Projects;
 using Mendix.StudioPro.ExtensionsAPI.Model.DomainModels;
+using Mendix.StudioPro.ExtensionsAPI.Model.DataTypes;
 using System.Collections.Generic;
 
 namespace MCPExtension.Utils;
@@ -53,5 +54,22 @@ public class Utils
             return (false, "No domain model found in the module.");
 
         return (true, string.Empty);
+    }
+
+    /// <summary>
+    /// Converts a string representation to a DataType
+    /// </summary>
+    public static DataType DataTypeFromString(string typeName)
+    {
+        return typeName.ToLower() switch
+        {
+            "string" => DataType.String,
+            "integer" => DataType.Integer,
+            "boolean" => DataType.Boolean,
+            "decimal" => DataType.Decimal,
+            "datetime" => DataType.DateTime,
+            "long" => DataType.Integer, // Mendix uses Integer for Long values
+            _ => DataType.String // Default to string for unknown types
+        };
     }
 }

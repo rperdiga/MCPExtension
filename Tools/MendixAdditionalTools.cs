@@ -12,6 +12,7 @@ using Mendix.StudioPro.ExtensionsAPI.Model.Microflows;
 using Mendix.StudioPro.ExtensionsAPI.Model.DomainModels;
 using Mendix.StudioPro.ExtensionsAPI.Services;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.DependencyInjection;
 using MCPExtension.Utils;
 
 namespace MCPExtension.Tools
@@ -43,20 +44,35 @@ namespace MCPExtension.Tools
             _lastException = exception;
         }
 
-        public async Task<object> SaveData(JsonObject arguments)
+    public async Task<object> SaveData(JsonObject arguments)
+    {
+        try
         {
-            try
+            if (_model == null)
             {
-                var dataProperty = arguments["data"]?.AsObject();
-                if (dataProperty == null)
+                var error = "IModel instance is null in SaveData.";
+                _logger.LogError(error);
+                SetLastError(error);
+                return JsonSerializer.Serialize(new { error, success = false });
+            }
+
+            var dataProperty = arguments["data"]?.AsObject();
+            if (dataProperty == null)
+            {
+                var currentModule = Utils.Utils.GetMyFirstModule(_model);
+                if (currentModule == null)
                 {
-                    var currentModule = Utils.Utils.GetMyFirstModule(_model);
-                    var moduleName = currentModule?.Name ?? "MyFirstModule";
-                    
-                    var error = "Invalid request format or empty data. The save_data tool is used to generate sample data for Mendix domain models.";
+                    var error = "No module found in SaveData.";
+                    _logger.LogError(error);
                     SetLastError(error);
-                    return JsonSerializer.Serialize(new { 
-                        error = error,
+                    return JsonSerializer.Serialize(new { error, success = false });
+                }
+                var moduleName = currentModule?.Name ?? "MyFirstModule";
+                    
+                var emptyDataError = "Invalid request format or empty data. The save_data tool is used to generate sample data for Mendix domain models.";
+                SetLastError(emptyDataError);
+                return JsonSerializer.Serialize(new { 
+                    error = emptyDataError,
                         message = "The save_data tool requires a 'data' property with entity data in the specified format.",
                         required_format = new {
                             data = new {
@@ -92,6 +108,13 @@ namespace MCPExtension.Tools
                 }
 
                 var module = Utils.Utils.GetMyFirstModule(_model);
+                if (module == null)
+                {
+                    var error = "No module found in SaveData.";
+                    _logger.LogError(error);
+                    SetLastError(error);
+                    return JsonSerializer.Serialize(new { error, success = false });
+                }
                 if (module?.DomainModel == null)
                 {
                     var error = "No domain model found.";
@@ -143,11 +166,19 @@ namespace MCPExtension.Tools
             }
         }
 
-        public async Task<object> GenerateOverviewPages(JsonObject arguments)
+    public async Task<object> GenerateOverviewPages(JsonObject arguments)
+    {
+        try
         {
-            try
+            if (_model == null)
             {
-                var entityNamesArray = arguments["entity_names"]?.AsArray();
+                var error = "IModel instance is null in GenerateOverviewPages.";
+                _logger.LogError(error);
+                SetLastError(error);
+                return JsonSerializer.Serialize(new { error, success = false });
+            }
+
+            var entityNamesArray = arguments["entity_names"]?.AsArray();
                 var generateIndexSnippet = arguments["generate_index_snippet"]?.GetValue<bool>() ?? true;
 
                 if (entityNamesArray == null || !entityNamesArray.Any())
@@ -172,6 +203,13 @@ namespace MCPExtension.Tools
                 }
 
                 var module = Utils.Utils.GetMyFirstModule(_model);
+                if (module == null)
+                {
+                    var error = "No module found in GenerateOverviewPages.";
+                    _logger.LogError(error);
+                    SetLastError(error);
+                    return JsonSerializer.Serialize(new { error, success = false });
+                }
                 if (module?.DomainModel == null)
                 {
                     return JsonSerializer.Serialize(new { 
@@ -233,22 +271,33 @@ namespace MCPExtension.Tools
             }
         }
 
-        public async Task<object> ListMicroflows(JsonObject arguments)
+    public async Task<object> ListMicroflows(JsonObject arguments)
+    {
+        try
         {
-            try
+            if (_model == null)
             {
-                var moduleName = arguments["module_name"]?.ToString();
-                
-                var module = Utils.Utils.GetMyFirstModule(_model);
-                if (module == null)
-                {
-                    return new { error = "No module found" };
-                }
+                var error = "IModel instance is null in ListMicroflows.";
+                _logger.LogError(error);
+                SetLastError(error);
+                return new { error };
+            }
 
-                if (!string.IsNullOrEmpty(moduleName) && module.Name != moduleName)
-                {
-                    return new { error = $"Module '{moduleName}' not found" };
-                }
+            var moduleName = arguments["module_name"]?.ToString();
+            
+            var module = Utils.Utils.GetMyFirstModule(_model);
+            if (module == null)
+            {
+                var error = "No module found in ListMicroflows.";
+                _logger.LogError(error);
+                SetLastError(error);
+                return new { error };
+            }
+
+            if (!string.IsNullOrEmpty(moduleName) && module.Name != moduleName)
+            {
+                return new { error = $"Module '{moduleName}' not found" };
+            }
 
                 var microflows = module.GetDocuments()
                     .OfType<IMicroflow>()
@@ -268,28 +317,37 @@ namespace MCPExtension.Tools
             }
         }
 
-        public async Task<object> ReadMicroflowDetails(JsonObject arguments)
+    public async Task<object> ReadMicroflowDetails(JsonObject arguments)
+    {
+        try
         {
-            try
+            if (_model == null)
             {
-                var microflowName = arguments["microflow_name"]?.ToString();
-                
-                if (string.IsNullOrEmpty(microflowName))
-                {
-                    var error = "Microflow name is required";
-                    SetLastError(error);
-                    return new { error = error };
-                }
+                var error = "IModel instance is null in ReadMicroflowDetails.";
+                _logger.LogError(error);
+                SetLastError(error);
+                return new { error };
+            }
 
-                var module = Utils.Utils.GetMyFirstModule(_model);
-                if (module == null)
-                {
-                    var error = "No module found";
-                    SetLastError(error);
-                    return new { error = error };
-                }
+            var microflowName = arguments["microflow_name"]?.ToString();
+            
+            if (string.IsNullOrEmpty(microflowName))
+            {
+                var error = "Microflow name is required";
+                SetLastError(error);
+                return new { error = error };
+            }
 
-                // Find the microflow
+            var module = Utils.Utils.GetMyFirstModule(_model);
+            if (module == null)
+            {
+                var error = "No module found in ReadMicroflowDetails.";
+                _logger.LogError(error);
+                SetLastError(error);
+                return new { error };
+            }
+
+            // Find the microflow
                 var microflow = module.GetDocuments()
                     .OfType<IMicroflow>()
                     .FirstOrDefault(mf => mf.Name.Equals(microflowName, StringComparison.OrdinalIgnoreCase));
@@ -374,7 +432,8 @@ namespace MCPExtension.Tools
                     "get_last_error",
                     "list_available_tools",
                     "debug_info",
-                    "read_microflow_details"
+                    "read_microflow_details",
+                    "create_microflow"
                 };
 
                 return JsonSerializer.Serialize(new { available_tools = tools });
@@ -386,11 +445,26 @@ namespace MCPExtension.Tools
             }
         }
 
-        public async Task<object> DebugInfo(JsonObject arguments)
+    public async Task<object> DebugInfo(JsonObject arguments)
+    {
+        try
         {
-            try
+            if (_model == null)
             {
-                var module = Utils.Utils.GetMyFirstModule(_model);
+                var error = "IModel instance is null in DebugInfo.";
+                _logger.LogError(error);
+                SetLastError(error);
+                return JsonSerializer.Serialize(new { error });
+            }
+
+            var module = Utils.Utils.GetMyFirstModule(_model);
+            if (module == null)
+            {
+                var error = "No module found in DebugInfo.";
+                _logger.LogError(error);
+                SetLastError(error);
+                return JsonSerializer.Serialize(new { error });
+            }
                 var response = new Dictionary<string, object>();
 
                 if (module?.DomainModel != null)
@@ -540,6 +614,181 @@ namespace MCPExtension.Tools
                 SetLastError("Error retrieving debug info", ex);
                 return JsonSerializer.Serialize(new { error = ex.Message });
             }
+        }
+
+
+        // ...existing code...
+        public async Task<object> CreateMicroflow(JsonObject arguments)
+        {
+            // This method now just redirects to indicate that service injection is needed
+            var error = "CreateMicroflow requires service provider context. Use CreateMicroflowWithService instead.";
+            SetLastError(error);
+            _logger.LogError("[create_microflow] Method called without service context.");
+            return JsonSerializer.Serialize(new { error });
+        }
+
+        public async Task<object> CreateMicroflowWithService(JsonObject arguments, IMicroflowService microflowService, IServiceProvider serviceProvider)
+        {
+            try
+            {
+                var microflowName = arguments["name"]?.ToString();
+                if (string.IsNullOrWhiteSpace(microflowName))
+                {
+                    var error = "Microflow name is required.";
+                    SetLastError(error);
+                    _logger.LogError("[create_microflow] Microflow name is missing in arguments.");
+                    return JsonSerializer.Serialize(new { error });
+                }
+
+                var module = Utils.Utils.GetMyFirstModule(_model);
+                if (module == null)
+                {
+                    var error = "No module found.";
+                    SetLastError(error);
+                    _logger.LogError($"[create_microflow] No module found for model: {_model}");
+                    return JsonSerializer.Serialize(new { error });
+                }
+
+                // Check for duplicate
+                var existing = module.GetDocuments().OfType<IMicroflow>()
+                    .FirstOrDefault(mf => mf.Name.Equals(microflowName, StringComparison.OrdinalIgnoreCase));
+                if (existing != null)
+                {
+                    var error = $"Microflow '{microflowName}' already exists in module '{module.Name}'.";
+                    SetLastError(error);
+                    _logger.LogError($"[create_microflow] Microflow '{microflowName}' already exists in module '{module.Name}'.");
+                    return JsonSerializer.Serialize(new { error });
+                }
+
+                if (microflowService == null)
+                {
+                    var error = "IMicroflowService is not available in the current environment.";
+                    SetLastError(error);
+                    _logger.LogError("[create_microflow] IMicroflowService is null.");
+                    return JsonSerializer.Serialize(new { error });
+                }
+
+                // Prepare parameters
+                var parameters = arguments["parameters"]?.AsArray();
+                var paramList = new List<(string, Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType)>();
+                if (parameters != null)
+                {
+                    foreach (var param in parameters)
+                    {
+                        var paramObj = param?.AsObject();
+                        if (paramObj == null)
+                        {
+                            _logger.LogError("[create_microflow] Parameter object is null in parameters array.");
+                            continue;
+                        }
+                        var paramName = paramObj["name"]?.ToString();
+                        var paramTypeStr = paramObj["type"]?.ToString();
+                        if (string.IsNullOrWhiteSpace(paramName) || string.IsNullOrWhiteSpace(paramTypeStr))
+                        {
+                            _logger.LogError($"[create_microflow] Parameter missing name or type: {paramObj}");
+                            continue;
+                        }
+                        var dataType = Utils.Utils.DataTypeFromString(paramTypeStr);
+                        paramList.Add((paramName, dataType));
+                    }
+                }
+
+                // Prepare return value with proper expressions
+                var returnTypeStr = arguments["returnType"]?.ToString();
+                Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType returnType = Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.Void;
+                if (!string.IsNullOrWhiteSpace(returnTypeStr))
+                {
+                    returnType = Utils.Utils.DataTypeFromString(returnTypeStr);
+                }
+
+                Mendix.StudioPro.ExtensionsAPI.Model.Microflows.MicroflowReturnValue? returnValue = null;
+                
+                // For non-void return types, create proper return value with expression
+                if (returnType != Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.Void)
+                {
+                    try
+                    {
+                        var microflowExpressionService = serviceProvider.GetRequiredService<IMicroflowExpressionService>();
+                        var defaultExpression = GetDefaultExpressionForDataType(returnType);
+                        var expression = microflowExpressionService.CreateFromString(defaultExpression);
+                        returnValue = new Mendix.StudioPro.ExtensionsAPI.Model.Microflows.MicroflowReturnValue(returnType, expression);
+                        _logger.LogInformation($"[create_microflow] Created return value for {returnType} with expression: {defaultExpression}");
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, $"[create_microflow] Failed to create return value for {returnType}");
+                        var error = $"Failed to create return value for type {returnType}: {ex.Message}";
+                        SetLastError(error, ex);
+                        return JsonSerializer.Serialize(new { error });
+                    }
+                }
+
+                // Wrap model changes in a transaction
+                using (var transaction = _model.StartTransaction("Create microflow"))
+                {
+                    // Cast module to IFolderBase as required by the API
+                    var folderBase = (Mendix.StudioPro.ExtensionsAPI.Model.Projects.IFolderBase)module;
+                    
+                    // Add debug logging
+                    _logger.LogInformation($"[create_microflow] About to call CreateMicroflow with: model={_model != null}, folderBase={folderBase != null}, name={microflowName}, returnValue={returnValue != null}, paramCount={paramList.Count}");
+                    
+                    var microflow = microflowService.CreateMicroflow(_model, folderBase, microflowName, returnValue, paramList.ToArray());
+                    if (microflow == null)
+                    {
+                        var error = "Failed to create microflow.";
+                        SetLastError(error);
+                        _logger.LogError("[create_microflow] IMicroflowService.CreateMicroflow returned null.");
+                        return JsonSerializer.Serialize(new { error });
+                    }
+                    
+                    transaction.Commit();
+                    
+                    string qualifiedName = "";
+                    try
+                    {
+                        qualifiedName = microflow.QualifiedName != null ? (microflow.QualifiedName.FullName ?? "") : "";
+                    }
+                    catch (Exception qnEx)
+                    {
+                        _logger.LogError(qnEx, "[create_microflow] Exception accessing microflow.QualifiedName.FullName");
+                        qualifiedName = "";
+                    }
+                    
+                    return JsonSerializer.Serialize(new {
+                        success = true,
+                        message = $"Microflow '{microflowName}' created successfully in module '{module.Name}'.",
+                        microflow = new {
+                            name = microflow.Name,
+                            qualifiedName = qualifiedName,
+                            module = module.Name,
+                            returnType = returnType.ToString(),
+                            parameterCount = paramList.Count
+                        }
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                SetLastError($"Error in create_microflow: {ex.Message}", ex);
+                _logger.LogError(ex, "[create_microflow] Unhandled exception");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Gets default expression strings for different data types
+        /// </summary>
+        private string GetDefaultExpressionForDataType(Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType dataType)
+        {
+            return dataType switch
+            {
+                var dt when dt == Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.String => "''",
+                var dt when dt == Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.Integer => "0",
+                var dt when dt == Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.Decimal => "0.0",
+                var dt when dt == Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.Boolean => "false",
+                var dt when dt == Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.DateTime => "dateTime(1900)",
+                _ => "empty"
+            };
         }
 
         #region Helper Methods

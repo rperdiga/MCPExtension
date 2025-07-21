@@ -3475,11 +3475,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "C:\\Extensions\\MCPExtension\\MCPExtension.csproj",
+      "projectUniqueName": "C:\\NewExtension\\MCPExtension\\MCPExtension.csproj",
       "projectName": "MCPExtension",
-      "projectPath": "C:\\Extensions\\MCPExtension\\MCPExtension.csproj",
+      "projectPath": "C:\\NewExtension\\MCPExtension\\MCPExtension.csproj",
       "packagesPath": "C:\\Users\\ricardo.perdigao\\.nuget\\packages\\",
-      "outputPath": "C:\\Extensions\\MCPExtension\\obj\\",
+      "outputPath": "C:\\NewExtension\\MCPExtension\\obj\\",
       "projectStyle": "PackageReference",
       "configFilePaths": [
         "C:\\Users\\ricardo.perdigao\\AppData\\Roaming\\NuGet\\NuGet.Config"
