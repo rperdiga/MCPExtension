@@ -28,6 +28,7 @@ namespace MCPExtension
         private readonly INavigationManagerService _navigationManagerService;
         private readonly IMicroflowService _microflowService;
         private readonly IMicroflowExpressionService _microflowExpressionService;
+        private readonly IMicroflowActivitiesService _microflowActivitiesService;
 
         // Public property for the ViewModel to check server status
         public MendixMcpServer McpServer => _mcpServer;
@@ -40,12 +41,14 @@ namespace MCPExtension
             IPageGenerationService pageGenerationService,
             INavigationManagerService navigationManagerService,
             IMicroflowService microflowService,
-            IMicroflowExpressionService microflowExpressionService)
+            IMicroflowExpressionService microflowExpressionService,
+            IMicroflowActivitiesService microflowActivitiesService)
         {
             _pageGenerationService = pageGenerationService;
             _navigationManagerService = navigationManagerService;
             _microflowService = microflowService;
             _microflowExpressionService = microflowExpressionService;
+            _microflowActivitiesService = microflowActivitiesService;
             
             _jsonOptions = new JsonSerializerOptions
             {
@@ -99,6 +102,10 @@ namespace MCPExtension
             services.AddSingleton(_navigationManagerService);
             services.AddSingleton(_microflowService);
             services.AddSingleton(_microflowExpressionService);
+            services.AddSingleton(_microflowActivitiesService);
+            
+            // Note: IMicroflowActivitiesService may not be available through standard DI
+            // It might need to be accessed differently - this will be handled in the tool implementation
 
             // Register our tools
             services.AddSingleton<MendixDomainModelTools>();

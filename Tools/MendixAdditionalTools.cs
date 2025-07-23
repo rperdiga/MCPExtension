@@ -884,8 +884,78 @@ namespace MCPExtension.Tools
                             activity = CreateMicroflowCallActivity(activityData);
                             break;
 
+                        // Database Operations
+                        case "retrieve_from_database":
+                        case "retrieve_database":
+                        case "database_retrieve":
+                            activity = CreateDatabaseRetrieveActivity(activityData);
+                            break;
+
+                        case "retrieve_by_association":
+                        case "association_retrieve":
+                            activity = CreateAssociationRetrieveActivity(activityData);
+                            break;
+
+                        case "commit_object":
+                        case "commit":
+                            activity = CreateCommitActivity(activityData);
+                            break;
+
+                        case "rollback_object":
+                        case "rollback":
+                            activity = CreateRollbackActivity(activityData);
+                            break;
+
+                        case "delete_object":
+                        case "delete":
+                            activity = CreateDeleteActivity(activityData);
+                            break;
+
+                        // List Operations
+                        case "create_list":
+                        case "new_list":
+                            activity = CreateListActivity(activityData);
+                            break;
+
+                        case "change_list":
+                        case "modify_list":
+                            activity = CreateChangeListActivity(activityData);
+                            break;
+
+                        case "sort_list":
+                            activity = CreateSortListActivity(activityData);
+                            break;
+
+                        case "filter_list":
+                            activity = CreateFilterListActivity(activityData);
+                            break;
+
+                        case "find_in_list":
+                        case "find_list_item":
+                            activity = CreateFindInListActivity(activityData);
+                            break;
+
+                        // Advanced Operations
+                        case "aggregate_list":
+                        case "list_aggregate":
+                            activity = CreateAggregateListActivity(activityData);
+                            break;
+
+                        case "java_action_call":
+                        case "call_java_action":
+                            activity = CreateJavaActionCallActivity(activityData);
+                            break;
+
+                        case "change_attribute":
+                            activity = CreateChangeAttributeActivity(activityData);
+                            break;
+
+                        case "change_association":
+                            activity = CreateChangeAssociationActivity(activityData);
+                            break;
+
                         default:
-                            var error = $"Unsupported activity type: {activityType}. Currently supported types: change_variable, create_object, microflow_call. Note: log activities are not supported by the Extensions API.";
+                            var error = $"Unsupported activity type: {activityType}. Currently supported types: create_object, microflow_call, change_variable, retrieve_from_database, retrieve_by_association, commit_object, rollback_object, delete_object, create_list, change_list, sort_list, filter_list, find_in_list, aggregate_list, java_action_call, change_attribute, change_association. Note: log activities are not supported by the Extensions API.";
                             SetLastError(error);
                             return JsonSerializer.Serialize(new { error });
                     }
@@ -1284,6 +1354,365 @@ namespace MCPExtension.Tools
                 return (false, $"Error saving data to file: {ex.Message}", null);
             }
         }
+
+        #region Database Operations
+
+        /// <summary>
+        /// Creates a database retrieve activity with custom range support.
+        /// </summary>
+        /// <param name="activityData">Activity configuration data</param>
+        /// <returns>IActionActivity for database retrieval</returns>
+        private IActionActivity? CreateDatabaseRetrieveActivity(JsonObject activityData)
+        {
+            try
+            {
+                _logger.LogInformation("Starting CreateDatabaseRetrieveActivity");
+
+                // Enhanced parameter extraction with multiple naming conventions
+                string entityName = activityData["entityName"]?.ToString() ??
+                                   activityData["entity"]?.ToString() ??
+                                   activityData["Entity"]?.ToString() ?? "";
+
+                string? xpath = activityData["xpath"]?.ToString() ??
+                               activityData["xPath"]?.ToString() ??
+                               activityData["XPath"]?.ToString();
+
+                string outputVariable = activityData["outputVariable"]?.ToString() ??
+                                       activityData["output"]?.ToString() ??
+                                       activityData["output_variable"]?.ToString() ??
+                                       activityData["variableName"]?.ToString() ?? "RetrievedObjects";
+
+                string range = activityData["range"]?.ToString()?.ToLowerInvariant() ?? "all";
+                
+                // Only extract limit and offset if range is custom or if they are explicitly provided
+                int? limit = null;
+                int? offset = null;
+                
+                if (range == "custom" || activityData.ContainsKey("limit") || activityData.ContainsKey("offset"))
+                {
+                    limit = int.Parse(activityData["limit"]?.ToString() ?? "10");
+                    offset = int.Parse(activityData["offset"]?.ToString() ?? "0");
+                    range = "custom"; // Force to custom if limit/offset are provided
+                }
+                
+                _logger.LogInformation($"Parameters - entityName: '{entityName}', xpath: '{xpath}', outputVariable: '{outputVariable}', range: '{range}', limit: {limit?.ToString() ?? "N/A"}, offset: {offset?.ToString() ?? "N/A"}");
+
+                // Enhanced entity name validation
+                if (string.IsNullOrEmpty(entityName))
+                {
+                    // Get all available entities for diagnostics
+                    var allEntities = Utils.Utils.GetMyFirstModule(_model).DomainModel.GetEntities()
+                        .Select(e => e.Name).ToList();
+                    
+                    string availableEntities = allEntities.Any() ? 
+                        string.Join(", ", allEntities) : "No entities found";
+                    
+                    string error = $"Entity name is required for database retrieve activity. Available entities: {availableEntities}";
+                    _logger.LogError(error);
+                    SetLastError(error, new ArgumentException("Missing entity name"));
+                    return null;
+                }
+
+                // Find the entity in the domain model
+                var module = Utils.Utils.GetMyFirstModule(_model);
+                var entity = module.DomainModel.GetEntities()
+                    .FirstOrDefault(e => e.Name.Equals(entityName, StringComparison.OrdinalIgnoreCase));
+
+                if (entity == null)
+                {
+                    string error = $"Entity '{entityName}' not found in domain model";
+                    _logger.LogError(error);
+                    SetLastError(error, new ArgumentException($"Entity not found: {entityName}"));
+                    return null;
+                }
+
+                _logger.LogInformation($"Found entity '{entityName}' in domain model");
+
+                // Get required services
+                var microflowActivitiesService = _serviceProvider?.GetService<IMicroflowActivitiesService>();
+                var microflowExpressionService = _serviceProvider?.GetService<IMicroflowExpressionService>();
+                
+                if (microflowActivitiesService == null)
+                {
+                    string error = "IMicroflowActivitiesService not available in service provider";
+                    _logger.LogError(error);
+                    SetLastError(error, new InvalidOperationException("Required service not available"));
+                    return null;
+                }
+
+                if (microflowExpressionService == null)
+                {
+                    string error = "IMicroflowExpressionService not available in service provider";
+                    _logger.LogError(error);
+                    SetLastError(error, new InvalidOperationException("Required service not available"));
+                    return null;
+                }
+
+                IActionActivity retrieveActivity;
+                
+                // Handle different range types
+                if (range == "first" || range == "1" || range == "single")
+                {
+                    // Use the boolean overload for "first item only"
+                    retrieveActivity = microflowActivitiesService.CreateDatabaseRetrieveSourceActivity(
+                        _model,
+                        outputVariable,
+                        entity,
+                        xpath ?? "", // Empty string if no XPath constraint
+                        true, // retrieveJustFirstItem = true
+                        new Mendix.StudioPro.ExtensionsAPI.Model.Microflows.AttributeSorting[0] // No sorting for now
+                    );
+                    
+                    _logger.LogInformation($"Created database retrieve activity for first item only");
+                }
+                else if (range == "all")
+                {
+                    // Use the boolean overload for "all items"
+                    retrieveActivity = microflowActivitiesService.CreateDatabaseRetrieveSourceActivity(
+                        _model,
+                        outputVariable,
+                        entity,
+                        xpath ?? "", // Empty string if no XPath constraint
+                        false, // retrieveJustFirstItem = false (get all)
+                        new Mendix.StudioPro.ExtensionsAPI.Model.Microflows.AttributeSorting[0] // No sorting for now
+                    );
+                    
+                    _logger.LogInformation($"Created database retrieve activity for all items");
+                }
+                else
+                {
+                    // Only use custom range if limit/offset were actually provided
+                    if (limit.HasValue && offset.HasValue)
+                    {
+                        // Use custom range with limit and offset
+                        // Create expressions for offset and limit
+                        var offsetExpression = microflowExpressionService.CreateFromString(offset.Value.ToString());
+                        var limitExpression = microflowExpressionService.CreateFromString(limit.Value.ToString());
+                        
+                        // Create the range tuple for the overload that accepts (IMicroflowExpression startingIndex, IMicroflowExpression amount)
+                        var customRange = (offsetExpression, limitExpression);
+                        
+                        // Use the complex overload for custom range
+                        retrieveActivity = microflowActivitiesService.CreateDatabaseRetrieveSourceActivity(
+                            _model,
+                            outputVariable,
+                            entity,
+                            xpath ?? "", // Empty string if no XPath constraint
+                            customRange, // (startingIndex, amount) tuple
+                            new Mendix.StudioPro.ExtensionsAPI.Model.Microflows.AttributeSorting[0] // No sorting for now
+                        );
+                        
+                        _logger.LogInformation($"Created database retrieve activity with custom range (offset: {offset.Value}, limit: {limit.Value})");
+                    }
+                    else
+                    {
+                        // This shouldn't happen with the new logic, but fallback to "all"
+                        retrieveActivity = microflowActivitiesService.CreateDatabaseRetrieveSourceActivity(
+                            _model,
+                            outputVariable,
+                            entity,
+                            xpath ?? "", // Empty string if no XPath constraint
+                            false, // retrieveJustFirstItem = false (get all)
+                            new Mendix.StudioPro.ExtensionsAPI.Model.Microflows.AttributeSorting[0] // No sorting for now
+                        );
+                        
+                        _logger.LogInformation($"Created database retrieve activity for all items (fallback)");
+                    }
+                }
+
+                _logger.LogInformation($"Successfully created database retrieve activity for entity '{entityName}' with output variable '{outputVariable}'");
+                
+                return retrieveActivity;
+            }
+            catch (Exception ex)
+            {
+                string error = $"Error creating database retrieve activity: {ex.Message}";
+                _logger.LogError(ex, error);
+                SetLastError(error, ex);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Creates an association retrieve activity.
+        /// </summary>
+        /// <param name="activityData">Activity configuration data</param>
+        /// <returns>IActionActivity for association retrieval</returns>
+        private IActionActivity? CreateAssociationRetrieveActivity(JsonObject activityData)
+        {
+            try
+            {
+                var microflowActivitiesService = _serviceProvider?.GetService<IMicroflowActivitiesService>();
+                if (microflowActivitiesService == null)
+                {
+                    SetLastError("IMicroflowActivitiesService not available");
+                    return null;
+                }
+
+                string outputVariable = activityData["output_variable"]?.ToString() ?? 
+                                       activityData["outputVariable"]?.ToString() ?? 
+                                       activityData["variable_name"]?.ToString() ?? 
+                                       activityData["variableName"]?.ToString() ?? "AssociatedObjects";
+
+                string associationName = activityData["association"]?.ToString() ?? 
+                                        activityData["associationName"]?.ToString() ?? 
+                                        activityData["association_name"]?.ToString() ??
+                                        throw new ArgumentException("Association name is required");
+
+                string inputVariable = activityData["input_variable"]?.ToString() ?? 
+                                      activityData["inputVariable"]?.ToString() ?? 
+                                      throw new ArgumentException("Input variable is required");
+
+                var module = Utils.Utils.GetMyFirstModule(_model);
+                // TODO: Find the correct way to access associations from IDomainModel
+                // For now, return null until we find the proper API
+                SetLastError($"Association retrieve not yet implemented - association API access needs to be researched");
+                return null;
+                // TODO: Find the correct way to access associations from IDomainModel
+                // For now, return null until we find the proper API
+                SetLastError($"Association retrieve not yet implemented - association API access needs to be researched");
+                return null;
+
+                // var association = associations.FirstOrDefault(a => a.Name == associationName);
+                // if (association == null)
+                // {
+                //     SetLastError($"Association '{associationName}' not found in module");
+                //     return null;
+                // }
+
+                // return microflowActivitiesService.CreateAssociationRetrieveSourceActivity(
+                //     _model, association, inputVariable, outputVariable);
+            }
+            catch (Exception ex)
+            {
+                SetLastError($"Failed to create association retrieve activity: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Creates a commit object activity.
+        /// </summary>
+        /// <param name="activityData">Activity configuration data</param>
+        /// <returns>IActionActivity for committing objects</returns>
+        private IActionActivity? CreateCommitActivity(JsonObject activityData)
+        {
+            try
+            {
+                var microflowActivitiesService = _serviceProvider?.GetService<IMicroflowActivitiesService>();
+                if (microflowActivitiesService == null)
+                {
+                    SetLastError("IMicroflowActivitiesService not available");
+                    return null;
+                }
+
+                string variableName = activityData["variable_name"]?.ToString() ?? 
+                                     activityData["variableName"]?.ToString() ?? 
+                                     activityData["variable"]?.ToString() ??
+                                     activityData["objectVariable"]?.ToString() ??
+                                     activityData["object"]?.ToString() ??
+                                     throw new ArgumentException("Variable name is required for commit. Please specify one of: variable_name, variableName, variable, objectVariable, or object in the activity_config.");
+
+                bool refreshInClient = bool.Parse(activityData["refresh_in_client"]?.ToString() ?? 
+                                                 activityData["refreshInClient"]?.ToString() ?? "true");
+
+                bool withEvents = bool.Parse(activityData["with_events"]?.ToString() ?? 
+                                           activityData["withEvents"]?.ToString() ?? "true");
+
+                return microflowActivitiesService.CreateCommitObjectActivity(
+                    _model, variableName, refreshInClient, withEvents);
+            }
+            catch (Exception ex)
+            {
+                SetLastError($"Failed to create commit activity: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Creates a rollback object activity.
+        /// </summary>
+        /// <param name="activityData">Activity configuration data</param>
+        /// <returns>IActionActivity for rolling back objects</returns>
+        private IActionActivity? CreateRollbackActivity(JsonObject activityData)
+        {
+            try
+            {
+                var microflowActivitiesService = _serviceProvider?.GetService<IMicroflowActivitiesService>();
+                if (microflowActivitiesService == null)
+                {
+                    SetLastError("IMicroflowActivitiesService not available");
+                    return null;
+                }
+
+                string variableName = activityData["variable_name"]?.ToString() ?? 
+                                     activityData["variableName"]?.ToString() ?? 
+                                     activityData["variable"]?.ToString() ??
+                                     activityData["objectVariable"]?.ToString() ??
+                                     activityData["object"]?.ToString() ??
+                                     throw new ArgumentException("Variable name is required for rollback. Please specify one of: variable_name, variableName, variable, objectVariable, or object in the activity_config.");
+
+                bool refreshInClient = bool.Parse(activityData["refresh_in_client"]?.ToString() ?? 
+                                                 activityData["refreshInClient"]?.ToString() ?? "true");
+
+                return microflowActivitiesService.CreateRollbackObjectActivity(
+                    _model, variableName, refreshInClient);
+            }
+            catch (Exception ex)
+            {
+                SetLastError($"Failed to create rollback activity: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Creates a delete object activity.
+        /// </summary>
+        /// <param name="activityData">Activity configuration data</param>
+        /// <returns>IActionActivity for deleting objects</returns>
+        private IActionActivity? CreateDeleteActivity(JsonObject activityData)
+        {
+            try
+            {
+                var microflowActivitiesService = _serviceProvider?.GetService<IMicroflowActivitiesService>();
+                if (microflowActivitiesService == null)
+                {
+                    SetLastError("IMicroflowActivitiesService not available");
+                    return null;
+                }
+
+                string variableName = activityData["variable_name"]?.ToString() ?? 
+                                     activityData["variableName"]?.ToString() ?? 
+                                     activityData["variable"]?.ToString() ??
+                                     activityData["objectVariable"]?.ToString() ??
+                                     activityData["object"]?.ToString() ??
+                                     throw new ArgumentException("Variable name is required for delete. Please specify one of: variable_name, variableName, variable, objectVariable, or object in the activity_config.");
+
+                return microflowActivitiesService.CreateDeleteObjectActivity(_model, variableName);
+            }
+            catch (Exception ex)
+            {
+                SetLastError($"Failed to create delete activity: {ex.Message}");
+                return null;
+            }
+        }
+
+        #endregion
+
+        #region List Operations - Placeholder Methods
+
+        // TODO: Implement these methods using IMicroflowActivitiesService
+        private IActionActivity? CreateListActivity(JsonObject activityData) => null;
+        private IActionActivity? CreateChangeListActivity(JsonObject activityData) => null;
+        private IActionActivity? CreateSortListActivity(JsonObject activityData) => null;
+        private IActionActivity? CreateFilterListActivity(JsonObject activityData) => null;
+        private IActionActivity? CreateFindInListActivity(JsonObject activityData) => null;
+        private IActionActivity? CreateAggregateListActivity(JsonObject activityData) => null;
+        private IActionActivity? CreateJavaActionCallActivity(JsonObject activityData) => null;
+        private IActionActivity? CreateChangeAttributeActivity(JsonObject activityData) => null;
+        private IActionActivity? CreateChangeAssociationActivity(JsonObject activityData) => null;
+
+        #endregion
 
         #endregion
     }
