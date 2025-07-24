@@ -732,10 +732,14 @@ namespace MCPExtension.Tools
                 // Prepare return value with proper expressions
                 var returnTypeStr = arguments["returnType"]?.ToString();
                 Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType returnType = Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.Void;
+                
+                // Only set a non-void return type if explicitly specified and not empty/whitespace
                 if (!string.IsNullOrWhiteSpace(returnTypeStr))
                 {
                     returnType = Utils.Utils.DataTypeFromString(returnTypeStr);
                 }
+
+                _logger.LogInformation($"[create_microflow] Return type string: '{returnTypeStr ?? "null"}', resolved to: {returnType}");
 
                 Mendix.StudioPro.ExtensionsAPI.Model.Microflows.MicroflowReturnValue? returnValue = null;
                 
