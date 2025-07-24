@@ -450,10 +450,10 @@ namespace MCPExtension.MCP
                     inputSchema = schema
                 };
                 
-                // Special logging for create_microflow_activity
-                if (toolName == "create_microflow_activity")
+                // Special logging for create_microflow_activities
+                if (toolName == "create_microflow_activities")
                 {
-                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] === create_microflow_activity TOOL DEFINITION ===");
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] === create_microflow_activities TOOL DEFINITION ===");
                     LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Tool name: {toolName}");
                     LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Description: {description}");
                     LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Schema: {JsonSerializer.Serialize(schema)}");
@@ -486,10 +486,10 @@ namespace MCPExtension.MCP
                 var toolName = paramsObj["name"]?.ToString();
                 var arguments = paramsObj["arguments"]?.AsObject();
 
-                // Enhanced logging for create_microflow_activity debugging
-                if (toolName == "create_microflow_activity")
+                // Enhanced logging for create_microflow_activities debugging
+                if (toolName == "create_microflow_activities")
                 {
-                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] === DEBUGGING create_microflow_activity ===");
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] === DEBUGGING create_microflow_activities ===");
                     LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Full paramsObj: {JsonSerializer.Serialize(paramsObj)}");
                     LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Extracted toolName: '{toolName}'");
                     LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Raw arguments object: {arguments}");
@@ -575,8 +575,7 @@ namespace MCPExtension.MCP
                 "debug_info" => "Get comprehensive debug information about the domain model",
                 "read_microflow_details" => "Get details about a specific microflow including activities with their positions",
                 "create_microflow" => "Create a new microflow in the module with parameters and return type",
-                "create_microflow_activity" => "Create a new microflow activity within an existing microflow. Use insert_position parameter to specify where to place the activity (1-based: 1=first position, 2=second position, etc.). If insert_position is omitted, activity is added after the start event.",
-                "create_microflow_activities_sequence" => "Create multiple microflow activities in sequence within an existing microflow. Activities are inserted in the correct order automatically, solving positioning issues with individual activity insertion.",
+                "create_microflow_activities" => "Create one or more microflow activities in sequence within an existing microflow. Activities are inserted in the correct order automatically. For single activities, use an array with one item. This unified approach replaces individual activity creation for better reliability.",
                 _ => "Tool description not available"
             };
         }
@@ -867,32 +866,7 @@ namespace MCPExtension.MCP
                     },
                     required = new[] { "name" }
                 },
-                "create_microflow_activity" => new
-                {
-                    type = "object",
-                    properties = new
-                    {
-                        microflow_name = new { type = "string", description = "Name of the microflow to add activity to" },
-                        activity_type = new { type = "string", description = "Type of activity to create (e.g., 'action_call', 'log', 'retrieve', 'change')" },
-                        activity_config = new { 
-                            type = "object", 
-                            description = "Configuration object for the activity",
-                            additionalProperties = true
-                        },
-                        insert_position = new { 
-                            type = "integer", 
-                            description = "Position where the activity should be inserted (1-based). Use 1 to insert before first activity, 2 to insert before second activity, etc. RECOMMENDED: Always specify this parameter to control activity placement. If omitted, activity is inserted after start event.",
-                            minimum = 1
-                        },
-                        insert_after_activity_index = new { 
-                            type = "integer", 
-                            description = "Legacy parameter: 0-based index of the activity to insert after. Use insert_position instead.",
-                            minimum = 0
-                        }
-                    },
-                    required = new[] { "microflow_name", "activity_type" }
-                },
-                "create_microflow_activities_sequence" => new
+                "create_microflow_activities" => new
                 {
                     type = "object",
                     properties = new
@@ -901,7 +875,7 @@ namespace MCPExtension.MCP
                         activities = new 
                         { 
                             type = "array", 
-                            description = "Array of activity definitions to create in sequence",
+                            description = "Array of activity definitions to create in sequence. For single activities, use an array with one item.",
                             items = new
                             {
                                 type = "object",
