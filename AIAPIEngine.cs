@@ -18,12 +18,12 @@ namespace MCPExtension
     {
         public const string ID = "AIAPIEngine";
         public override string Id => ID;
-        private MendixMcpServer _mcpServer;
-        private IServiceProvider _serviceProvider;
-        private ILogger<AIAPIEngine> _logger;
+        private MendixMcpServer? _mcpServer;
+        private IServiceProvider? _serviceProvider;
+        private ILogger<AIAPIEngine>? _logger;
         private readonly JsonSerializerOptions _jsonOptions;
         private readonly int _mcpPort;
-        private AIAPIEngineViewModel _currentViewModel;
+        private AIAPIEngineViewModel? _currentViewModel;
         private readonly IPageGenerationService _pageGenerationService;
         private readonly INavigationManagerService _navigationManagerService;
         private readonly IMicroflowService _microflowService;

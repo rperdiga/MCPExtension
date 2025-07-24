@@ -16,15 +16,15 @@ namespace MCPExtension
     {
         private readonly IServiceProvider _serviceProvider;
         private readonly ILogger<MendixMcpServer> _logger;
-        private McpServer _mcpServer;
-        private CancellationTokenSource _cancellationTokenSource;
-        private Task _serverTask;
+        private McpServer? _mcpServer;
+        private CancellationTokenSource? _cancellationTokenSource;
+        private Task? _serverTask;
         private readonly int _port;
         private bool _isRunning;
 
-        private readonly string _projectDirectory;
+        private readonly string? _projectDirectory;
 
-        public MendixMcpServer(IServiceProvider serviceProvider, ILogger<MendixMcpServer> logger, int port = 3001, string projectDirectory = null)
+        public MendixMcpServer(IServiceProvider serviceProvider, ILogger<MendixMcpServer> logger, int port = 3001, string? projectDirectory = null)
         {
             _serviceProvider = serviceProvider;
             _logger = logger;
@@ -176,6 +176,16 @@ namespace MCPExtension
                 return (object)result;
             });
 
+            // Register create_microflow_activities_sequence tool
+            _mcpServer.RegisterTool("create_microflow_activities_sequence", async (JsonObject parameters) => 
+            {
+                _logger.LogInformation("=== MCP Tool create_microflow_activities_sequence Called ===");
+                _logger.LogInformation($"Parameters received in MCP server: {parameters?.ToJsonString()}");
+                var result = await additionalTools.CreateMicroflowActivitiesSequence(parameters);
+                _logger.LogInformation($"Result from CreateMicroflowActivitiesSequence: {result}");
+                return (object)result;
+            });
+
             _logger.LogInformation("MCP tools registered successfully");
         }
 
@@ -215,7 +225,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 17, // Updated number of registered tools (added create_microflow_activity)
+                registeredTools = 18, // Updated number of registered tools (added create_microflow_activity + create_microflow_activities_sequence)
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",

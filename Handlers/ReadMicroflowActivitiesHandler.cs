@@ -105,12 +105,17 @@ namespace MCPExtension.Handlers
 
                 var activitiesList = new List<Dictionary<string, object>>();
                 
-                foreach (var actionActivity in actionActivities)
+                // Add position information to each activity
+                for (int i = 0; i < actionActivities.Count; i++)
                 {
+                    var actionActivity = actionActivities[i];
+                    
                     // Check if the activity is of a known type
                     var activityType = actionActivity.GetType();
                     var activityInfo = new Dictionary<string, object>
                     {
+                        ["Position"] = i + 1, // 1-based position for consistency with insert_position
+                        ["Index"] = i, // 0-based index for legacy compatibility
                         ["ActivityId"] = actionActivity.GetHashCode(),
                         ["ActivityType"] = activityType.Name,
                         ["ActivityFullType"] = activityType.FullName

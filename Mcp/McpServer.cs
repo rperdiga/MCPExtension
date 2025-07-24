@@ -21,12 +21,12 @@ namespace MCPExtension.MCP
         private readonly ILogger<McpServer> _logger;
         private readonly Dictionary<string, Func<JsonObject, Task<object>>> _tools;
         private bool _isRunning;
-        private IWebHost _webHost;
+        private IWebHost? _webHost;
         private int _port;
 
-        private readonly string _projectDirectory;
+        private readonly string? _projectDirectory;
 
-        public McpServer(ILogger<McpServer> logger, int port = 3001, string projectDirectory = null)
+        public McpServer(ILogger<McpServer> logger, int port = 3001, string? projectDirectory = null)
         {
             _logger = logger;
             _tools = new Dictionary<string, Func<JsonObject, Task<object>>>();
@@ -573,9 +573,10 @@ namespace MCPExtension.MCP
                 "get_last_error" => "Get details about the last error",
                 "list_available_tools" => "List all available tools",
                 "debug_info" => "Get comprehensive debug information about the domain model",
-                "read_microflow_details" => "Get details about a specific microflow",
+                "read_microflow_details" => "Get details about a specific microflow including activities with their positions",
                 "create_microflow" => "Create a new microflow in the module with parameters and return type",
-                "create_microflow_activity" => "Create a new microflow activity within an existing microflow",
+                "create_microflow_activity" => "Create a new microflow activity within an existing microflow. Use insert_position parameter to specify where to place the activity (1-based: 1=first position, 2=second position, etc.). If insert_position is omitted, activity is added after the start event.",
+                "create_microflow_activities_sequence" => "Create multiple microflow activities in sequence within an existing microflow. Activities are inserted in the correct order automatically, solving positioning issues with individual activity insertion.",
                 _ => "Tool description not available"
             };
         }
@@ -877,9 +878,47 @@ namespace MCPExtension.MCP
                             type = "object", 
                             description = "Configuration object for the activity",
                             additionalProperties = true
+                        },
+                        insert_position = new { 
+                            type = "integer", 
+                            description = "Position where the activity should be inserted (1-based). Use 1 to insert before first activity, 2 to insert before second activity, etc. RECOMMENDED: Always specify this parameter to control activity placement. If omitted, activity is inserted after start event.",
+                            minimum = 1
+                        },
+                        insert_after_activity_index = new { 
+                            type = "integer", 
+                            description = "Legacy parameter: 0-based index of the activity to insert after. Use insert_position instead.",
+                            minimum = 0
                         }
                     },
                     required = new[] { "microflow_name", "activity_type" }
+                },
+                "create_microflow_activities_sequence" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        microflow_name = new { type = "string", description = "Name of the microflow to add activities to" },
+                        activities = new 
+                        { 
+                            type = "array", 
+                            description = "Array of activity definitions to create in sequence",
+                            items = new
+                            {
+                                type = "object",
+                                properties = new
+                                {
+                                    activity_type = new { type = "string", description = "Type of activity to create (e.g., 'create_object', 'commit', 'retrieve_from_database')" },
+                                    activity_config = new { 
+                                        type = "object", 
+                                        description = "Configuration object for the activity",
+                                        additionalProperties = true
+                                    }
+                                },
+                                required = new[] { "activity_type" }
+                            }
+                        }
+                    },
+                    required = new[] { "microflow_name", "activities" }
                 },
                 _ => new
                 {

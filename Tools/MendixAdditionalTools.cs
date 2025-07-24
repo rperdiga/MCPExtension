@@ -362,6 +362,33 @@ namespace MCPExtension.Tools
                     return JsonSerializer.Serialize(new { error = error });
                 }
 
+                // Get microflow service to analyze activities
+                var microflowService = _serviceProvider?.GetService<IMicroflowService>();
+                var activitiesInfo = new List<object>();
+                
+                if (microflowService != null)
+                {
+                    try
+                    {
+                        var activities = microflowService.GetAllMicroflowActivities(microflow);
+                        for (int i = 0; i < activities.Count; i++)
+                        {
+                            var activity = activities[i];
+                            activitiesInfo.Add(new
+                            {
+                                position = i + 1, // 1-based position
+                                index = i, // 0-based index
+                                type = activity.GetType().Name,
+                                activityId = activity.GetHashCode()
+                            });
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Could not retrieve activity details for microflow analysis");
+                    }
+                }
+
                 // Extract basic microflow information
                 var microflowInfo = new
                 {
@@ -370,8 +397,12 @@ namespace MCPExtension.Tools
                     module = module.Name,
                     returnType = microflow.ReturnType?.GetType().Name ?? "Void",
                     returnTypeFullName = microflow.ReturnType?.GetType().FullName ?? "Void",
+                    activityCount = activitiesInfo.Count,
+                    activities = activitiesInfo,
                     // Note: Advanced activity analysis requires IMicroflowService which is not available
-                    limitations = "Detailed activity analysis requires additional Mendix services not currently available in this MCP implementation"
+                    limitations = activitiesInfo.Any() 
+                        ? "Basic activity information available. Use read_microflow_activities API for detailed analysis."
+                        : "Detailed activity analysis requires additional Mendix services not currently available in this MCP implementation"
                 };
 
                 return JsonSerializer.Serialize(new 
@@ -437,7 +468,8 @@ namespace MCPExtension.Tools
                     "debug_info",
                     "read_microflow_details",
                     "create_microflow",
-                    "create_microflow_activity"
+                    "create_microflow_activity",
+                    "create_microflow_activities_sequence"
                 };
 
                 return JsonSerializer.Serialize(new { available_tools = tools });
@@ -817,10 +849,30 @@ namespace MCPExtension.Tools
                 var microflowName = arguments["microflow_name"]?.ToString();
                 var activityType = arguments["activity_type"]?.ToString();
                 var activityData = arguments["activity_config"]?.AsObject();
+                
+                // Parse positioning parameters
+                int? insertPosition = null;
+                if (arguments.TryGetPropertyValue("insert_position", out var positionValue))
+                {
+                    if (positionValue != null && int.TryParse(positionValue.ToString(), out int pos))
+                    {
+                        insertPosition = pos;
+                    }
+                }
+                
+                // Alternative parameter name for backward compatibility
+                if (!insertPosition.HasValue && arguments.TryGetPropertyValue("insert_after_activity_index", out var indexValue))
+                {
+                    if (indexValue != null && int.TryParse(indexValue.ToString(), out int idx))
+                    {
+                        insertPosition = idx + 1; // Convert from "after index" to position
+                    }
+                }
 
                 _logger.LogInformation($"Extracted microflowName: '{microflowName}'");
                 _logger.LogInformation($"Extracted activityType: '{activityType}'");
                 _logger.LogInformation($"Extracted activityData: {activityData?.ToJsonString()}");
+                _logger.LogInformation($"Extracted insertPosition: {insertPosition?.ToString() ?? "null (insert at start)"}");
 
                 if (string.IsNullOrWhiteSpace(microflowName))
                 {
@@ -988,8 +1040,93 @@ namespace MCPExtension.Tools
                             return JsonSerializer.Serialize(new { error });
                         }
 
-                        // Try to insert the activity
-                        var insertResult = microflowService.TryInsertAfterStart(microflow, activity);
+                        bool insertResult = false;
+                        string insertMessage = "";
+
+                        // Handle activity positioning
+                        if (insertPosition.HasValue && insertPosition.Value > 1)
+                        {
+                            // Try to find existing activities to understand the current state
+                            var orderedActivities = GetOrderedMicroflowActivities(microflow, microflowService);
+                            
+                            _logger.LogDebug($"Attempting to insert at position {insertPosition.Value}, found {orderedActivities.Count} existing activities");
+                            
+                            // Check if we have any existing activities to work with
+                            if (orderedActivities.Count > 0)
+                            {
+                                // Position semantics:
+                                // Position 1 = after start (before 1st activity)
+                                // Position 2 = after 1st activity (before 2nd activity, or at end if only 1 activity exists)
+                                // Position 3 = after 2nd activity (before 3rd activity, or at end if only 2 activities exist)
+                                // etc.
+                                
+                                int targetActivityIndex = insertPosition.Value - 2; // Position 2 targets activity at index 0
+                                
+                                if (targetActivityIndex >= 0 && targetActivityIndex < orderedActivities.Count - 1)
+                                {
+                                    // We want to insert before a specific existing activity (not the last one)
+                                    int insertBeforeIndex = targetActivityIndex + 1; // Insert before the next activity
+                                    var targetActivity = orderedActivities[insertBeforeIndex];
+                                    
+                                    _logger.LogDebug($"Attempting to insert before activity at index {insertBeforeIndex}: {targetActivity.GetType().Name}");
+                                    
+                                    insertResult = microflowService.TryInsertBeforeActivity(targetActivity, activity);
+                                    
+                                    if (insertResult)
+                                    {
+                                        insertMessage = $"Activity inserted at position {insertPosition.Value} (before activity at index {insertBeforeIndex})";
+                                        _logger.LogDebug($"Successfully inserted before activity: {targetActivity.GetType().Name}");
+                                    }
+                                    else
+                                    {
+                                        // Fallback: Insert after start
+                                        _logger.LogWarning($"TryInsertBeforeActivity failed, falling back to inserting after start");
+                                        insertResult = microflowService.TryInsertAfterStart(microflow, activity);
+                                        insertMessage = insertResult 
+                                            ? $"Activity inserted after start (fallback from position {insertPosition.Value})"
+                                            : "Failed to insert activity at specified position";
+                                    }
+                                }
+                                else
+                                {
+                                    // Position points to after the last activity, or beyond existing activities
+                                    // API Limitation: We cannot insert "after" an activity, only "before" an activity or "after start"
+                                    // The best we can do is insert after start, which will put it at the beginning
+                                    
+                                    _logger.LogWarning($"Position {insertPosition.Value} would place activity after the last existing activity. " +
+                                                      $"API limitation: Cannot insert after activities, only before them or after start. " +
+                                                      $"Inserting after start instead (will appear at beginning of microflow).");
+                                    
+                                    insertResult = microflowService.TryInsertAfterStart(microflow, activity);
+                                    insertMessage = insertResult 
+                                        ? $"Activity inserted after start (API limitation: position {insertPosition.Value} would be after last activity, which is not supported)"
+                                        : "Failed to insert activity";
+                                    
+                                    // Add additional context to help user understand the limitation
+                                    if (insertResult)
+                                    {
+                                        insertMessage += $". Note: The Mendix Extensions API only supports inserting activities 'after start' or 'before existing activities'. " +
+                                                        $"To achieve the desired position, you may need to manually rearrange activities in Studio Pro after creation.";
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                // No existing activities, position > 1 doesn't make sense
+                                _logger.LogInformation($"No existing activities found, inserting at start regardless of requested position {insertPosition.Value}");
+                                insertResult = microflowService.TryInsertAfterStart(microflow, activity);
+                                insertMessage = $"Activity inserted after start (first activity in microflow)";
+                            }
+                        }
+                        else
+                        {
+                            // Position 1 or default: insert after start
+                            insertResult = microflowService.TryInsertAfterStart(microflow, activity);
+                            insertMessage = insertPosition.HasValue && insertPosition.Value == 1 
+                                ? "Activity inserted at position 1 (after start)"
+                                : "Activity inserted after start (default position)";
+                        }
+
                         if (!insertResult)
                         {
                             var error = "Failed to insert activity into microflow.";
@@ -1001,11 +1138,13 @@ namespace MCPExtension.Tools
 
                         return JsonSerializer.Serialize(new {
                             success = true,
-                            message = $"Activity of type '{activityType}' added to microflow '{microflowName}' successfully.",
+                            message = $"Activity of type '{activityType}' added to microflow '{microflowName}' successfully. {insertMessage}",
                             activity = new {
                                 type = activityType,
                                 microflow = microflowName,
-                                module = module.Name
+                                module = module.Name,
+                                insertPosition = insertPosition,
+                                insertMethod = insertPosition.HasValue && insertPosition.Value > 0 ? "TryInsertBeforeActivity" : "TryInsertAfterStart"
                             }
                         });
                     }
@@ -1711,6 +1850,307 @@ namespace MCPExtension.Tools
         private IActionActivity? CreateJavaActionCallActivity(JsonObject activityData) => null;
         private IActionActivity? CreateChangeAttributeActivity(JsonObject activityData) => null;
         private IActionActivity? CreateChangeAssociationActivity(JsonObject activityData) => null;
+
+        #endregion
+
+        #region Sequential Activity Creation
+
+        public async Task<object> CreateMicroflowActivitiesSequence(JsonObject arguments)
+        {
+            try
+            {
+                _logger.LogInformation("=== CreateMicroflowActivitiesSequence Debug ===");
+                _logger.LogInformation($"Raw arguments received: {arguments?.ToJsonString()}");
+
+                var microflowName = arguments["microflow_name"]?.ToString();
+                var activitiesArray = arguments["activities"]?.AsArray();
+
+                _logger.LogInformation($"Extracted microflowName: '{microflowName}'");
+                _logger.LogInformation($"Extracted activities count: {activitiesArray?.Count ?? 0}");
+
+                if (string.IsNullOrWhiteSpace(microflowName))
+                {
+                    var error = "Microflow name is required.";
+                    _logger.LogError($"ERROR: {error}");
+                    SetLastError(error);
+                    return JsonSerializer.Serialize(new { error });
+                }
+
+                if (activitiesArray == null || activitiesArray.Count == 0)
+                {
+                    var error = "Activities array is required and must contain at least one activity.";
+                    _logger.LogError($"ERROR: {error}");
+                    SetLastError(error);
+                    return JsonSerializer.Serialize(new { error });
+                }
+
+                var module = Utils.Utils.GetMyFirstModule(_model);
+                if (module == null)
+                {
+                    var error = "No module found.";
+                    SetLastError(error);
+                    return JsonSerializer.Serialize(new { error });
+                }
+
+                // Find the microflow
+                var microflow = module.GetDocuments().OfType<IMicroflow>()
+                    .FirstOrDefault(mf => mf.Name.Equals(microflowName, StringComparison.OrdinalIgnoreCase));
+
+                if (microflow == null)
+                {
+                    var error = $"Microflow '{microflowName}' not found in module '{module.Name}'.";
+                    SetLastError(error);
+                    return JsonSerializer.Serialize(new { error });
+                }
+
+                // Get the microflow service
+                var microflowService = _serviceProvider?.GetService<IMicroflowService>();
+                if (microflowService == null)
+                {
+                    var error = "IMicroflowService not available.";
+                    SetLastError(error);
+                    return JsonSerializer.Serialize(new { error });
+                }
+
+                // Create all activities first
+                var createdActivities = new List<IActionActivity>();
+                var activityResults = new List<object>();
+
+                using (var transaction = _model.StartTransaction("Create microflow activities sequence"))
+                {
+                    try
+                    {
+                        // Process each activity definition
+                        for (int i = 0; i < activitiesArray.Count; i++)
+                        {
+                            var activityDef = activitiesArray[i]?.AsObject();
+                            if (activityDef == null)
+                            {
+                                _logger.LogWarning($"Skipping null activity at index {i}");
+                                continue;
+                            }
+
+                            var activityType = activityDef["activity_type"]?.ToString();
+                            var activityConfig = activityDef["activity_config"]?.AsObject();
+
+                            _logger.LogInformation($"Processing activity {i + 1}: type='{activityType}'");
+
+                            if (string.IsNullOrWhiteSpace(activityType))
+                            {
+                                _logger.LogWarning($"Skipping activity at index {i} - no activity type specified");
+                                continue;
+                            }
+
+                            // Create the activity (reuse existing logic)
+                            IActionActivity? activity = CreateActivityByType(activityType, activityConfig);
+
+                            if (activity != null)
+                            {
+                                createdActivities.Add(activity);
+                                activityResults.Add(new
+                                {
+                                    index = i + 1,
+                                    type = activityType,
+                                    status = "created"
+                                });
+                                _logger.LogInformation($"Successfully created activity {i + 1} of type '{activityType}'");
+                            }
+                            else
+                            {
+                                var errorMsg = $"Failed to create activity {i + 1} of type '{activityType}'";
+                                _logger.LogError(errorMsg);
+                                activityResults.Add(new
+                                {
+                                    index = i + 1,
+                                    type = activityType,
+                                    status = "failed",
+                                    error = errorMsg
+                                });
+                            }
+                        }
+
+                        if (createdActivities.Count == 0)
+                        {
+                            var error = "No activities were successfully created.";
+                            SetLastError(error);
+                            return JsonSerializer.Serialize(new { error, activityResults });
+                        }
+
+                        // Insert activities in reverse order (like TeamcenterExtension does)
+                        // This ensures they appear in the correct sequence in the microflow
+                        _logger.LogInformation($"Inserting {createdActivities.Count} activities in reverse order");
+                        
+                        var reversedActivities = new List<IActionActivity>(createdActivities);
+                        reversedActivities.Reverse();
+
+                        foreach (var activity in reversedActivities)
+                        {
+                            var insertResult = microflowService.TryInsertAfterStart(microflow, activity);
+                            if (!insertResult)
+                            {
+                                var error = $"Failed to insert activity of type {activity.GetType().Name} into microflow.";
+                                _logger.LogError(error);
+                                SetLastError(error);
+                                return JsonSerializer.Serialize(new { error, activityResults });
+                            }
+                        }
+
+                        transaction.Commit();
+
+                        return JsonSerializer.Serialize(new
+                        {
+                            success = true,
+                            message = $"Successfully created and inserted {createdActivities.Count} activities in sequence to microflow '{microflowName}'",
+                            microflow = microflowName,
+                            module = module.Name,
+                            activitiesCreated = createdActivities.Count,
+                            activities = activityResults
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, $"Error during sequential activity creation: {ex.Message}");
+                        var error = $"Error during sequential activity creation: {ex.Message}";
+                        SetLastError(error, ex);
+                        return JsonSerializer.Serialize(new { error, activityResults });
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                SetLastError($"Error creating microflow activities sequence: {ex.Message}", ex);
+                _logger.LogError(ex, "Error in CreateMicroflowActivitiesSequence");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        private IActionActivity? CreateActivityByType(string activityType, JsonObject? activityConfig)
+        {
+            switch (activityType.ToLowerInvariant())
+            {
+                case "log":
+                case "log_message":
+                    return CreateLogActivity(activityConfig);
+
+                case "change_variable":
+                case "change_value":
+                    return CreateChangeVariableActivity(activityConfig);
+
+                case "create_variable":
+                case "create_object":
+                case "create":
+                    return CreateCreateVariableActivity(activityConfig);
+
+                case "microflow_call":
+                case "call_microflow":
+                    return CreateMicroflowCallActivity(activityConfig);
+
+                // Database Operations
+                case "retrieve_from_database":
+                case "retrieve_database":
+                case "database_retrieve":
+                    return CreateDatabaseRetrieveActivity(activityConfig);
+
+                case "retrieve_by_association":
+                case "association_retrieve":
+                    return CreateAssociationRetrieveActivity(activityConfig);
+
+                case "commit_object":
+                case "commit":
+                    return CreateCommitActivity(activityConfig);
+
+                case "rollback_object":
+                case "rollback":
+                    return CreateRollbackActivity(activityConfig);
+
+                case "delete_object":
+                case "delete":
+                    return CreateDeleteActivity(activityConfig);
+
+                // List Operations
+                case "create_list":
+                case "new_list":
+                    return CreateListActivity(activityConfig);
+
+                case "change_list":
+                case "modify_list":
+                    return CreateChangeListActivity(activityConfig);
+
+                case "sort_list":
+                    return CreateSortListActivity(activityConfig);
+
+                case "filter_list":
+                    return CreateFilterListActivity(activityConfig);
+
+                case "find_in_list":
+                case "find_list_item":
+                    return CreateFindInListActivity(activityConfig);
+
+                // Advanced Operations
+                case "aggregate_list":
+                case "list_aggregate":
+                    return CreateAggregateListActivity(activityConfig);
+
+                case "java_action_call":
+                case "call_java_action":
+                    return CreateJavaActionCallActivity(activityConfig);
+
+                case "change_attribute":
+                    return CreateChangeAttributeActivity(activityConfig);
+
+                case "change_association":
+                    return CreateChangeAssociationActivity(activityConfig);
+
+                default:
+                    _logger.LogError($"Unsupported activity type: {activityType}");
+                    return null;
+            }
+        }
+
+        #endregion
+
+        #region Helper Methods
+
+        /// <summary>
+        /// Gets microflow activities in their actual execution order by traversing the flow from start event.
+        /// This is a simplified approach that works for linear microflows.
+        /// </summary>
+        /// <param name="microflow">The microflow to analyze</param>
+        /// <param name="microflowService">The microflow service</param>
+        /// <returns>List of activities in execution order</returns>
+        private List<IActivity> GetOrderedMicroflowActivities(IMicroflow microflow, IMicroflowService microflowService)
+        {
+            try
+            {
+                // Get all activities from the microflow
+                var allActivities = microflowService.GetAllMicroflowActivities(microflow);
+                
+                _logger.LogDebug($"Found {allActivities.Count()} total activities in microflow '{microflow.Name}'");
+                
+                // Filter out start and end events, only get action activities
+                var actionActivities = allActivities
+                    .Where(activity => 
+                    {
+                        var typeName = activity.GetType().Name;
+                        var isStartOrEnd = typeName.Contains("Start") || typeName.Contains("End");
+                        _logger.LogDebug($"Activity type: {typeName}, IsStartOrEnd: {isStartOrEnd}");
+                        return !isStartOrEnd;
+                    })
+                    .ToList();
+
+                _logger.LogDebug($"Filtered to {actionActivities.Count} action activities for microflow '{microflow.Name}'");
+                
+                // For now, return activities in the order they were retrieved
+                // A more sophisticated implementation could traverse sequence flows to get true order
+                return actionActivities;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error getting ordered activities for microflow '{microflow.Name}'");
+                // Fallback: return empty list to be safe
+                return new List<IActivity>();
+            }
+        }
 
         #endregion
 
