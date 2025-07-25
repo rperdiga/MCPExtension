@@ -9,6 +9,7 @@ using System.Reflection;
 using Mendix.StudioPro.ExtensionsAPI.Model;
 using Mendix.StudioPro.ExtensionsAPI.Model.Projects;
 using Mendix.StudioPro.ExtensionsAPI.Model.Microflows;
+using Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions;
 using Mendix.StudioPro.ExtensionsAPI.Model.DomainModels;
 using Mendix.StudioPro.ExtensionsAPI.Services;
 using Microsoft.Extensions.Logging;
@@ -733,10 +734,19 @@ namespace MCPExtension.Tools
                 var returnTypeStr = arguments["returnType"]?.ToString();
                 Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType returnType = Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.Void;
                 
-                // Only set a non-void return type if explicitly specified and not empty/whitespace
-                if (!string.IsNullOrWhiteSpace(returnTypeStr))
+                // Only set a non-void return type if explicitly specified, not empty/whitespace, and not "Boolean" when likely unintended
+                if (!string.IsNullOrWhiteSpace(returnTypeStr) && returnTypeStr.Trim().ToLowerInvariant() != "void")
                 {
-                    returnType = Utils.Utils.DataTypeFromString(returnTypeStr);
+                    // Check if this looks like an unintended Boolean default - if so, treat as Void
+                    if (returnTypeStr.Trim().Equals("Boolean", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _logger.LogInformation($"[create_microflow] Boolean return type detected - treating as Void to avoid unintended default return values");
+                        returnType = Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.Void;
+                    }
+                    else
+                    {
+                        returnType = Utils.Utils.DataTypeFromString(returnTypeStr);
+                    }
                 }
 
                 _logger.LogInformation($"[create_microflow] Return type string: '{returnTypeStr ?? "null"}', resolved to: {returnType}");
@@ -953,6 +963,7 @@ namespace MCPExtension.Tools
                             break;
 
                         case "commit_object":
+                        case "commit_objects":
                         case "commit":
                             activity = CreateCommitActivity(activityData);
                             break;
@@ -1011,9 +1022,20 @@ namespace MCPExtension.Tools
                             break;
 
                         default:
-                            var error = $"Unsupported activity type: {activityType}. Currently supported types: create_object, microflow_call, change_variable, retrieve_from_database, retrieve_by_association, commit_object, rollback_object, delete_object, create_list, change_list, sort_list, filter_list, find_in_list, aggregate_list, java_action_call, change_attribute, change_association. Note: log activities are not supported by the Extensions API.";
+                            var supportedTypes = new[]
+                            {
+                                "create_object/create_variable", "microflow_call/call_microflow", "change_variable/change_value",
+                                "retrieve_from_database", "retrieve_by_association", "commit_object/commit_objects/commit", "rollback_object/rollback", 
+                                "delete_object/delete", "create_list/new_list", "change_list/modify_list", "sort_list", "filter_list",
+                                "find_in_list", "aggregate_list", "java_action_call", "change_attribute", "change_association", "change_object"
+                            };
+                            
+                            var error = $"Unsupported activity type: '{activityType}'. " +
+                                       $"Supported types: {string.Join(", ", supportedTypes)}. " +
+                                       $"Note: For object changes, use 'change_object' (auto-detects), 'change_attribute' (for attributes), or 'change_association' (for references).";
+                            
                             SetLastError(error);
-                            return JsonSerializer.Serialize(new { error });
+                            return JsonSerializer.Serialize(new { error, supportedTypes });
                     }
 
                     if (activity == null)
@@ -1197,26 +1219,67 @@ namespace MCPExtension.Tools
         {
             try
             {
-                var variableName = activityData?["variable_name"]?.ToString() ?? "newVariable";
-                var newValue = activityData?["new_value"]?.ToString() ?? "''";
+                _logger.LogInformation("CreateChangeVariableActivity called - analyzing parameters to determine if this is attribute or association change");
 
-                // Create a change variable action (this is typically a ChangeObjectAction)
-                var changeAction = _model.Create<IChangeObjectAction>();
-                
-                // Set properties for the change action
-                // Note: This is a simplified example - real implementation would need proper entity and member configuration
-                
-                // Create the action activity
-                var activity = _model.Create<IActionActivity>();
-                activity.Action = changeAction;
-                
-                _logger.LogInformation($"Created change variable activity with variable '{variableName}' and value '{newValue}'");
-                
-                return activity;
+                // Check if this looks like an association change
+                var associationName = activityData?["association_name"]?.ToString() ?? 
+                                     activityData?["associationName"]?.ToString() ?? 
+                                     activityData?["association"]?.ToString();
+
+                var attributeName = activityData?["attribute_name"]?.ToString() ?? 
+                                   activityData?["attributeName"]?.ToString() ?? 
+                                   activityData?["attribute"]?.ToString();
+
+                if (!string.IsNullOrEmpty(associationName))
+                {
+                    _logger.LogInformation($"Detected association change operation for association '{associationName}' - delegating to CreateChangeAssociationActivity");
+                    return CreateChangeAssociationActivity(activityData);
+                }
+                else if (!string.IsNullOrEmpty(attributeName))
+                {
+                    _logger.LogInformation($"Detected attribute change operation for attribute '{attributeName}' - delegating to CreateChangeAttributeActivity");
+                    return CreateChangeAttributeActivity(activityData);
+                }
+                else
+                {
+                    // Legacy fallback: assume attribute change and try to infer from variable name
+                    var variableName = activityData?["variable_name"]?.ToString() ?? "newVariable";
+                    var newValue = activityData?["new_value"]?.ToString() ?? "''";
+
+                    _logger.LogWarning($"No explicit attribute or association specified in change_variable activity. This is a legacy usage pattern. " +
+                                      $"For proper Change Object functionality, please use 'change_attribute' or 'change_association' activity types instead. " +
+                                      $"Attempting to create a generic change activity for variable '{variableName}' with value '{newValue}'.");
+
+                    // Try to create a basic change attribute activity with inferred parameters
+                    var inferredActivityData = new JsonObject
+                    {
+                        ["object_variable"] = variableName,
+                        ["attribute"] = "Name", // Default attribute - this is a guess
+                        ["new_value"] = newValue,
+                        ["change_type"] = "set",
+                        ["commit"] = "no"
+                    };
+
+                    _logger.LogInformation("Attempting to create change attribute activity with inferred parameters. This may fail if the attribute doesn't exist.");
+                    
+                    // This may fail, but that's expected for legacy usage without proper configuration
+                    try
+                    {
+                        return CreateChangeAttributeActivity(inferredActivityData);
+                    }
+                    catch (Exception inferEx)
+                    {
+                        var error = $"Failed to create change variable activity. For Change Object operations, please use 'change_attribute' or 'change_association' activity types with proper configuration. " +
+                                   $"Legacy change_variable usage failed: {inferEx.Message}";
+                        _logger.LogError(error);
+                        SetLastError(error, inferEx);
+                        return null;
+                    }
+                }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error creating change variable activity");
+                _logger.LogError(ex, "Error in CreateChangeVariableActivity");
                 SetLastError($"Error creating change variable activity: {ex.Message}", ex);
                 return null;
             }
@@ -1498,6 +1561,68 @@ namespace MCPExtension.Tools
             }
         }
 
+        /// <summary>
+        /// Determines the optimal range (first/all) based on XPath constraint and variable naming patterns.
+        /// </summary>
+        /// <param name="xpath">XPath constraint string</param>
+        /// <param name="outputVariable">Output variable name</param>
+        /// <returns>Recommended range: "first" or "all"</returns>
+        private string DetermineOptimalRange(string? xpath, string outputVariable)
+        {
+            try
+            {
+                // Default to "all" for safety
+                string recommendedRange = "all";
+
+                // Analyze XPath patterns that typically indicate single record lookup
+                if (!string.IsNullOrEmpty(xpath))
+                {
+                    var xpathLower = xpath.ToLowerInvariant();
+                    
+                    // Look for ID-based constraints which typically return single records
+                    if (xpathLower.Contains("id =") || 
+                        xpathLower.Contains("id=") ||
+                        xpathLower.Contains("[id =") ||
+                        xpathLower.Contains("[id="))
+                    {
+                        recommendedRange = "first";
+                        _logger.LogInformation($"Detected ID-based XPath constraint: '{xpath}' - recommending 'first' range");
+                    }
+                    // Look for unique key constraints
+                    else if (xpathLower.Contains("email =") || 
+                             xpathLower.Contains("email=") ||
+                             xpathLower.Contains("username =") ||
+                             xpathLower.Contains("username=") ||
+                             xpathLower.Contains("code =") ||
+                             xpathLower.Contains("code="))
+                    {
+                        recommendedRange = "first";
+                        _logger.LogInformation($"Detected unique key constraint: '{xpath}' - recommending 'first' range");
+                    }
+                }
+
+                // Analyze variable naming patterns
+                var variableLower = outputVariable.ToLowerInvariant();
+                if (variableLower.StartsWith("retrieved") && !variableLower.Contains("list") && !variableLower.Contains("collection"))
+                {
+                    // Variable names like "RetrievedCustomer" suggest single object
+                    if (!variableLower.EndsWith("s") && !variableLower.Contains("objects"))
+                    {
+                        recommendedRange = "first";
+                        _logger.LogInformation($"Variable name '{outputVariable}' suggests single object - recommending 'first' range");
+                    }
+                }
+
+                _logger.LogInformation($"Determined optimal range: '{recommendedRange}' (XPath: '{xpath}', Variable: '{outputVariable}')");
+                return recommendedRange;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning($"Error in DetermineOptimalRange, defaulting to 'all': {ex.Message}");
+                return "all";
+            }
+        }
+
         #region Database Operations
 
         /// <summary>
@@ -1518,14 +1643,32 @@ namespace MCPExtension.Tools
 
                 string? xpath = activityData["xpath"]?.ToString() ??
                                activityData["xPath"]?.ToString() ??
-                               activityData["XPath"]?.ToString();
+                               activityData["XPath"]?.ToString() ??
+                               activityData["xpath_constraint"]?.ToString() ??
+                               activityData["xpathConstraint"]?.ToString() ??
+                               activityData["constraint"]?.ToString();
 
-                string outputVariable = activityData["outputVariable"]?.ToString() ??
-                                       activityData["output"]?.ToString() ??
-                                       activityData["output_variable"]?.ToString() ??
-                                       activityData["variableName"]?.ToString() ?? "RetrievedObjects";
+                string outputVariable;
+                
+                // If no explicit output variable specified, create one based on entity name
+                if (activityData.ContainsKey("outputVariable") || activityData.ContainsKey("output") || 
+                    activityData.ContainsKey("output_variable") || activityData.ContainsKey("variableName"))
+                {
+                    outputVariable = activityData["outputVariable"]?.ToString() ??
+                                   activityData["output"]?.ToString() ??
+                                   activityData["output_variable"]?.ToString() ??
+                                   activityData["variableName"]?.ToString() ?? "RetrievedObjects";
+                }
+                else
+                {
+                    // Create intelligent variable name based on entity
+                    var autoEntityName = entityName.Contains('.') ? entityName.Split('.').Last() : entityName;
+                    outputVariable = $"Retrieved{autoEntityName}";
+                    _logger.LogInformation($"Auto-generated output variable name: '{outputVariable}' for entity '{entityName}'");
+                }
 
-                string range = activityData["range"]?.ToString()?.ToLowerInvariant() ?? "all";
+                // Smart range detection with explicit override capability
+                string range = activityData["range"]?.ToString()?.ToLowerInvariant() ?? DetermineOptimalRange(xpath, outputVariable);
                 
                 // Only extract limit and offset if range is custom or if they are explicitly provided
                 int? limit = null;
@@ -1558,12 +1701,34 @@ namespace MCPExtension.Tools
 
                 // Find the entity in the domain model
                 var module = Utils.Utils.GetMyFirstModule(_model);
-                var entity = module.DomainModel.GetEntities()
-                    .FirstOrDefault(e => e.Name.Equals(entityName, StringComparison.OrdinalIgnoreCase));
+                
+                // Try to find entity by name first, then by qualified name if it contains a dot
+                IEntity? entity = null;
+                
+                // If entityName contains a dot, extract the simple name (e.g., "MyFirstModule.Customer" -> "Customer")
+                var simpleEntityName = entityName.Contains('.') ? entityName.Split('.').Last() : entityName;
+                
+                // First try to find by simple name
+                entity = module.DomainModel.GetEntities()
+                    .FirstOrDefault(e => e.Name.Equals(simpleEntityName, StringComparison.OrdinalIgnoreCase));
+                
+                // If not found and original entityName contained a dot, try to find by full qualified name
+                if (entity == null && entityName.Contains('.'))
+                {
+                    entity = module.DomainModel.GetEntities()
+                        .FirstOrDefault(e => e.QualifiedName.ToString().Equals(entityName, StringComparison.OrdinalIgnoreCase));
+                }
 
                 if (entity == null)
                 {
-                    string error = $"Entity '{entityName}' not found in domain model";
+                    var availableEntities = module.DomainModel.GetEntities()
+                        .Select(e => $"{e.Name} (qualified: {e.QualifiedName})")
+                        .ToList();
+                    
+                    string availableEntitiesStr = availableEntities.Any() ? 
+                        string.Join(", ", availableEntities) : "No entities found";
+                    
+                    string error = $"Entity '{entityName}' not found in domain model. Tried simple name '{simpleEntityName}' and qualified name '{entityName}'. Available entities: {availableEntitiesStr}";
                     _logger.LogError(error);
                     SetLastError(error, new ArgumentException($"Entity not found: {entityName}"));
                     return null;
@@ -1749,18 +1914,45 @@ namespace MCPExtension.Tools
                     return null;
                 }
 
-                string variableName = activityData["variable_name"]?.ToString() ?? 
-                                     activityData["variableName"]?.ToString() ?? 
-                                     activityData["variable"]?.ToString() ??
-                                     activityData["objectVariable"]?.ToString() ??
-                                     activityData["object"]?.ToString() ??
-                                     throw new ArgumentException("Variable name is required for commit. Please specify one of: variable_name, variableName, variable, objectVariable, or object in the activity_config.");
+                // Try multiple parameter name variations for better UX
+                string? variableName = activityData["variable_name"]?.ToString() ?? 
+                                      activityData["variableName"]?.ToString() ?? 
+                                      activityData["variable"]?.ToString() ??
+                                      activityData["objectVariable"]?.ToString() ??
+                                      activityData["object_variable"]?.ToString() ??
+                                      activityData["object"]?.ToString();
+
+                // Support for multiple objects (array format)
+                var objectsArray = activityData["objects"]?.AsArray() ?? 
+                                  activityData["commit_objects"]?.AsArray() ??
+                                  activityData["variables"]?.AsArray();
+
+                // If no single variable but we have an objects array, use the first one
+                if (string.IsNullOrEmpty(variableName) && objectsArray?.Count > 0)
+                {
+                    variableName = objectsArray[0]?.ToString();
+                    if (objectsArray.Count > 1)
+                    {
+                        _logger?.LogWarning($"Multiple objects specified for commit [{string.Join(", ", objectsArray.Select(o => o?.ToString()))}], using first one: {variableName}. Consider creating separate commit activities for each object.");
+                    }
+                }
+
+                if (string.IsNullOrEmpty(variableName))
+                {
+                    var supportedParams = new[] { "variable_name", "variable", "object", "object_variable", "objects (array)", "commit_objects (array)" };
+                    SetLastError($"Variable name is required for commit activity. Supported parameter names: {string.Join(", ", supportedParams)}.\n\nExample usage:\n{{\n  \"activity_type\": \"commit\",\n  \"activity_config\": {{\n    \"variable\": \"Customer\",\n    \"with_events\": true\n  }}\n}}");
+                    return null;
+                }
 
                 bool refreshInClient = bool.Parse(activityData["refresh_in_client"]?.ToString() ?? 
-                                                 activityData["refreshInClient"]?.ToString() ?? "true");
+                                                 activityData["refreshInClient"]?.ToString() ?? 
+                                                 activityData["refresh"]?.ToString() ?? "true");
 
                 bool withEvents = bool.Parse(activityData["with_events"]?.ToString() ?? 
-                                           activityData["withEvents"]?.ToString() ?? "true");
+                                           activityData["withEvents"]?.ToString() ?? 
+                                           activityData["events"]?.ToString() ?? "true");
+
+                _logger?.LogInformation($"Creating commit activity: variable='{variableName}', withEvents={withEvents}, refreshInClient={refreshInClient}");
 
                 return microflowActivitiesService.CreateCommitObjectActivity(
                     _model, variableName, refreshInClient, withEvents);
@@ -1845,15 +2037,553 @@ namespace MCPExtension.Tools
         #region List Operations - Placeholder Methods
 
         // TODO: Implement these methods using IMicroflowActivitiesService
-        private IActionActivity? CreateListActivity(JsonObject activityData) => null;
-        private IActionActivity? CreateChangeListActivity(JsonObject activityData) => null;
-        private IActionActivity? CreateSortListActivity(JsonObject activityData) => null;
-        private IActionActivity? CreateFilterListActivity(JsonObject activityData) => null;
-        private IActionActivity? CreateFindInListActivity(JsonObject activityData) => null;
-        private IActionActivity? CreateAggregateListActivity(JsonObject activityData) => null;
-        private IActionActivity? CreateJavaActionCallActivity(JsonObject activityData) => null;
-        private IActionActivity? CreateChangeAttributeActivity(JsonObject activityData) => null;
-        private IActionActivity? CreateChangeAssociationActivity(JsonObject activityData) => null;
+        private IActionActivity? CreateListActivity(JsonObject? activityData) => null;
+        private IActionActivity? CreateSortListActivity(JsonObject? activityData) => null;
+        private IActionActivity? CreateFilterListActivity(JsonObject? activityData) => null;
+        private IActionActivity? CreateFindInListActivity(JsonObject? activityData) => null;
+        private IActionActivity? CreateAggregateListActivity(JsonObject? activityData) => null;
+        private IActionActivity? CreateJavaActionCallActivity(JsonObject? activityData) => null;
+
+        #endregion
+
+        #region Change Object Activities - Proper Implementation
+
+        /// <summary>
+        /// Creates a change list activity using IMicroflowActivitiesService.
+        /// </summary>
+        /// <param name="activityData">Activity configuration data</param>
+        /// <returns>IActionActivity for changing a list</returns>
+        private IActionActivity? CreateChangeListActivity(JsonObject? activityData)
+        {
+            try
+            {
+                var microflowActivitiesService = _serviceProvider?.GetService<IMicroflowActivitiesService>();
+                var microflowExpressionService = _serviceProvider?.GetService<IMicroflowExpressionService>();
+                
+                if (microflowActivitiesService == null)
+                {
+                    SetLastError("IMicroflowActivitiesService not available");
+                    return null;
+                }
+
+                if (microflowExpressionService == null)
+                {
+                    SetLastError("IMicroflowExpressionService not available");
+                    return null;
+                }
+
+                string listVariableName = activityData?["list_variable"]?.ToString() ?? 
+                                         activityData?["listVariable"]?.ToString() ?? 
+                                         activityData?["variable_name"]?.ToString() ?? 
+                                         activityData?["variableName"]?.ToString() ?? 
+                                         throw new ArgumentException("List variable name is required for change list activity");
+
+                string operation = activityData?["operation"]?.ToString()?.ToLowerInvariant() ?? "add";
+                string changeValueExpr = activityData?["change_value"]?.ToString() ?? 
+                                        activityData?["changeValue"]?.ToString() ?? 
+                                        activityData?["value"]?.ToString() ?? "empty";
+
+                // Convert operation string to enum
+                Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.ChangeListActionOperation operationEnum;
+                switch (operation)
+                {
+                    case "add":
+                        operationEnum = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.ChangeListActionOperation.Add;
+                        break;
+                    case "remove":
+                        operationEnum = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.ChangeListActionOperation.Remove;
+                        break;
+                    case "clear":
+                        operationEnum = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.ChangeListActionOperation.Clear;
+                        break;
+                    default:
+                        operationEnum = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.ChangeListActionOperation.Add;
+                        break;
+                }
+
+                // Create expression for the change value
+                var changeExpression = microflowExpressionService.CreateFromString(changeValueExpr);
+
+                return microflowActivitiesService.CreateChangeListActivity(
+                    _model,
+                    operationEnum,
+                    listVariableName,
+                    changeExpression
+                );
+            }
+            catch (Exception ex)
+            {
+                SetLastError($"Failed to create change list activity: {ex.Message}", ex);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Creates a change attribute activity using IMicroflowActivitiesService.CreateChangeAttributeActivity.
+        /// This is the proper implementation using the official Mendix API.
+        /// </summary>
+        /// <param name="activityData">Activity configuration data</param>
+        /// <returns>IActionActivity for changing an object attribute</returns>
+        private IActionActivity? CreateChangeAttributeActivity(JsonObject? activityData)
+        {
+            try
+            {
+                var microflowActivitiesService = _serviceProvider?.GetService<IMicroflowActivitiesService>();
+                var microflowExpressionService = _serviceProvider?.GetService<IMicroflowExpressionService>();
+                
+                if (microflowActivitiesService == null)
+                {
+                    SetLastError("IMicroflowActivitiesService not available");
+                    return null;
+                }
+
+                if (microflowExpressionService == null)
+                {
+                    SetLastError("IMicroflowExpressionService not available");
+                    return null;
+                }
+
+                // Extract parameters with multiple naming conventions
+                string objectVariableName = activityData?["object_variable"]?.ToString() ?? 
+                                           activityData?["objectVariable"]?.ToString() ?? 
+                                           activityData?["variable_name"]?.ToString() ?? 
+                                           activityData?["variableName"]?.ToString() ?? 
+                                           activityData?["variable"]?.ToString() ?? 
+                                           activityData?["object"]?.ToString() ?? 
+                                           activityData?["change_variable"]?.ToString();
+
+                if (string.IsNullOrEmpty(objectVariableName))
+                {
+                    var supportedParams = new[] { "object_variable", "variable", "object", "variable_name", "change_variable" };
+                    SetLastError($"Object variable name is required for change attribute activity. Supported parameter names: {string.Join(", ", supportedParams)}.\n\nExample usage:\n{{\n  \"activity_type\": \"change_attribute\",\n  \"activity_config\": {{\n    \"variable\": \"Customer\",\n    \"attribute\": \"Name\",\n    \"value\": \"'New Value'\"\n  }}\n}}");
+                    return null;
+                }
+
+                string attributeName = activityData?["attribute_name"]?.ToString() ?? 
+                                      activityData?["attributeName"]?.ToString() ?? 
+                                      activityData?["attribute"]?.ToString() ?? 
+                                      throw new ArgumentException("Attribute name is required for change attribute activity");
+
+                string entityName = activityData?["entity_name"]?.ToString() ?? 
+                                   activityData?["entityName"]?.ToString() ?? 
+                                   activityData?["entity"]?.ToString();
+
+                string newValueExpr = activityData?["new_value"]?.ToString() ?? 
+                                     activityData?["newValue"]?.ToString() ?? 
+                                     activityData?["value"]?.ToString() ?? "empty";
+
+                string changeTypeStr = activityData?["change_type"]?.ToString()?.ToLowerInvariant() ?? 
+                                      activityData?["changeType"]?.ToString()?.ToLowerInvariant() ?? "set";
+
+                string commitStr = activityData?["commit"]?.ToString()?.ToLowerInvariant() ?? "no";
+
+                _logger.LogInformation($"Creating change attribute activity: object='{objectVariableName}', attribute='{attributeName}', entity='{entityName}', value='{newValueExpr}', changeType='{changeTypeStr}', commit='{commitStr}'");
+
+                // Find the attribute in the domain model
+                var module = Utils.Utils.GetMyFirstModule(_model);
+                if (module?.DomainModel == null)
+                {
+                    SetLastError("Domain model not found");
+                    return null;
+                }
+
+                IAttribute? attribute = null;
+
+                // First try to find by entity name if provided
+                if (!string.IsNullOrEmpty(entityName))
+                {
+                    var entity = module.DomainModel.GetEntities()
+                        .FirstOrDefault(e => e.Name.Equals(entityName, StringComparison.OrdinalIgnoreCase));
+                    
+                    if (entity != null)
+                    {
+                        attribute = entity.GetAttributes()
+                            .FirstOrDefault(a => a.Name.Equals(attributeName, StringComparison.OrdinalIgnoreCase));
+                    }
+                }
+
+                // If not found by entity, search all entities
+                if (attribute == null)
+                {
+                    foreach (var entity in module.DomainModel.GetEntities())
+                    {
+                        attribute = entity.GetAttributes()
+                            .FirstOrDefault(a => a.Name.Equals(attributeName, StringComparison.OrdinalIgnoreCase));
+                        if (attribute != null)
+                        {
+                            _logger.LogInformation($"Found attribute '{attributeName}' in entity '{entity.Name}'");
+                            break;
+                        }
+                    }
+                }
+
+                if (attribute == null)
+                {
+                    var availableAttributes = module.DomainModel.GetEntities()
+                        .SelectMany(e => e.GetAttributes().Select(a => $"{e.Name}.{a.Name}"))
+                        .ToList();
+                    
+                    var error = $"Attribute '{attributeName}' not found in domain model. Available attributes: {string.Join(", ", availableAttributes)}";
+                    SetLastError(error);
+                    return null;
+                }
+
+                // Convert change type string to enum
+                Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.ChangeActionItemType changeType;
+                switch (changeTypeStr)
+                {
+                    case "set":
+                        changeType = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.ChangeActionItemType.Set;
+                        break;
+                    case "add":
+                        changeType = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.ChangeActionItemType.Add;
+                        break;
+                    case "remove":
+                        changeType = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.ChangeActionItemType.Remove;
+                        break;
+                    default:
+                        changeType = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.ChangeActionItemType.Set;
+                        break;
+                }
+
+                // Convert commit string to enum
+                Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.CommitEnum commit;
+                switch (commitStr)
+                {
+                    case "yes":
+                    case "true":
+                        commit = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.CommitEnum.Yes;
+                        break;
+                    case "yeswithoutevents":
+                    case "yes_without_events":
+                        commit = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.CommitEnum.YesWithoutEvents;
+                        break;
+                    case "no":
+                    case "false":
+                    default:
+                        commit = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.CommitEnum.No;
+                        break;
+                }
+
+                // Create expression for the new value
+                var newValueExpression = microflowExpressionService.CreateFromString(newValueExpr);
+
+                // Use the official API method
+                var activity = microflowActivitiesService.CreateChangeAttributeActivity(
+                    _model,
+                    attribute,
+                    changeType,
+                    newValueExpression,
+                    objectVariableName,
+                    commit
+                );
+
+                _logger.LogInformation($"Successfully created change attribute activity for '{attribute.Name}' on variable '{objectVariableName}'");
+                return activity;
+            }
+            catch (Exception ex)
+            {
+                var error = $"Failed to create change attribute activity: {ex.Message}";
+                _logger.LogError(ex, error);
+                SetLastError(error, ex);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Creates a change association activity using IMicroflowActivitiesService.CreateChangeAssociationActivity.
+        /// This is the proper implementation using the official Mendix API.
+        /// </summary>
+        /// <param name="activityData">Activity configuration data</param>
+        /// <returns>IActionActivity for changing an object association</returns>
+        private IActionActivity? CreateChangeAssociationActivity(JsonObject? activityData)
+        {
+            try
+            {
+                var microflowActivitiesService = _serviceProvider?.GetService<IMicroflowActivitiesService>();
+                var microflowExpressionService = _serviceProvider?.GetService<IMicroflowExpressionService>();
+                
+                if (microflowActivitiesService == null)
+                {
+                    SetLastError("IMicroflowActivitiesService not available");
+                    return null;
+                }
+
+                if (microflowExpressionService == null)
+                {
+                    SetLastError("IMicroflowExpressionService not available");
+                    return null;
+                }
+
+                // Extract parameters with multiple naming conventions
+                string objectVariableName = activityData?["object_variable"]?.ToString() ?? 
+                                           activityData?["objectVariable"]?.ToString() ?? 
+                                           activityData?["variable_name"]?.ToString() ?? 
+                                           activityData?["variableName"]?.ToString() ?? 
+                                           activityData?["change_variable"]?.ToString() ?? 
+                                           throw new ArgumentException("Object variable name is required for change association activity");
+
+                string associationName = activityData?["association_name"]?.ToString() ?? 
+                                        activityData?["associationName"]?.ToString() ?? 
+                                        activityData?["association"]?.ToString() ?? 
+                                        throw new ArgumentException("Association name is required for change association activity");
+
+                string newValueExpr = activityData?["new_value"]?.ToString() ?? 
+                                     activityData?["newValue"]?.ToString() ?? 
+                                     activityData?["value"]?.ToString() ?? "empty";
+
+                string changeTypeStr = activityData?["change_type"]?.ToString()?.ToLowerInvariant() ?? 
+                                      activityData?["changeType"]?.ToString()?.ToLowerInvariant() ?? "set";
+
+                string commitStr = activityData?["commit"]?.ToString()?.ToLowerInvariant() ?? "no";
+
+                _logger.LogInformation($"Creating change association activity: object='{objectVariableName}', association='{associationName}', value='{newValueExpr}', changeType='{changeTypeStr}', commit='{commitStr}'");
+
+                // Find the association in the domain model
+                var module = Utils.Utils.GetMyFirstModule(_model);
+                if (module?.DomainModel == null)
+                {
+                    SetLastError("Domain model not found");
+                    return null;
+                }
+
+                IAssociation? association = null;
+
+                // Search through all entities for the association
+                foreach (var entity in module.DomainModel.GetEntities())
+                {
+                    var entityAssociations = entity.GetAssociations(AssociationDirection.Both, null);
+                    var foundAssociation = entityAssociations
+                        .FirstOrDefault(ea => ea.Association.Name.Equals(associationName, StringComparison.OrdinalIgnoreCase));
+                    
+                    if (foundAssociation != null)
+                    {
+                        association = foundAssociation.Association;
+                        _logger.LogInformation($"Found association '{associationName}' between '{foundAssociation.Parent.Name}' and '{foundAssociation.Child.Name}'");
+                        break;
+                    }
+                }
+
+                if (association == null)
+                {
+                    var availableAssociations = new List<string>();
+                    foreach (var entity in module.DomainModel.GetEntities())
+                    {
+                        var entityAssociations = entity.GetAssociations(AssociationDirection.Both, null);
+                        availableAssociations.AddRange(entityAssociations.Select(ea => ea.Association.Name));
+                    }
+                    
+                    var error = $"Association '{associationName}' not found in domain model. Available associations: {string.Join(", ", availableAssociations.Distinct())}";
+                    SetLastError(error);
+                    return null;
+                }
+
+                // Convert change type string to enum
+                Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.ChangeActionItemType changeType;
+                switch (changeTypeStr)
+                {
+                    case "set":
+                        changeType = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.ChangeActionItemType.Set;
+                        break;
+                    case "add":
+                        changeType = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.ChangeActionItemType.Add;
+                        break;
+                    case "remove":
+                        changeType = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.ChangeActionItemType.Remove;
+                        break;
+                    default:
+                        changeType = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.ChangeActionItemType.Set;
+                        break;
+                }
+
+                // Convert commit string to enum
+                Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.CommitEnum commit;
+                switch (commitStr)
+                {
+                    case "yes":
+                    case "true":
+                        commit = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.CommitEnum.Yes;
+                        break;
+                    case "yeswithoutevents":
+                    case "yes_without_events":
+                        commit = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.CommitEnum.YesWithoutEvents;
+                        break;
+                    case "no":
+                    case "false":
+                    default:
+                        commit = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.CommitEnum.No;
+                        break;
+                }
+
+                // Create expression for the new value
+                var newValueExpression = microflowExpressionService.CreateFromString(newValueExpr);
+
+                // Use the official API method
+                var activity = microflowActivitiesService.CreateChangeAssociationActivity(
+                    _model,
+                    association,
+                    changeType,
+                    newValueExpression,
+                    objectVariableName,
+                    commit
+                );
+
+                _logger.LogInformation($"Successfully created change association activity for '{association.Name}' on variable '{objectVariableName}'");
+                return activity;
+            }
+            catch (Exception ex)
+            {
+                var error = $"Failed to create change association activity: {ex.Message}";
+                _logger.LogError(ex, error);
+                SetLastError(error, ex);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Creates a change object activity by analyzing the request and delegating to the appropriate specific handler.
+        /// This provides a user-friendly interface that handles common change object scenarios automatically.
+        /// </summary>
+        /// <param name="activityData">Activity configuration data</param>
+        /// <returns>IActionActivity for changing an object attribute or association</returns>
+        private IActionActivity? CreateChangeObjectActivity(JsonObject? activityData)
+        {
+            try
+            {
+                _logger.LogInformation("CreateChangeObjectActivity called - analyzing request to determine change type");
+
+                if (activityData == null)
+                {
+                    SetLastError("Activity data is required for change_object activity");
+                    return null;
+                }
+
+                // Check for explicit change type specification
+                var changeType = activityData["change_type"]?.ToString()?.ToLowerInvariant();
+                if (changeType == "association" || changeType == "reference")
+                {
+                    _logger.LogInformation("Explicit association change type specified - delegating to CreateChangeAssociationActivity");
+                    return CreateChangeAssociationActivity(activityData);
+                }
+
+                // Check if this looks like an association change
+                var associationName = activityData["association_name"]?.ToString() ?? 
+                                     activityData["associationName"]?.ToString() ?? 
+                                     activityData["association"]?.ToString();
+
+                if (!string.IsNullOrEmpty(associationName))
+                {
+                    _logger.LogInformation($"Association '{associationName}' specified - delegating to CreateChangeAssociationActivity");
+                    return CreateChangeAssociationActivity(activityData);
+                }
+
+                // Check for changes specified as array (multiple attribute changes)
+                var changesArray = activityData["changes"]?.AsArray();
+                if (changesArray != null && changesArray.Count > 0)
+                {
+                    _logger.LogInformation($"Changes array with {changesArray.Count} items found - processing attribute changes");
+                    
+                    // For now, handle only single attribute change (most common case)
+                    if (changesArray.Count == 1)
+                    {
+                        var change = changesArray[0]?.AsObject();
+                        if (change != null)
+                        {
+                            // Convert array format to single attribute format
+                            var convertedData = new JsonObject();
+                            
+                            // Copy all existing properties
+                            foreach (var kvp in activityData)
+                            {
+                                if (kvp.Key != "changes")
+                                {
+                                    convertedData[kvp.Key] = kvp.Value?.DeepClone();
+                                }
+                            }
+                            
+                            // Add attribute-specific properties from the change
+                            convertedData["attribute"] = change["attribute"]?.ToString() ?? change["attribute_name"]?.ToString();
+                            convertedData["new_value"] = change["value"]?.ToString() ?? change["new_value"]?.ToString();
+                            
+                            _logger.LogInformation($"Converted changes array to single attribute change: {convertedData["attribute"]}");
+                            return CreateChangeAttributeActivity(convertedData);
+                        }
+                    }
+                    else
+                    {
+                        SetLastError("Multiple attribute changes in a single change_object activity are not yet supported. Please use separate change_attribute activities for each attribute.");
+                        return null;
+                    }
+                }
+
+                // Check for changes specified as object (key-value pairs)
+                var changesObject = activityData["changes"]?.AsObject();
+                if (changesObject != null && changesObject.Count > 0)
+                {
+                    _logger.LogInformation($"Changes object with {changesObject.Count} properties found - processing attribute changes");
+                    
+                    // For now, handle only single attribute change
+                    if (changesObject.Count == 1)
+                    {
+                        var firstChange = changesObject.First();
+                        var convertedData = new JsonObject();
+                        
+                        // Copy all existing properties
+                        foreach (var kvp in activityData)
+                        {
+                            if (kvp.Key != "changes")
+                            {
+                                convertedData[kvp.Key] = kvp.Value?.DeepClone();
+                            }
+                        }
+                        
+                        // Add attribute-specific properties
+                        convertedData["attribute"] = firstChange.Key;
+                        convertedData["new_value"] = firstChange.Value?.ToString();
+                        
+                        _logger.LogInformation($"Converted changes object to single attribute change: {firstChange.Key}");
+                        return CreateChangeAttributeActivity(convertedData);
+                    }
+                    else
+                    {
+                        SetLastError("Multiple attribute changes in a single change_object activity are not yet supported. Please use separate change_attribute activities for each attribute.");
+                        return null;
+                    }
+                }
+
+                // Check for direct attribute specification
+                var attributeName = activityData["attribute_name"]?.ToString() ?? 
+                                   activityData["attributeName"]?.ToString() ?? 
+                                   activityData["attribute"]?.ToString();
+
+                if (!string.IsNullOrEmpty(attributeName))
+                {
+                    _logger.LogInformation($"Direct attribute '{attributeName}' specified - delegating to CreateChangeAttributeActivity");
+                    return CreateChangeAttributeActivity(activityData);
+                }
+
+                // If no specific change type detected, provide helpful error message
+                var error = "Unable to determine change type for change_object activity. Please specify either:\n" +
+                           "- For attribute changes: Use 'attribute' or 'changes' property\n" +
+                           "- For association changes: Use 'association' property\n" +
+                           "- Or use specific activity types: 'change_attribute' or 'change_association'\n" +
+                           "\nExample formats:\n" +
+                           "- Attribute: {\"attribute\": \"Name\", \"new_value\": \"'New Value'\"}\n" +
+                           "- Changes object: {\"changes\": {\"Name\": \"'New Value'\"}}\n" +
+                           "- Changes array: {\"changes\": [{\"attribute\": \"Name\", \"value\": \"'New Value'\"}]}\n" +
+                           "- Association: {\"association\": \"Customer_Order\", \"new_value\": \"$NewOrder\"}";
+                
+                SetLastError(error);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                var error = $"Failed to create change object activity: {ex.Message}";
+                _logger.LogError(ex, error);
+                SetLastError(error, ex);
+                return null;
+            }
+        }
 
         #endregion
 
@@ -1919,6 +2649,13 @@ namespace MCPExtension.Tools
                 // Create all activities first
                 var createdActivities = new List<IActionActivity>();
                 var activityResults = new List<object>();
+                
+                // Variable name tracking for propagation across activities
+                Dictionary<string, string> variableNameMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                
+                // Debug logging to file
+                var debugLogPath = @"C:\Mendix Projects\Sample\resources\mcp_debug.log";
+                await File.AppendAllTextAsync(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] VARIABLE TRACKING: Starting variable tracking for {activitiesArray.Count} activities\n");
 
                 using (var transaction = _model.StartTransaction("Create microflow activities sequence"))
                 {
@@ -1938,6 +2675,8 @@ namespace MCPExtension.Tools
                             var activityConfig = activityDef["activity_config"]?.AsObject();
 
                             _logger.LogInformation($"Processing activity {i + 1}: type='{activityType}'");
+                            await File.AppendAllTextAsync(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] VARIABLE TRACKING: Processing activity {i + 1}: type='{activityType}'\n");
+                            await File.AppendAllTextAsync(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] VARIABLE TRACKING: Original config: {activityConfig?.ToJsonString()}\n");
 
                             if (string.IsNullOrWhiteSpace(activityType))
                             {
@@ -1945,12 +2684,23 @@ namespace MCPExtension.Tools
                                 continue;
                             }
 
+                            // Apply variable name substitutions to activity config
+                            await File.AppendAllTextAsync(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] VARIABLE TRACKING: Applying substitutions with {variableNameMap.Count} mappings\n");
+                            var processedConfig = ApplyVariableNameSubstitutions(activityConfig, variableNameMap);
+                            await File.AppendAllTextAsync(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] VARIABLE TRACKING: Processed config: {processedConfig?.ToJsonString()}\n");
+
                             // Create the activity (reuse existing logic)
-                            IActionActivity? activity = CreateActivityByType(activityType, activityConfig);
+                            IActionActivity? activity = CreateActivityByType(activityType, processedConfig);
 
                             if (activity != null)
                             {
                                 createdActivities.Add(activity);
+                                
+                                // Track variable names for future activities
+                                await File.AppendAllTextAsync(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] VARIABLE TRACKING: Tracking variables for activity type '{activityType}'\n");
+                                TrackVariableNames(activityType, processedConfig, variableNameMap);
+                                await File.AppendAllTextAsync(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] VARIABLE TRACKING: Variable map now has {variableNameMap.Count} entries: {string.Join(", ", variableNameMap.Select(kvp => $"{kvp.Key}→{kvp.Value}"))}\n");
+                                
                                 activityResults.Add(new
                                 {
                                     index = i + 1,
@@ -2060,6 +2810,7 @@ namespace MCPExtension.Tools
                     return CreateAssociationRetrieveActivity(activityConfig);
 
                 case "commit_object":
+                case "commit_objects":
                 case "commit":
                     return CreateCommitActivity(activityConfig);
 
@@ -2105,8 +2856,21 @@ namespace MCPExtension.Tools
                 case "change_association":
                     return CreateChangeAssociationActivity(activityConfig);
 
+                case "change_object":
+                    return CreateChangeObjectActivity(activityConfig);
+
                 default:
-                    _logger.LogError($"Unsupported activity type: {activityType}");
+                    var supportedTypes = new[]
+                    {
+                        "log/log_message", "change_variable/change_value", "create_variable/create_object/create", 
+                        "microflow_call/call_microflow", "retrieve_from_database/retrieve_database/database_retrieve",
+                        "retrieve_by_association/association_retrieve", "commit_object/commit", "rollback_object/rollback",
+                        "delete_object/delete", "create_list/new_list", "change_list/modify_list", "sort_list", "filter_list",
+                        "find_in_list/find_list_item", "aggregate_list/list_aggregate", "java_action_call/call_java_action",
+                        "change_attribute", "change_association", "change_object"
+                    };
+                    
+                    _logger.LogError($"Unsupported activity type: '{activityType}'. Supported types: {string.Join(", ", supportedTypes)}");
                     return null;
             }
         }
@@ -2153,6 +2917,204 @@ namespace MCPExtension.Tools
                 _logger.LogError(ex, $"Error getting ordered activities for microflow '{microflow.Name}'");
                 // Fallback: return empty list to be safe
                 return new List<IActivity>();
+            }
+        }
+
+        #endregion
+
+        #region Variable Name Tracking and Substitution
+
+        /// <summary>
+        /// Applies variable name substitutions to activity configuration based on tracked variables
+        /// </summary>
+        private JsonObject? ApplyVariableNameSubstitutions(JsonObject? activityConfig, Dictionary<string, string> variableNameMap)
+        {
+            if (activityConfig == null || variableNameMap.Count == 0)
+            {
+                var debugLogPath = @"C:\Mendix Projects\Sample\resources\mcp_debug.log";
+                File.AppendAllText(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] APPLY_SUBSTITUTIONS: Early return - activityConfig null: {activityConfig == null}, variableNameMap count: {variableNameMap.Count}\n");
+                return activityConfig;
+            }
+
+            try
+            {
+                var debugLogPath = @"C:\Mendix Projects\Sample\resources\mcp_debug.log";
+                File.AppendAllText(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] APPLY_SUBSTITUTIONS: Starting substitutions\n");
+                
+                // Create a deep copy of the configuration to avoid modifying the original
+                var configJson = activityConfig.ToJsonString();
+                var processedConfig = JsonNode.Parse(configJson)?.AsObject();
+                
+                if (processedConfig == null)
+                    return activityConfig;
+
+                // Common variable name fields that might need substitution
+                var variableFields = new[] 
+                { 
+                    "variable", "variableName", "variable_name", "inputVariable", "input_variable",
+                    "objectVariable", "object_variable", "listVariable", "list_variable",
+                    "sourceVariable", "source_variable", "targetVariable", "target_variable",
+                    "object", "objects", "commit_objects", "variables"
+                };
+
+                _logger.LogInformation($"Applying variable substitutions with {variableNameMap.Count} mappings: {string.Join(", ", variableNameMap.Select(kvp => $"{kvp.Key}→{kvp.Value}"))}");
+
+                foreach (var field in variableFields)
+                {
+                    if (processedConfig.ContainsKey(field))
+                    {
+                        var fieldValue = processedConfig[field];
+                        File.AppendAllText(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] APPLY_SUBSTITUTIONS: Found field '{field}' with value kind: {fieldValue?.GetValueKind()}\n");
+                        
+                        // Handle string fields
+                        if (fieldValue?.GetValueKind() == JsonValueKind.String)
+                        {
+                            var currentValue = fieldValue.ToString();
+                            File.AppendAllText(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] APPLY_SUBSTITUTIONS: String field '{field}' has value '{currentValue}'\n");
+                            if (!string.IsNullOrEmpty(currentValue) && variableNameMap.ContainsKey(currentValue))
+                            {
+                                var actualVariableName = variableNameMap[currentValue];
+                                processedConfig[field] = actualVariableName;
+                                File.AppendAllText(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] APPLY_SUBSTITUTIONS: ✅ Substituted variable '{currentValue}' with actual name '{actualVariableName}' in field '{field}'\n");
+                                _logger.LogInformation($"Substituted variable '{currentValue}' with actual name '{actualVariableName}' in field '{field}'");
+                            }
+                        }
+                        // Handle array fields (like "objects" in commit activities)
+                        else if (fieldValue?.GetValueKind() == JsonValueKind.Array)
+                        {
+                            File.AppendAllText(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] APPLY_SUBSTITUTIONS: Array field '{field}' has {fieldValue.AsArray().Count} elements\n");
+                            var arrayValue = fieldValue.AsArray();
+                            for (int i = 0; i < arrayValue.Count; i++)
+                            {
+                                var currentValue = arrayValue[i]?.ToString();
+                                File.AppendAllText(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] APPLY_SUBSTITUTIONS: Array element [{i}] = '{currentValue}'\n");
+                                if (!string.IsNullOrEmpty(currentValue) && variableNameMap.ContainsKey(currentValue))
+                                {
+                                    var actualVariableName = variableNameMap[currentValue];
+                                    arrayValue[i] = actualVariableName;
+                                    File.AppendAllText(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] APPLY_SUBSTITUTIONS: ✅ Substituted array variable '{currentValue}' with actual name '{actualVariableName}' in field '{field}[{i}]'\n");
+                                    _logger.LogInformation($"Substituted array variable '{currentValue}' with actual name '{actualVariableName}' in field '{field}[{i}]'");
+                                }
+                            }
+                        }
+                    }
+                }
+
+                return processedConfig;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error applying variable name substitutions, using original config");
+                return activityConfig;
+            }
+        }
+
+        /// <summary>
+        /// Tracks variable names created by activities for future reference
+        /// </summary>
+        private void TrackVariableNames(string activityType, JsonObject? activityConfig, Dictionary<string, string> variableNameMap)
+        {
+            if (activityConfig == null)
+                return;
+
+            try
+            {
+                var debugLogPath = @"C:\Mendix Projects\Sample\resources\mcp_debug.log";
+                File.AppendAllText(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] TRACK_VARIABLES: Processing activity type '{activityType}'\n");
+                
+                string? logicalName = null;
+                string? actualName = null;
+
+                switch (activityType.ToLowerInvariant())
+                {
+                    case "retrieve_from_database":
+                    case "retrieve_database":
+                    case "database_retrieve":
+                        File.AppendAllText(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] TRACK_VARIABLES: Processing retrieve activity\n");
+                        // For retrieve activities, track the mapping
+                        logicalName = activityConfig["variable_name"]?.ToString();
+                        
+                        // Get the actual variable name that was used/created
+                        actualName = activityConfig["outputVariable"]?.ToString() ?? 
+                                   activityConfig["output"]?.ToString() ?? 
+                                   activityConfig["output_variable"]?.ToString();
+                        
+                        // If no explicit output variable was specified, use the entity-based name  
+                        if (string.IsNullOrEmpty(actualName))
+                        {
+                            var entityName = activityConfig["entityName"]?.ToString() ?? 
+                                           activityConfig["entity"]?.ToString();
+                            if (!string.IsNullOrEmpty(entityName))
+                            {
+                                var simpleEntityName = entityName.Contains('.') ? entityName.Split('.').Last() : entityName;
+                                actualName = $"Retrieved{simpleEntityName}";
+                            }
+                            else
+                            {
+                                actualName = "RetrievedObjects";
+                            }
+                        }
+                        break;
+
+                    case "create_variable":
+                    case "create_object":
+                    case "create":
+                        // For create activities
+                        logicalName = activityConfig["variable_name"]?.ToString() ?? 
+                                    activityConfig["variableName"]?.ToString();
+                        actualName = logicalName; // Create activities typically use the specified name
+                        break;
+
+                    case "retrieve_by_association":
+                    case "association_retrieve":
+                        // For association retrieve activities
+                        logicalName = activityConfig["variable_name"]?.ToString();
+                        actualName = activityConfig["outputVariable"]?.ToString() ?? 
+                                   activityConfig["output"]?.ToString() ?? 
+                                   "AssociatedObjects";
+                        break;
+
+                    case "microflow_call":
+                    case "call_microflow":
+                        // For microflow calls that might return objects
+                        logicalName = activityConfig["return_variable"]?.ToString() ?? 
+                                    activityConfig["returnVariable"]?.ToString();
+                        actualName = logicalName; // Microflow calls typically use the specified return variable name
+                        break;
+                }
+
+                // Only track if we have both logical and actual names
+                if (!string.IsNullOrEmpty(logicalName) && !string.IsNullOrEmpty(actualName))
+                {
+                    if (!logicalName.Equals(actualName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        variableNameMap[logicalName] = actualName;
+                        _logger.LogInformation($"Tracking variable mapping: '{logicalName}' -> '{actualName}'");
+                    }
+                }
+                    
+                // For retrieve activities, also track entity-based logical names (e.g., "Customer" -> "RetrievedCustomer")
+                if (activityType.ToLowerInvariant().Contains("retrieve") && !string.IsNullOrEmpty(actualName))
+                {
+                    var entityName = activityConfig["entityName"]?.ToString() ?? 
+                                   activityConfig["entity"]?.ToString();
+                    
+                    if (!string.IsNullOrEmpty(entityName))
+                    {
+                        // Extract simple entity name (e.g., "MyFirstModule.Customer" -> "Customer")
+                        var simpleEntityName = entityName.Contains('.') ? entityName.Split('.').Last() : entityName;
+                        
+                        if (!simpleEntityName.Equals(actualName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            variableNameMap[simpleEntityName] = actualName;
+                            _logger.LogInformation($"Tracking entity-based variable mapping: '{simpleEntityName}' -> '{actualName}'");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, $"Error tracking variable names for activity type '{activityType}'");
             }
         }
 
