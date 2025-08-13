@@ -54,7 +54,7 @@ The extension consists of several key components:
    ```
 
 2. **Deploy to Mendix Studio Pro**
-   - The extension automatically copies to `C:\Mendix Projects\Sample\extensions\MCP\` after build
+   - The extension automatically copies to `C:\Mendix Projects\{YourProjectName}\extensions\MCP\` after build
    - Alternatively, copy the built files to your Mendix project's `extensions` folder
 
 3. **Load in Studio Pro**

@@ -174,7 +174,7 @@ catch (Exception ex)
 - **Compilation**: ✅ Successful (Build succeeded with 0 errors, 0 warnings)
 - **Variable Tracking**: ✅ Implemented and tested (Major sequence activity bug resolved)
 - **Output**: Extension DLL successfully generated
-- **Deployment**: Automatic copy to `C:\Mendix Projects\Sample\extensions\MCP\`
+- **Deployment**: Automatic copy to `C:\Mendix Projects\{YourProjectName}\extensions\MCP\`
 
 ### Compilation Resolution
 Several compilation errors were resolved during implementation:

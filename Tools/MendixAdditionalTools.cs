@@ -25,6 +25,7 @@ namespace MCPExtension.Tools
         private readonly IPageGenerationService _pageGenerationService;
         private readonly INavigationManagerService _navigationManagerService;
         private readonly IServiceProvider _serviceProvider;
+        private readonly string? _projectDirectory;
         private static string? _lastError;
         private static Exception? _lastException;
 
@@ -33,13 +34,69 @@ namespace MCPExtension.Tools
             ILogger<MendixAdditionalTools> logger,
             IPageGenerationService pageGenerationService,
             INavigationManagerService navigationManagerService,
-            IServiceProvider serviceProvider)
+            IServiceProvider serviceProvider,
+            string? projectDirectory = null)
         {
             _model = model;
             _logger = logger;
             _pageGenerationService = pageGenerationService;
             _navigationManagerService = navigationManagerService;
             _serviceProvider = serviceProvider;
+            _projectDirectory = projectDirectory;
+        }
+
+        private string GetDebugLogPath()
+        {
+            try
+            {
+                // Use the project directory if available
+                if (!string.IsNullOrEmpty(_projectDirectory))
+                {
+                    string resourcesDir = System.IO.Path.Combine(_projectDirectory, "resources");
+                    
+                    if (!System.IO.Directory.Exists(resourcesDir))
+                    {
+                        System.IO.Directory.CreateDirectory(resourcesDir);
+                    }
+                    
+                    return System.IO.Path.Combine(resourcesDir, "mcp_debug.log");
+                }
+                
+                // Fallback to current directory if no project found
+                return System.IO.Path.Combine(Environment.CurrentDirectory, "mcp_debug.log");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting debug log path, using fallback");
+                return System.IO.Path.Combine(Environment.CurrentDirectory, "mcp_debug.log");
+            }
+        }
+
+        private string GetAISampleImportLogPath()
+        {
+            try
+            {
+                // Use the project directory if available
+                if (!string.IsNullOrEmpty(_projectDirectory))
+                {
+                    string resourcesDir = System.IO.Path.Combine(_projectDirectory, "resources");
+                    
+                    if (!System.IO.Directory.Exists(resourcesDir))
+                    {
+                        System.IO.Directory.CreateDirectory(resourcesDir);
+                    }
+                    
+                    return System.IO.Path.Combine(resourcesDir, "AI_Sample_Import.log");
+                }
+                
+                // Fallback to current directory if no project found
+                return System.IO.Path.Combine(Environment.CurrentDirectory, "AI_Sample_Import.log");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting AI sample import log path, using fallback");
+                return System.IO.Path.Combine(Environment.CurrentDirectory, "AI_Sample_Import.log");
+            }
         }
 
         public static void SetLastError(string error, Exception? exception = null)
@@ -734,8 +791,10 @@ namespace MCPExtension.Tools
                 var returnTypeStr = arguments["returnType"]?.ToString();
                 Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType returnType = Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.Void;
                 
-                // Only set a non-void return type if explicitly specified, not empty/whitespace, and not "Boolean" when likely unintended
-                if (!string.IsNullOrWhiteSpace(returnTypeStr) && returnTypeStr.Trim().ToLowerInvariant() != "void")
+                // Only set a non-void return type if explicitly specified and meaningful
+                if (!string.IsNullOrWhiteSpace(returnTypeStr) && 
+                    !returnTypeStr.Trim().Equals("void", StringComparison.OrdinalIgnoreCase) &&
+                    !returnTypeStr.Trim().Equals("", StringComparison.OrdinalIgnoreCase))
                 {
                     // Check if this looks like an unintended Boolean default - if so, treat as Void
                     if (returnTypeStr.Trim().Equals("Boolean", StringComparison.OrdinalIgnoreCase))
@@ -1040,14 +1099,21 @@ namespace MCPExtension.Tools
 
                     if (activity == null)
                     {
-                        var error = $"Failed to create activity of type '{activityType}'. ";
+                        var availableParams = activityData?.AsObject()?.Select(kv => $"{kv.Key}={kv.Value}") ?? new string[0];
+                        var paramsString = availableParams.Any() ? $" Available parameters: {string.Join(", ", availableParams)}" : " No parameters provided.";
+                        
+                        var error = $"Failed to create activity of type '{activityType}'.{paramsString}";
                         if (activityType == "log")
                         {
-                            error += "Log activities are not supported by the current Mendix Extensions API. Consider using change_variable or create_variable instead.";
+                            error += " Log activities are not supported by the current Mendix Extensions API. Consider using change_variable or create_variable instead.";
+                        }
+                        else if (activityType == "delete" || activityType == "delete_object")
+                        {
+                            error += " For delete activities, ensure you specify the object variable using one of: variable_name, variableName, variable, objectVariable, object_variable, or object.";
                         }
                         else
                         {
-                            error += "Please check the activity configuration and try again.";
+                            error += " Please check the activity configuration and try again.";
                         }
                         SetLastError(error);
                         return JsonSerializer.Serialize(new { error });
@@ -2016,12 +2082,19 @@ namespace MCPExtension.Tools
                     return null;
                 }
 
+                // Log all available parameters for debugging
+                var availableParams = activityData?.AsObject()?.Select(kv => $"{kv.Key}={kv.Value}") ?? new string[0];
+                _logger.LogInformation($"[CreateDeleteActivity] Available parameters: {string.Join(", ", availableParams)}");
+
                 string variableName = activityData["variable_name"]?.ToString() ?? 
                                      activityData["variableName"]?.ToString() ?? 
                                      activityData["variable"]?.ToString() ??
                                      activityData["objectVariable"]?.ToString() ??
+                                     activityData["object_variable"]?.ToString() ??
                                      activityData["object"]?.ToString() ??
-                                     throw new ArgumentException("Variable name is required for delete. Please specify one of: variable_name, variableName, variable, objectVariable, or object in the activity_config.");
+                                     throw new ArgumentException("Variable name is required for delete. Please specify one of: variable_name, variableName, variable, objectVariable, object_variable, or object in the activity_config.");
+
+                _logger.LogInformation($"[CreateDeleteActivity] Using variable name: '{variableName}'");
 
                 return microflowActivitiesService.CreateDeleteObjectActivity(_model, variableName);
             }
@@ -2654,7 +2727,7 @@ namespace MCPExtension.Tools
                 Dictionary<string, string> variableNameMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 
                 // Debug logging to file
-                var debugLogPath = @"C:\Mendix Projects\Sample\resources\mcp_debug.log";
+                var debugLogPath = GetDebugLogPath();
                 await File.AppendAllTextAsync(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] VARIABLE TRACKING: Starting variable tracking for {activitiesArray.Count} activities\n");
 
                 using (var transaction = _model.StartTransaction("Create microflow activities sequence"))
@@ -2931,14 +3004,14 @@ namespace MCPExtension.Tools
         {
             if (activityConfig == null || variableNameMap.Count == 0)
             {
-                var debugLogPath = @"C:\Mendix Projects\Sample\resources\mcp_debug.log";
+                var debugLogPath = GetDebugLogPath();
                 File.AppendAllText(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] APPLY_SUBSTITUTIONS: Early return - activityConfig null: {activityConfig == null}, variableNameMap count: {variableNameMap.Count}\n");
                 return activityConfig;
             }
 
             try
             {
-                var debugLogPath = @"C:\Mendix Projects\Sample\resources\mcp_debug.log";
+                var debugLogPath = GetDebugLogPath();
                 File.AppendAllText(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] APPLY_SUBSTITUTIONS: Starting substitutions\n");
                 
                 // Create a deep copy of the configuration to avoid modifying the original
@@ -2971,9 +3044,19 @@ namespace MCPExtension.Tools
                         {
                             var currentValue = fieldValue.ToString();
                             File.AppendAllText(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] APPLY_SUBSTITUTIONS: String field '{field}' has value '{currentValue}'\n");
-                            if (!string.IsNullOrEmpty(currentValue) && variableNameMap.ContainsKey(currentValue))
+                            
+                            // Handle both plain variable names and $-prefixed variables
+                            string lookupKey = currentValue;
+                            if (currentValue.StartsWith("$"))
                             {
-                                var actualVariableName = variableNameMap[currentValue];
+                                lookupKey = currentValue.Substring(1); // Remove $ prefix for lookup
+                                File.AppendAllText(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] APPLY_SUBSTITUTIONS: Found $-prefixed variable, lookup key: '{lookupKey}'\n");
+                            }
+                            
+                            if (!string.IsNullOrEmpty(lookupKey) && variableNameMap.ContainsKey(lookupKey))
+                            {
+                                var actualVariableName = variableNameMap[lookupKey];
+                                // For delete activities, we want just the variable name without $
                                 processedConfig[field] = actualVariableName;
                                 File.AppendAllText(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] APPLY_SUBSTITUTIONS: ✅ Substituted variable '{currentValue}' with actual name '{actualVariableName}' in field '{field}'\n");
                                 _logger.LogInformation($"Substituted variable '{currentValue}' with actual name '{actualVariableName}' in field '{field}'");
@@ -2988,12 +3071,24 @@ namespace MCPExtension.Tools
                             {
                                 var currentValue = arrayValue[i]?.ToString();
                                 File.AppendAllText(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] APPLY_SUBSTITUTIONS: Array element [{i}] = '{currentValue}'\n");
-                                if (!string.IsNullOrEmpty(currentValue) && variableNameMap.ContainsKey(currentValue))
+                                
+                                if (!string.IsNullOrEmpty(currentValue))
                                 {
-                                    var actualVariableName = variableNameMap[currentValue];
-                                    arrayValue[i] = actualVariableName;
-                                    File.AppendAllText(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] APPLY_SUBSTITUTIONS: ✅ Substituted array variable '{currentValue}' with actual name '{actualVariableName}' in field '{field}[{i}]'\n");
-                                    _logger.LogInformation($"Substituted array variable '{currentValue}' with actual name '{actualVariableName}' in field '{field}[{i}]'");
+                                    // Handle both plain variable names and $-prefixed variables
+                                    string lookupKey = currentValue;
+                                    if (currentValue.StartsWith("$"))
+                                    {
+                                        lookupKey = currentValue.Substring(1); // Remove $ prefix for lookup
+                                    }
+                                    
+                                    if (variableNameMap.ContainsKey(lookupKey))
+                                    {
+                                        var actualVariableName = variableNameMap[lookupKey];
+                                        // For activities that expect variable names, use just the name without $
+                                        arrayValue[i] = actualVariableName;
+                                        File.AppendAllText(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] APPLY_SUBSTITUTIONS: ✅ Substituted array variable '{currentValue}' with actual name '{actualVariableName}' in field '{field}[{i}]'\n");
+                                        _logger.LogInformation($"Substituted array variable '{currentValue}' with actual name '{actualVariableName}' in field '{field}[{i}]'");
+                                    }
                                 }
                             }
                         }
@@ -3019,7 +3114,7 @@ namespace MCPExtension.Tools
 
             try
             {
-                var debugLogPath = @"C:\Mendix Projects\Sample\resources\mcp_debug.log";
+                var debugLogPath = GetDebugLogPath();
                 File.AppendAllText(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] TRACK_VARIABLES: Processing activity type '{activityType}'\n");
                 
                 string? logicalName = null;
@@ -3091,6 +3186,9 @@ namespace MCPExtension.Tools
                         variableNameMap[logicalName] = actualName;
                         _logger.LogInformation($"Tracking variable mapping: '{logicalName}' -> '{actualName}'");
                     }
+                    
+                    // Also add self-mapping for the actual variable name for direct $-prefixed references
+                    variableNameMap[actualName] = actualName;
                 }
                     
                 // For retrieve activities, also track entity-based logical names (e.g., "Customer" -> "RetrievedCustomer")
@@ -3109,6 +3207,9 @@ namespace MCPExtension.Tools
                             variableNameMap[simpleEntityName] = actualName;
                             _logger.LogInformation($"Tracking entity-based variable mapping: '{simpleEntityName}' -> '{actualName}'");
                         }
+                        
+                        // Also add self-mapping for the actual variable name for direct $-prefixed references
+                        variableNameMap[actualName] = actualName;
                     }
                 }
             }
