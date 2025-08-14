@@ -61,6 +61,10 @@ public class Utils
     /// </summary>
     public static DataType DataTypeFromString(string typeName)
     {
+        // Handle null, empty, or whitespace-only strings as Void
+        if (string.IsNullOrWhiteSpace(typeName))
+            return DataType.Void;
+            
         return typeName.ToLower() switch
         {
             "string" => DataType.String,
@@ -69,6 +73,7 @@ public class Utils
             "decimal" => DataType.Decimal,
             "datetime" => DataType.DateTime,
             "long" => DataType.Integer, // Mendix uses Integer for Long values
+            "void" => DataType.Void,
             _ => DataType.String // Default to string for unknown types
         };
     }

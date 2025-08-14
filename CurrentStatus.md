@@ -3,6 +3,35 @@
 **Date:** July 21, 2025  
 **Project:** MCPExtension - Mendix Studio Pro MCP Server Extension
 
+## Latest Update: Variable Name Tracking and Propagation System
+
+### Major Issue Resolved
+**Problem**: When creating multiple activities in sequence (e.g., retrieve → change → commit), the AI would use logical variable names like "Customer", but Mendix would create actual variables with names like "RetrievedObjects". This caused subsequent activities to fail because they referenced non-existent variables.
+
+**Solution Implemented**: 
+- ✅ **Variable Name Mapping**: Track the mapping between logical names (like "Customer") and actual Mendix variable names (like "RetrievedObjects")
+- ✅ **Configuration Preprocessing**: Before creating each activity, substitute any variable references with their actual names  
+- ✅ **Activity Type Awareness**: Different activity types create variables in different ways, tracked appropriately
+
+### Key Methods Added
+1. **`ApplyVariableNameSubstitutions()`**: Preprocesses activity configuration to substitute variable references
+2. **`TrackVariableNames()`**: Tracks variable name mappings after activity creation
+
+### Impact
+This fixes the core issue where creating sequences like:
+```
+1. Retrieve Customer → creates "RetrievedObjects" variable
+2. Change "Customer" → FAILS (variable "Customer" doesn't exist)  
+3. Commit "Customer" → FAILS (variable "Customer" doesn't exist)
+```
+
+Now becomes:
+```
+1. Retrieve Customer → creates "RetrievedObjects", tracks "Customer" → "RetrievedObjects"
+2. Change "Customer" → auto-substituted to "RetrievedObjects" ✅
+3. Commit "Customer" → auto-substituted to "RetrievedObjects" ✅
+```
+
 ## Overview
 
 This document summarizes the recent comprehensive expansion of the Mendix MCP Extension's microflow capabilities based on extensive research of the Mendix Extensions API.
@@ -142,10 +171,10 @@ catch (Exception ex)
 ## Build Status
 
 ### Current State
-- **Compilation**: ✅ Successful (Build succeeded with 0 errors)
-- **Warnings**: 114 warnings (primarily nullable reference types)
+- **Compilation**: ✅ Successful (Build succeeded with 0 errors, 0 warnings)
+- **Variable Tracking**: ✅ Implemented and tested (Major sequence activity bug resolved)
 - **Output**: Extension DLL successfully generated
-- **Deployment**: Automatic copy to `C:\Mendix Projects\Sample\extensions\MCP\`
+- **Deployment**: Automatic copy to `C:\Mendix Projects\{YourProjectName}\extensions\MCP\`
 
 ### Compilation Resolution
 Several compilation errors were resolved during implementation:
