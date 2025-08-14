@@ -82,7 +82,27 @@ namespace MCPExtension.Tools
                     var entityName = parameters["entity_name"]?.ToString();
                     var attributesArray = parameters["attributes"]?.AsArray();
 
-                    if (string.IsNullOrEmpty(entityName))
+                    // Extract persistable parameter (default to true for backward compatibility)
+                    bool persistable = true;
+                    if (parameters.ContainsKey("persistable"))
+                    {
+                        if (parameters["persistable"]?.AsValue().TryGetValue<bool>(out var persistableValue) == true)
+                        {
+                            persistable = persistableValue;
+                        }
+                    }
+
+                    // Extract entityType parameter (default to "persistent")
+                    string entityType = "persistent";
+                    if (parameters.ContainsKey("entityType"))
+                    {
+                        entityType = parameters["entityType"]?.ToString() ?? "persistent";
+                    }
+                    // Handle backward compatibility: if persistable is false, use non-persistent
+                    else if (!persistable)
+                    {
+                        entityType = "non-persistent";
+                    }                    if (string.IsNullOrEmpty(entityName))
                     {
                         return JsonSerializer.Serialize(new { error = "Entity name is required" });
                     }
@@ -102,66 +122,47 @@ namespace MCPExtension.Tools
                         return JsonSerializer.Serialize(new { error = $"Entity '{entityName}' already exists" });
                     }
 
-                    // Create entity
-                    var mxEntity = _model.Create<IEntity>();
-                    mxEntity.Name = entityName;
-                    module.DomainModel.AddEntity(mxEntity);
+                    IEntity mxEntity;
+                    string displayEntityType = entityType;
 
-                    // Add attributes if provided
-                    if (attributesArray != null)
+                    if (entityType != "persistent")
                     {
-                        foreach (var attrNode in attributesArray)
+                        // Use template-based approach for special entity types
+                        mxEntity = CreateEntityFromTemplate(module, entityName, attributesArray, entityType);
+                        if (mxEntity == null)
                         {
-                            var attrObj = attrNode?.AsObject();
-                            if (attrObj == null) continue;
-
-                            var attrName = attrObj["name"]?.ToString();
-                            var attrType = attrObj["type"]?.ToString();
-
-                            if (string.IsNullOrEmpty(attrName) || string.IsNullOrEmpty(attrType)) continue;
-
-                            var mxAttribute = _model.Create<IAttribute>();
-                            mxAttribute.Name = attrName;
-
-                            if (attrType.Equals("Enumeration", StringComparison.OrdinalIgnoreCase))
-                            {
-                                var enumValues = attrObj["enumerationValues"]?.AsArray()
-                                    ?.Select(v => v?.ToString())
-                                    ?.Where(v => !string.IsNullOrEmpty(v))
-                                    ?.ToList();
-
-                                if (enumValues != null && enumValues.Any())
-                                {
-                                    var enumTypeInstance = CreateEnumerationType(_model, attrName, enumValues, module);
-                                    mxAttribute.Type = enumTypeInstance;
-                                }
-                                else
-                                {
-                                    return JsonSerializer.Serialize(new { error = $"Enumeration attribute '{attrName}' must have values defined" });
-                                }
-                            }
-                            else
-                            {
-                                var attributeType = CreateAttributeType(_model, attrType);
-                                mxAttribute.Type = attributeType;
-                            }
-
-                            mxEntity.AddAttribute(mxAttribute);
+                            return JsonSerializer.Serialize(new 
+                            { 
+                                error = $"Failed to create {entityType} entity. AIExtension.{GetTemplateName(entityType)} template not found or invalid.",
+                                details = $"Make sure the AIExtension module exists with a {GetTemplateName(entityType)} entity properly configured."
+                            });
                         }
                     }
-
-                    // Position entity
-                    PositionEntity(mxEntity, module.DomainModel.GetEntities().Count());
+                    else
+                    {
+                        // Create regular persistent entity
+                        mxEntity = CreateEntityFromTemplate(module, entityName, attributesArray, "persistent");
+                        if (mxEntity == null)
+                        {
+                            return JsonSerializer.Serialize(new 
+                            { 
+                                error = "Failed to create persistent entity.",
+                                details = "Error occurred while creating the entity."
+                            });
+                        }
+                    }
 
                     transaction.Commit();
 
                     return JsonSerializer.Serialize(new 
                     { 
                         success = true, 
-                        message = $"Entity '{entityName}' created successfully",
+                        message = $"Entity '{entityName}' created successfully as {displayEntityType}",
                         entity = new
                         {
                             name = mxEntity.Name,
+                            persistable = persistable,
+                            entityType = entityType,
                             attributes = mxEntity.GetAttributes().Select(a => new
                             {
                                 name = a.Name,
@@ -285,6 +286,16 @@ namespace MCPExtension.Tools
                 using (var transaction = _model.StartTransaction("create multiple entities"))
                 {
                     var entitiesArray = parameters["entities"]?.AsArray();
+                    
+                    // Extract persistable parameter (default to true for backward compatibility)
+                    bool persistable = true;
+                    if (parameters.ContainsKey("persistable"))
+                    {
+                        if (parameters["persistable"]?.AsValue().TryGetValue<bool>(out var persistableValue) == true)
+                        {
+                            persistable = persistableValue;
+                        }
+                    }
 
                     if (entitiesArray == null)
                     {
@@ -298,6 +309,7 @@ namespace MCPExtension.Tools
                     }
 
                     var createdEntities = new List<object>();
+                    string entityType = persistable ? "persistent" : "non-persistent";
 
                     foreach (var entityNode in entitiesArray)
                     {
@@ -318,62 +330,85 @@ namespace MCPExtension.Tools
                             continue; // Skip existing entities
                         }
 
-                        // Create entity
-                        var mxEntity = _model.Create<IEntity>();
-                        mxEntity.Name = entityName;
-                        module.DomainModel.AddEntity(mxEntity);
-
-                        // Add attributes if provided
+                        IEntity mxEntity;
                         var entityAttributes = new List<object>();
-                        if (attributesArray != null)
+
+                        if (!persistable)
                         {
-                            foreach (var attrNode in attributesArray)
+                            // Use template-based approach for non-persistent entities
+                            mxEntity = CreateEntityFromTemplate(module, entityName, attributesArray);
+                            if (mxEntity == null)
                             {
-                                var attrObj = attrNode?.AsObject();
-                                if (attrObj == null) continue;
+                                // Skip this entity and continue with others
+                                continue;
+                            }
 
-                                var attrName = attrObj["name"]?.ToString();
-                                var attrType = attrObj["type"]?.ToString();
+                            // Collect attributes for response
+                            foreach (var attr in mxEntity.GetAttributes())
+                            {
+                                entityAttributes.Add(new { name = attr.Name, type = attr.Type?.GetType().Name ?? "Unknown" });
+                            }
+                        }
+                        else
+                        {
+                            // Create regular persistent entity
+                            mxEntity = _model.Create<IEntity>();
+                            mxEntity.Name = entityName;
+                            module.DomainModel.AddEntity(mxEntity);
 
-                                if (string.IsNullOrEmpty(attrName) || string.IsNullOrEmpty(attrType)) continue;
-
-                                var mxAttribute = _model.Create<IAttribute>();
-                                mxAttribute.Name = attrName;
-
-                                if (attrType.Equals("Enumeration", StringComparison.OrdinalIgnoreCase))
+                            // Add attributes if provided
+                            if (attributesArray != null)
+                            {
+                                foreach (var attrNode in attributesArray)
                                 {
-                                    var enumValues = attrObj["enumerationValues"]?.AsArray()
-                                        ?.Select(v => v?.ToString())
-                                        ?.Where(v => !string.IsNullOrEmpty(v))
-                                        ?.ToList();
+                                    var attrObj = attrNode?.AsObject();
+                                    if (attrObj == null) continue;
 
-                                    if (enumValues != null && enumValues.Any())
+                                    var attrName = attrObj["name"]?.ToString();
+                                    var attrType = attrObj["type"]?.ToString();
+
+                                    if (string.IsNullOrEmpty(attrName) || string.IsNullOrEmpty(attrType)) continue;
+
+                                    var mxAttribute = _model.Create<IAttribute>();
+                                    mxAttribute.Name = attrName;
+
+                                    if (attrType.Equals("Enumeration", StringComparison.OrdinalIgnoreCase))
                                     {
-                                        var enumTypeInstance = CreateEnumerationType(_model, attrName, enumValues, module);
-                                        mxAttribute.Type = enumTypeInstance;
+                                        var enumValues = attrObj["enumerationValues"]?.AsArray()
+                                            ?.Select(v => v?.ToString())
+                                            ?.Where(v => !string.IsNullOrEmpty(v))
+                                            ?.ToList();
+
+                                        if (enumValues != null && enumValues.Any())
+                                        {
+                                            var enumTypeInstance = CreateEnumerationType(_model, attrName, enumValues, module);
+                                            mxAttribute.Type = enumTypeInstance;
+                                        }
+                                        else
+                                        {
+                                            continue; // Skip invalid enumerations
+                                        }
                                     }
                                     else
                                     {
-                                        continue; // Skip invalid enumerations
+                                        var attributeType = CreateAttributeType(_model, attrType);
+                                        mxAttribute.Type = attributeType;
                                     }
-                                }
-                                else
-                                {
-                                    var attributeType = CreateAttributeType(_model, attrType);
-                                    mxAttribute.Type = attributeType;
-                                }
 
-                                mxEntity.AddAttribute(mxAttribute);
-                                entityAttributes.Add(new { name = attrName, type = attrType });
+                                    mxEntity.AddAttribute(mxAttribute);
+                                    entityAttributes.Add(new { name = attrName, type = attrType });
+                                }
                             }
-                        }
 
-                        // Position entity
-                        PositionEntity(mxEntity, module.DomainModel.GetEntities().Count());
+                            // Position entity
+                            PositionEntity(mxEntity, module.DomainModel.GetEntities().Count());
+                        }
 
                         createdEntities.Add(new 
                         { 
                             name = entityName, 
+                            persistable = persistable,
+                            entityType = entityType,
                             attributes = entityAttributes 
                         });
                     }
@@ -383,8 +418,10 @@ namespace MCPExtension.Tools
                     return JsonSerializer.Serialize(new 
                     { 
                         success = true, 
-                        message = $"Successfully created {createdEntities.Count} entities",
-                        entities = createdEntities
+                        message = $"Successfully created {createdEntities.Count} {entityType} entities",
+                        entities = createdEntities,
+                        persistable = persistable,
+                        entityType = entityType
                     });
                 }
             }
@@ -517,6 +554,16 @@ namespace MCPExtension.Tools
                         return JsonSerializer.Serialize(new { error = "Schema object is required" });
                     }
 
+                    // Extract persistable parameter (default to true for backward compatibility)
+                    bool persistable = true;
+                    if (parameters.ContainsKey("persistable"))
+                    {
+                        if (parameters["persistable"]?.AsValue().TryGetValue<bool>(out var persistableValue) == true)
+                        {
+                            persistable = persistableValue;
+                        }
+                    }
+
                     var module = Utils.Utils.GetMyFirstModule(_model);
                     if (module?.DomainModel == null)
                     {
@@ -528,6 +575,7 @@ namespace MCPExtension.Tools
 
                     var createdEntities = new List<object>();
                     var createdAssociations = new List<object>();
+                    string entityType = persistable ? "persistent" : "non-persistent";
 
                     // Create entities first
                     if (entitiesArray != null)
@@ -542,6 +590,18 @@ namespace MCPExtension.Tools
 
                             if (string.IsNullOrEmpty(entityName)) continue;
 
+                            // Extract entityType for this specific entity
+                            string currentEntityType = "persistent";
+                            if (entityObj.ContainsKey("entityType"))
+                            {
+                                currentEntityType = entityObj["entityType"]?.ToString() ?? "persistent";
+                            }
+                            // Handle backward compatibility: if global persistable is false, use non-persistent
+                            else if (!persistable)
+                            {
+                                currentEntityType = "non-persistent";
+                            }
+
                             // Check if entity already exists
                             var existingEntity = module.DomainModel.GetEntities()
                                 .FirstOrDefault(e => e.Name.Equals(entityName, StringComparison.OrdinalIgnoreCase));
@@ -551,62 +611,28 @@ namespace MCPExtension.Tools
                                 continue; // Skip existing entities
                             }
 
-                            // Create entity
-                            var mxEntity = _model.Create<IEntity>();
-                            mxEntity.Name = entityName;
-                            module.DomainModel.AddEntity(mxEntity);
-
-                            // Add attributes if provided
+                            IEntity mxEntity;
                             var entityAttributes = new List<object>();
-                            if (attributesArray != null)
+
+                            // Use template-based approach for all entity types
+                            mxEntity = CreateEntityFromTemplate(module, entityName, attributesArray, currentEntityType);
+                            if (mxEntity == null)
                             {
-                                foreach (var attrNode in attributesArray)
-                                {
-                                    var attrObj = attrNode?.AsObject();
-                                    if (attrObj == null) continue;
-
-                                    var attrName = attrObj["name"]?.ToString();
-                                    var attrType = attrObj["type"]?.ToString();
-
-                                    if (string.IsNullOrEmpty(attrName) || string.IsNullOrEmpty(attrType)) continue;
-
-                                    var mxAttribute = _model.Create<IAttribute>();
-                                    mxAttribute.Name = attrName;
-
-                                    if (attrType.Equals("Enumeration", StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        var enumValues = attrObj["enumerationValues"]?.AsArray()
-                                            ?.Select(v => v?.ToString())
-                                            ?.Where(v => !string.IsNullOrEmpty(v))
-                                            ?.ToList();
-
-                                        if (enumValues != null && enumValues.Any())
-                                        {
-                                            var enumTypeInstance = CreateEnumerationType(_model, attrName, enumValues, module);
-                                            mxAttribute.Type = enumTypeInstance;
-                                        }
-                                        else
-                                        {
-                                            continue; // Skip invalid enumerations
-                                        }
-                                    }
-                                    else
-                                    {
-                                        var attributeType = CreateAttributeType(_model, attrType);
-                                        mxAttribute.Type = attributeType;
-                                    }
-
-                                    mxEntity.AddAttribute(mxAttribute);
-                                    entityAttributes.Add(new { name = attrName, type = attrType });
-                                }
+                                // Skip this entity and continue with others
+                                continue;
                             }
 
-                            // Position entity
-                            PositionEntity(mxEntity, module.DomainModel.GetEntities().Count());
+                            // Collect attributes for response
+                            foreach (var attr in mxEntity.GetAttributes())
+                            {
+                                entityAttributes.Add(new { name = attr.Name, type = attr.Type?.GetType().Name ?? "Unknown" });
+                            }
 
                             createdEntities.Add(new 
                             { 
                                 name = entityName, 
+                                persistable = currentEntityType == "persistent",
+                                entityType = currentEntityType,
                                 attributes = entityAttributes 
                             });
                         }
@@ -663,7 +689,8 @@ namespace MCPExtension.Tools
                         success = true, 
                         message = $"Successfully created domain model with {createdEntities.Count} entities and {createdAssociations.Count} associations",
                         entities = createdEntities,
-                        associations = createdAssociations
+                        associations = createdAssociations,
+                        persistable = persistable
                     });
                 }
             }
@@ -816,6 +843,106 @@ namespace MCPExtension.Tools
             return JsonSerializer.Serialize(new { tools = tools, status = "success" });
         }
 
+        /// <summary>
+        /// Get dynamically available entity types based on template availability
+        /// </summary>
+        /// <returns>List of supported entity types in current project</returns>
+        public List<string> GetAvailableEntityTypes()
+        {
+            var availableTypes = new List<string>
+            {
+                "persistent" // Always available
+            };
+
+            try
+            {
+                // Check for each template and add to available types if found
+                if (FindNonPersistentTemplate() != null)
+                {
+                    availableTypes.Add("non-persistent");
+                }
+
+                if (FindFileDocumentTemplate() != null)
+                {
+                    availableTypes.Add("filedocument");
+                }
+
+                if (FindImageTemplate() != null)
+                {
+                    availableTypes.Add("image");
+                }
+
+                if (FindStoreCreatedDateTemplate() != null)
+                {
+                    availableTypes.Add("storecreateddate");
+                }
+
+                if (FindStoreChangeDateTemplate() != null)
+                {
+                    availableTypes.Add("storechangedate");
+                }
+
+                if (FindStoreCreatedChangeDateTemplate() != null)
+                {
+                    availableTypes.Add("storecreatedchangedate");
+                }
+
+                if (FindStoreOwnerTemplate() != null)
+                {
+                    availableTypes.Add("storeowner");
+                }
+
+                if (FindStoreChangeByTemplate() != null)
+                {
+                    availableTypes.Add("storechangeby");
+                }
+
+                _logger.LogInformation($"Available entity types: {string.Join(", ", availableTypes)}");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error checking template availability, falling back to basic types");
+                // If there's an error checking templates, provide basic types
+                if (!availableTypes.Contains("non-persistent"))
+                {
+                    availableTypes.Add("non-persistent"); // Usually available
+                }
+            }
+
+            return availableTypes;
+        }
+
+        /// <summary>
+        /// Get detailed information about available entity types including descriptions
+        /// </summary>
+        /// <returns>Dictionary with entity type details</returns>
+        public Dictionary<string, object> GetEntityTypeInfo()
+        {
+            var availableTypes = GetAvailableEntityTypes();
+            var allDescriptions = new Dictionary<string, string>
+            {
+                { "persistent", "Standard entity stored in database (always available)" },
+                { "non-persistent", "Session entity not stored in database (uses NPE template)" },
+                { "filedocument", "Entity inheriting from System.FileDocument for file storage" },
+                { "image", "Entity inheriting from System.Image for image storage" },
+                { "storecreateddate", "Entity with automatic creation date tracking" },
+                { "storechangedate", "Entity with automatic modification date tracking" },
+                { "storecreatedchangedate", "Entity with both creation and modification date tracking" },
+                { "storeowner", "Entity with automatic owner (creator) tracking" },
+                { "storechangeby", "Entity with automatic last modifier tracking" }
+            };
+
+            var result = new Dictionary<string, object>
+            {
+                { "availableTypes", availableTypes },
+                { "descriptions", availableTypes.ToDictionary(type => type, type => allDescriptions[type]) },
+                { "unavailableTypes", allDescriptions.Keys.Except(availableTypes).ToList() },
+                { "templateInstructions", "Unavailable types require corresponding templates in AIExtension module" }
+            };
+
+            return result;
+        }
+
         #region Helper Methods
 
         private Dictionary<string, string> GetEntityAttributes(IEntity entity)
@@ -952,7 +1079,7 @@ namespace MCPExtension.Tools
                 case "reference":
                     return AssociationType.Reference;
                 case "many-to-many":
-                case "referenceset":
+                case "referenceset":  // FIXED: ReferenceSet should create many-to-many
                     return AssociationType.ReferenceSet;
                 default:
                     return AssociationType.Reference;
@@ -1084,6 +1211,342 @@ namespace MCPExtension.Tools
                 });
             }
         }
+
+        #region Entity Template Methods
+
+        /// <summary>
+        /// Finds the template non-persistent entity (AIExtension.NPE) for copying
+        /// </summary>
+        /// <returns>The template entity if found, null otherwise</returns>
+        private IEntity? FindNonPersistentTemplate()
+        {
+            return FindTemplateEntity("NPE", "non-persistent");
+        }
+
+        /// <summary>
+        /// Finds the template FileDocument entity (AIExtension.FileDocument) for copying
+        /// </summary>
+        /// <returns>The template entity if found, null otherwise</returns>
+        private IEntity? FindFileDocumentTemplate()
+        {
+            return FindTemplateEntity("FileDocument", "FileDocument");
+        }
+
+        /// <summary>
+        /// Finds the template Image entity (AIExtension.Image) for copying
+        /// </summary>
+        /// <returns>The template entity if found, null otherwise</returns>
+        private IEntity? FindImageTemplate()
+        {
+            return FindTemplateEntity("Image", "Image");
+        }
+
+        /// <summary>
+        /// Finds the template StoreCreatedDate entity (AIExtension.StoreCreatedDate) for copying
+        /// </summary>
+        /// <returns>The template entity if found, null otherwise</returns>
+        private IEntity? FindStoreCreatedDateTemplate()
+        {
+            return FindTemplateEntity("StoreCreatedDate", "StoreCreatedDate");
+        }
+
+        /// <summary>
+        /// Finds the template StoreChangeDate entity (AIExtension.StoreChangeDate) for copying
+        /// </summary>
+        /// <returns>The template entity if found, null otherwise</returns>
+        private IEntity? FindStoreChangeDateTemplate()
+        {
+            return FindTemplateEntity("StoreChangeDate", "StoreChangeDate");
+        }
+
+        /// <summary>
+        /// Finds the template StoreCreatedChangeDate entity (AIExtension.StoreCreatedChangeDate) for copying
+        /// </summary>
+        /// <returns>The template entity if found, null otherwise</returns>
+        private IEntity? FindStoreCreatedChangeDateTemplate()
+        {
+            return FindTemplateEntity("StoreCreatedChangeDate", "StoreCreatedChangeDate");
+        }
+
+        /// <summary>
+        /// Finds the template StoreOwner entity (AIExtension.StoreOwner) for copying
+        /// </summary>
+        /// <returns>The template entity if found, null otherwise</returns>
+        private IEntity? FindStoreOwnerTemplate()
+        {
+            return FindTemplateEntity("StoreOwner", "StoreOwner");
+        }
+
+        /// <summary>
+        /// Finds the template StoreChangeBy entity (AIExtension.StoreChangeBy) for copying
+        /// </summary>
+        /// <returns>The template entity if found, null otherwise</returns>
+        private IEntity? FindStoreChangeByTemplate()
+        {
+            return FindTemplateEntity("StoreChangeBy", "StoreChangeBy");
+        }
+
+        /// <summary>
+        /// Generic method to find template entities in the AIExtension module
+        /// </summary>
+        /// <param name="templateName">Name of the template entity to find</param>
+        /// <param name="templateType">Type description for logging purposes</param>
+        /// <returns>The template entity if found, null otherwise</returns>
+        private IEntity? FindTemplateEntity(string templateName, string templateType)
+        {
+            try
+            {
+                // Use the same module access pattern as the rest of the codebase
+                // Find all modules the safe way
+                var modules = _model.Root.GetModules();
+                
+                // Look specifically for AIExtension module
+                var aiExtensionModule = modules.FirstOrDefault(m => m?.Name == "AIExtension");
+
+                if (aiExtensionModule?.DomainModel == null)
+                {
+                    _logger.LogWarning($"AIExtension module or its domain model not found for {templateType} template");
+                    return null;
+                }
+
+                // Find the specified entity in AIExtension
+                var templateEntity = aiExtensionModule.DomainModel.GetEntities()
+                    .FirstOrDefault(e => e?.Name == templateName);
+
+                if (templateEntity == null)
+                {
+                    _logger.LogWarning($"{templateName} template entity not found in AIExtension module");
+                    return null;
+                }
+
+                _logger.LogInformation($"Found {templateType} template entity: AIExtension.{templateName}");
+                return templateEntity;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error finding {templateType} template entity");
+                return null;
+            }
+        }        /// <summary>
+        /// Creates an entity by copying from a template based on entity type
+        /// </summary>
+        /// <param name="targetModule">Module where the new entity will be created</param>
+        /// <param name="entityName">Name for the new entity</param>
+        /// <param name="attributesArray">Attributes to add to the entity</param>
+        /// <param name="entityType">Type of entity: "persistent", "non-persistent", "filedocument", "image"</param>
+        /// <returns>The created entity if successful, null otherwise</returns>
+        private IEntity? CreateEntityFromTemplate(IModule targetModule, string entityName, JsonArray? attributesArray, string entityType = "persistent")
+        {
+            try
+            {
+                IEntity? templateEntity = null;
+                string templateDescription = "";
+
+                // Find the appropriate template based on entity type
+                switch (entityType.ToLower())
+                {
+                    case "non-persistent":
+                        templateEntity = FindNonPersistentTemplate();
+                        templateDescription = "non-persistent";
+                        break;
+                    case "filedocument":
+                        templateEntity = FindFileDocumentTemplate();
+                        templateDescription = "FileDocument";
+                        break;
+                    case "image":
+                        templateEntity = FindImageTemplate();
+                        templateDescription = "Image";
+                        break;
+                    case "storecreateddate":
+                        templateEntity = FindStoreCreatedDateTemplate();
+                        templateDescription = "StoreCreatedDate";
+                        break;
+                    case "storechangedate":
+                        templateEntity = FindStoreChangeDateTemplate();
+                        templateDescription = "StoreChangeDate";
+                        break;
+                    case "storecreatedchangedate":
+                        templateEntity = FindStoreCreatedChangeDateTemplate();
+                        templateDescription = "StoreCreatedChangeDate";
+                        break;
+                    case "storeowner":
+                        templateEntity = FindStoreOwnerTemplate();
+                        templateDescription = "StoreOwner";
+                        break;
+                    case "storechangeby":
+                        templateEntity = FindStoreChangeByTemplate();
+                        templateDescription = "StoreChangeBy";
+                        break;
+                    case "persistent":
+                    default:
+                        // For persistent entities, create normally without template
+                        return CreatePersistentEntity(targetModule, entityName, attributesArray);
+                }
+
+                if (templateEntity == null)
+                {
+                    _logger.LogError($"Cannot create {templateDescription} entity: template not found");
+                    return null;
+                }
+
+                // Copy the template entity (this preserves the special properties)
+                var newEntity = _model.Copy(templateEntity);
+
+                // Rename the entity
+                newEntity.Name = entityName;
+
+                // Add the desired attributes
+                if (attributesArray != null)
+                {
+                    foreach (var attrNode in attributesArray)
+                    {
+                        var attrObj = attrNode?.AsObject();
+                        if (attrObj == null) continue;
+
+                        var attrName = attrObj["name"]?.ToString();
+                        var attrType = attrObj["type"]?.ToString();
+
+                        if (string.IsNullOrEmpty(attrName) || string.IsNullOrEmpty(attrType)) continue;
+
+                        var mxAttribute = _model.Create<IAttribute>();
+                        mxAttribute.Name = attrName;
+
+                        if (attrType.Equals("Enumeration", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var enumValues = attrObj["enumerationValues"]?.AsArray()
+                                ?.Select(v => v?.ToString())
+                                ?.Where(v => !string.IsNullOrEmpty(v))
+                                ?.ToList();
+
+                            if (enumValues != null && enumValues.Any())
+                            {
+                                var enumTypeInstance = CreateEnumerationType(_model, attrName, enumValues, targetModule);
+                                mxAttribute.Type = enumTypeInstance;
+                            }
+                            else
+                            {
+                                continue; // Skip invalid enumerations
+                            }
+                        }
+                        else
+                        {
+                            var attributeType = CreateAttributeType(_model, attrType);
+                            mxAttribute.Type = attributeType;
+                        }
+
+                        newEntity.AddAttribute(mxAttribute);
+                    }
+                }
+
+                // Add the entity to the target module
+                targetModule.DomainModel.AddEntity(newEntity);
+
+                // Position the entity
+                PositionEntity(newEntity, targetModule.DomainModel.GetEntities().Count());
+
+                _logger.LogInformation($"Successfully created {templateDescription} entity '{entityName}' from template");
+                return newEntity;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error creating entity '{entityName}' from template");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Creates a regular persistent entity without using templates
+        /// </summary>
+        /// <param name="targetModule">Module where the new entity will be created</param>
+        /// <param name="entityName">Name for the new entity</param>
+        /// <param name="attributesArray">Attributes to add to the entity</param>
+        /// <returns>The created entity if successful, null otherwise</returns>
+        private IEntity? CreatePersistentEntity(IModule targetModule, string entityName, JsonArray? attributesArray)
+        {
+            try
+            {
+                // Create regular persistent entity
+                var mxEntity = _model.Create<IEntity>();
+                mxEntity.Name = entityName;
+                targetModule.DomainModel.AddEntity(mxEntity);
+
+                // Add attributes if provided
+                if (attributesArray != null)
+                {
+                    foreach (var attrNode in attributesArray)
+                    {
+                        var attrObj = attrNode?.AsObject();
+                        if (attrObj == null) continue;
+
+                        var attrName = attrObj["name"]?.ToString();
+                        var attrType = attrObj["type"]?.ToString();
+
+                        if (string.IsNullOrEmpty(attrName) || string.IsNullOrEmpty(attrType)) continue;
+
+                        var mxAttribute = _model.Create<IAttribute>();
+                        mxAttribute.Name = attrName;
+
+                        if (attrType.Equals("Enumeration", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var enumValues = attrObj["enumerationValues"]?.AsArray()
+                                ?.Select(v => v?.ToString())
+                                ?.Where(v => !string.IsNullOrEmpty(v))
+                                ?.ToList();
+
+                            if (enumValues != null && enumValues.Any())
+                            {
+                                var enumTypeInstance = CreateEnumerationType(_model, attrName, enumValues, targetModule);
+                                mxAttribute.Type = enumTypeInstance;
+                            }
+                            else
+                            {
+                                continue; // Skip invalid enumerations
+                            }
+                        }
+                        else
+                        {
+                            var attributeType = CreateAttributeType(_model, attrType);
+                            mxAttribute.Type = attributeType;
+                        }
+
+                        mxEntity.AddAttribute(mxAttribute);
+                    }
+                }
+
+                // Position entity
+                PositionEntity(mxEntity, targetModule.DomainModel.GetEntities().Count());
+
+                return mxEntity;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error creating persistent entity '{entityName}'");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Gets the template name for a given entity type
+        /// </summary>
+        /// <param name="entityType">The entity type</param>
+        /// <returns>The template name</returns>
+        private static string GetTemplateName(string entityType)
+        {
+            return entityType.ToLower() switch
+            {
+                "non-persistent" => "NPE",
+                "filedocument" => "FileDocument",
+                "image" => "Image",
+                "storecreateddate" => "StoreCreatedDate",
+                "storechangedate" => "StoreChangeDate",
+                "storecreatedchangedate" => "StoreCreatedChangeDate",
+                "storeowner" => "StoreOwner",
+                "storechangeby" => "StoreChangeBy",
+                _ => "Unknown"
+            };
+        }
+
+        #endregion
 
         #endregion
     }

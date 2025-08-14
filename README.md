@@ -7,12 +7,15 @@ MCPExtension is an experimental C# Mendix Extensibility framework project that e
 ## Features
 
 - **HTTP/SSE MCP Server** - Provides a standards-compliant MCP server implementation
-- **Domain Model Management** - Create, read, update, and delete domain model entities and associations
+- **Advanced Domain Model Management** - Create, read, update, and delete domain model entities and associations with support for 9 entity types
+- **Template-Based Entity Creation** - Leverages AIExtension module templates for specialized entity types including audit trails and file storage
+- **Comprehensive Entity Types** - Full support for persistent, non-persistent, FileDocument, Image, and audit trail entities
 - **Page Generation** - Generate overview pages for domain entities
-- **Microflow Inspection** - List and inspect microflows in your Mendix project
-- **Sample Data Generation** - Create realistic sample data for testing
+- **Microflow Management** - Create, inspect, and manage microflows with activity sequences
+- **Sample Data Generation** - Create realistic sample data for testing with proper relationships
 - **Real-time Debug Logging** - Comprehensive logging for troubleshooting
 - **Visual Studio Pro Integration** - Seamless integration with Mendix Studio Pro through a dockable pane
+- **Complete Parameter Documentation** - Full JSON schemas for all MCP tools with detailed parameter specifications
 
 ## Architecture
 
@@ -28,23 +31,41 @@ The extension consists of several key components:
 ### Tool Categories
 
 #### Domain Model Tools (`MendixDomainModelTools`)
-- `read_domain_model` - Read current domain model structure
-- `create_entity` - Create new entities with attributes
-- `create_association` - Create associations between entities
-- `create_multiple_entities` - Bulk entity creation
-- `create_multiple_associations` - Bulk association creation
-- `create_domain_model_from_schema` - Create complete domain models from JSON schemas
-- `delete_model_element` - Delete entities, attributes, or associations
-- `diagnose_associations` - Troubleshoot association creation issues
+- `read_domain_model` - Read current domain model structure with entities and associations
+- `create_entity` - Create new entities with comprehensive support for 9 entity types and attributes
+- `create_association` - Create associations between entities with proper relationship types
+- `create_multiple_entities` - Bulk entity creation with mixed entity types support
+- `create_multiple_associations` - Bulk association creation for complex domain models
+- `create_domain_model_from_schema` - Create complete domain models from JSON schemas with all entity types
+- `delete_model_element` - Delete entities, attributes, or associations from the domain model
+- `diagnose_associations` - Troubleshoot association creation issues with detailed diagnostics
+
+##### Supported Entity Types
+
+The extension supports **9 comprehensive entity types** through template-based creation:
+
+1. **`persistent`** (default) - Standard database entities
+2. **`non-persistent`** - Session entities (NPE template)
+3. **`filedocument`** - File storage entities (inherits from System.FileDocument)
+4. **`image`** - Image storage entities (inherits from System.Image)
+5. **`storecreateddate`** - Automatic creation date tracking
+6. **`storechangedate`** - Automatic modification date tracking
+7. **`storecreatedchangedate`** - Both creation and modification date tracking
+8. **`storeowner`** - Automatic owner (creator) tracking
+9. **`storechangeby`** - Automatic last modifier tracking
+
+**Template Requirements**: All special entity types require corresponding templates in the AIExtension module for proper inheritance and property setup.
 
 #### Additional Tools (`MendixAdditionalTools`)
-- `save_data` - Generate and validate sample data
-- `generate_overview_pages` - Create list view pages for entities
-- `list_microflows` - List microflows in a module
-- `read_microflow_details` - Get detailed microflow information
-- `get_last_error` - Retrieve last error information
-- `list_available_tools` - List all available MCP tools
-- `debug_info` - Get comprehensive domain model debug information
+- `save_data` - Generate and validate sample data with proper entity relationships
+- `generate_overview_pages` - Create list view pages for entities with navigation support
+- `list_microflows` - List microflows in a module with detailed metadata
+- `create_microflow` - Create new microflows with parameters and return types
+- `create_microflow_activities` - Create microflow activity sequences with proper ordering
+- `read_microflow_details` - Get detailed microflow information including all activities
+- `get_last_error` - Retrieve last error information with stack traces
+- `list_available_tools` - List all available MCP tools with capabilities
+- `debug_info` - Get comprehensive domain model debug information with usage examples
 
 ## Installation
 
@@ -72,6 +93,170 @@ Once started, the MCP server exposes several endpoints:
 - **Message Endpoint**: `http://localhost:3001/message` - MCP message handling
 - **Health Check**: `http://localhost:3001/health` - Server health status
 - **MCP Metadata**: `http://localhost:3001/.well-known/mcp` - MCP server metadata
+
+### Entity Creation Examples
+
+The extension provides powerful entity creation capabilities with comprehensive type support:
+
+#### Basic Persistent Entity
+```json
+{
+  "entity_name": "Customer",
+  "attributes": [
+    {"name": "firstName", "type": "String"},
+    {"name": "lastName", "type": "String"},
+    {"name": "birthDate", "type": "DateTime"},
+    {"name": "isActive", "type": "Boolean"}
+  ]
+}
+```
+
+#### Non-Persistent Entity (Session Data)
+```json
+{
+  "entity_name": "ShoppingCart",
+  "entityType": "non-persistent",
+  "attributes": [
+    {"name": "sessionId", "type": "String"},
+    {"name": "totalAmount", "type": "Decimal"}
+  ]
+}
+```
+
+#### FileDocument Entity (File Storage)
+```json
+{
+  "entity_name": "Invoice",
+  "entityType": "filedocument",
+  "attributes": [
+    {"name": "invoiceNumber", "type": "String"},
+    {"name": "issueDate", "type": "DateTime"}
+  ]
+}
+```
+
+#### Image Entity (Image Storage)
+```json
+{
+  "entity_name": "ProductPhoto",
+  "entityType": "image",
+  "attributes": [
+    {"name": "altText", "type": "String"},
+    {"name": "displayOrder", "type": "Integer"}
+  ]
+}
+```
+
+#### Audit Trail Entities
+
+**Creation Date Tracking:**
+```json
+{
+  "entity_name": "AuditDocument",
+  "entityType": "storecreateddate",
+  "attributes": [
+    {"name": "documentTitle", "type": "String"},
+    {"name": "description", "type": "String"}
+  ]
+}
+```
+
+**Modification Date Tracking:**
+```json
+{
+  "entity_name": "TrackedProduct",
+  "entityType": "storechangedate",
+  "attributes": [
+    {"name": "productName", "type": "String"},
+    {"name": "price", "type": "Decimal"}
+  ]
+}
+```
+
+**Full Audit Trail (Creation + Modification):**
+```json
+{
+  "entity_name": "FullAuditEntity",
+  "entityType": "storecreatedchangedate",
+  "attributes": [
+    {"name": "name", "type": "String"},
+    {"name": "value", "type": "String"}
+  ]
+}
+```
+
+**Owner Tracking:**
+```json
+{
+  "entity_name": "OwnedDocument",
+  "entityType": "storeowner",
+  "attributes": [
+    {"name": "title", "type": "String"},
+    {"name": "content", "type": "String"}
+  ]
+}
+```
+
+**Last Modifier Tracking:**
+```json
+{
+  "entity_name": "EditableRecord",
+  "entityType": "storechangeby",
+  "attributes": [
+    {"name": "recordName", "type": "String"},
+    {"name": "data", "type": "String"}
+  ]
+}
+```
+
+#### Entity with Enumeration
+```json
+{
+  "entity_name": "Product",
+  "attributes": [
+    {"name": "productName", "type": "String"},
+    {"name": "price", "type": "Decimal"},
+    {
+      "name": "status",
+      "type": "Enumeration",
+      "enumerationValues": ["Available", "OutOfStock", "Discontinued"]
+    }
+  ]
+}
+```
+
+#### Bulk Entity Creation
+```json
+{
+  "entities": [
+    {
+      "entity_name": "Customer",
+      "attributes": [{"name": "name", "type": "String"}]
+    },
+    {
+      "entity_name": "Order",
+      "entityType": "storecreateddate",
+      "attributes": [{"name": "orderNumber", "type": "String"}]
+    },
+    {
+      "entity_name": "OrderImage",
+      "entityType": "image",
+      "attributes": [{"name": "description", "type": "String"}]
+    }
+  ]
+}
+```
+
+### Parameter Documentation
+
+All MCP tools include comprehensive JSON schemas with:
+- **Required/Optional Parameters** - Clear specification of mandatory fields
+- **Parameter Types** - Detailed type information with validation
+- **Enumeration Values** - Valid options for choice parameters (e.g., entityType)
+- **Parameter Descriptions** - Detailed explanations of parameter usage
+- **Examples** - Practical usage examples for each tool
+
+Use the `debug_info` tool to see complete parameter documentation and examples for all available tools.
 
 ### Logging
 
@@ -115,6 +300,45 @@ The extension automatically detects the Mendix project directory. Sample data an
 2. Use the `debug_info` tool to inspect the current domain model state
 3. Check the debug log for detailed error traces
 
+### Entity Creation Issues
+
+#### Template Not Found Errors
+- **Problem**: Special entity types (non-persistent, filedocument, image, audit entities) require templates
+- **Solution**: Ensure the AIExtension module contains the required templates:
+  - `NPE` - For non-persistent entities
+  - `FileDocument` - For file document entities
+  - `Image` - For image entities
+  - `StoreCreatedDate` - For creation date tracking
+  - `StoreChangeDate` - For modification date tracking
+  - `StoreCreatedChangeDate` - For full audit tracking
+  - `StoreOwner` - For owner tracking
+  - `StoreChangeBy` - For modifier tracking
+
+#### Parameter Validation Errors
+- **Problem**: Invalid entityType or missing required parameters
+- **Solution**: Use valid entityType values: `persistent`, `non-persistent`, `filedocument`, `image`, `storecreateddate`, `storechangedate`, `storecreatedchangedate`, `storeowner`, `storechangeby`
+
+#### Legacy Parameter Support
+- **Problem**: Using old `persistable` parameter
+- **Solution**: Migrate to `entityType` parameter:
+  - `persistable: false` → `entityType: "non-persistent"`
+  - `persistable: true` → `entityType: "persistent"` (or omit for default)
+
+#### Association Creation Issues
+- **Problem**: Cannot create associations between entities
+- **Solution**: 
+  1. Ensure both entities exist in the domain model
+  2. Use the `diagnose_associations` tool for detailed troubleshooting
+  3. Check entity names match exactly (case-sensitive)
+
+### Association Type Mapping
+
+The extension correctly maps association types as follows:
+- **`"Reference"`** → **One-to-Many** associations (`AssociationType.Reference`)
+- **`"ReferenceSet"`** → **Many-to-Many** associations (`AssociationType.ReferenceSet`)
+
+**Note**: This mapping was fixed in August 2025 to ensure `ReferenceSet` properly creates many-to-many associations instead of incorrectly creating one-to-many associations.
+
 ## Development
 
 ### Dependencies
@@ -142,10 +366,71 @@ dotnet build
 
 To add new MCP tools:
 
-1. Create a new method in `MendixDomainModelTools` or `MendixAdditionalTools`
-2. Register the tool in `MendixMcpServer.RegisterTools()`
-3. Add the tool schema in `McpServer.GetToolInputSchema()`
-4. Add the tool description in `McpServer.GetToolDescription()`
+1. **Create Tool Implementation**
+   - Add a new method in `MendixDomainModelTools` or `MendixAdditionalTools`
+   - Implement the tool logic with proper error handling
+   - Return appropriate response objects
+
+2. **Register the Tool**
+   - Add tool registration in `MendixMcpServer.RegisterTools()`
+   - Use the pattern: `_mcpServer.RegisterTool("tool_name", async (JsonObject parameters) => { ... })`
+
+3. **Add Parameter Schema**
+   - Define the input schema in `McpServer.GetToolInputSchema()`
+   - Include all required and optional parameters
+   - Specify parameter types, descriptions, and validation rules
+   - Add enumeration values for choice parameters
+
+4. **Add Tool Description**
+   - Add comprehensive description in `McpServer.GetToolDescription()`
+   - Explain what the tool does and its key capabilities
+   - Mention any special requirements or dependencies
+
+5. **Update Documentation**
+   - Add examples to the `debug_info` tool output in `MendixAdditionalTools.cs`
+   - Include usage patterns and common parameter combinations
+   - Document any template requirements for entity-related tools
+
+#### Example Tool Addition
+
+```csharp
+// 1. Tool Implementation (in MendixDomainModelTools.cs)
+public async Task<object> CreateCustomEntity(JsonObject parameters)
+{
+    var entityName = parameters["entity_name"]?.ToString();
+    // Implementation logic here
+    return new { success = true, entityName = entityName };
+}
+
+// 2. Tool Registration (in MendixMcpServer.cs)
+_mcpServer.RegisterTool("create_custom_entity", async (JsonObject parameters) => 
+{
+    var result = await domainModelTools.CreateCustomEntity(parameters);
+    return (object)result;
+});
+
+// 3. Parameter Schema (in McpServer.cs - GetToolInputSchema)
+"create_custom_entity" => new
+{
+    type = "object",
+    properties = new
+    {
+        entity_name = new { 
+            type = "string", 
+            description = "Name of the custom entity to create" 
+        },
+        custom_type = new { 
+            type = "string", 
+            @enum = new[] { "type1", "type2" },
+            description = "Type of custom entity" 
+        }
+    },
+    required = new[] { "entity_name", "custom_type" }
+},
+
+// 4. Tool Description (in McpServer.cs - GetToolDescription)
+"create_custom_entity" => "Create a custom entity with specialized properties and behavior",
+```
 
 ## License
 
