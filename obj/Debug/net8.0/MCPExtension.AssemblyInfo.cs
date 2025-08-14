@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("MCPExtension")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+3014b1149678b353abb3147bfa6e7d51dbb7d1ef")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+672a58de0e937d9e6a2e616270137b330127f072")]
 [assembly: System.Reflection.AssemblyProductAttribute("MCPExtension")]
 [assembly: System.Reflection.AssemblyTitleAttribute("MCPExtension")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

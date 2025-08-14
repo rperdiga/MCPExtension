@@ -1,5 +1,13 @@
 # Mendix Studio Pro MCPExtension
 
+## 📦 Mendix Marketplace Module
+
+**For Mendix 10.24.2 Users**: A pre-built version of this extension is available in the **`Mendix Marketplace Module`** folder, complete with installation instructions and setup guide. This provides a ready-to-use version without requiring compilation from source.
+
+**Location**: `./Mendix Marketplace Module/`  
+**Target Version**: Mendix 10.24.2  
+**Contents**: Built extension files and comprehensive setup documentation
+
 ## Overview
 
 MCPExtension is an experimental C# Mendix Extensibility framework project that exposes **Mendix Studio Pro capabilities and tools** through a **Model Context Protocol (MCP) Server**. This extension allows external applications and AI tools to interact with Mendix Studio Pro's domain modeling capabilities via standardized MCP protocols.
