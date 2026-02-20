@@ -344,17 +344,19 @@ namespace MCPExtension
         const activeEntries = new Map();
 
         function handleMessageFromHost(event) {
-            let data = event.data;
+            let raw = event.data;
 
-            if (typeof data === 'string') {
-                try { data = JSON.parse(data); } catch(e) {
-                    // Legacy plain-string backward compat
-                    if (data === 'Running') { updateServerUI('running', {}); return; }
-                    if (data === 'NotRunning') { updateServerUI('stopped', {}); return; }
-                    return;
-                }
+            // Mendix WebView wraps PostMessage(string) as {message: string}
+            let payload = (raw && typeof raw === 'object' && raw.message !== undefined) ? raw.message : raw;
+
+            // Legacy plain-string backward compat
+            if (typeof payload === 'string') {
+                if (payload === 'Running') { updateServerUI('running', {}); return; }
+                if (payload === 'NotRunning') { updateServerUI('stopped', {}); return; }
+                try { payload = JSON.parse(payload); } catch(e) { return; }
             }
 
+            let data = payload;
             if (!data || !data.type) return;
 
             switch (data.type) {
