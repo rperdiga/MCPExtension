@@ -323,20 +323,58 @@ namespace MCPExtension.Tools
 
                     if (attributeType.Equals("Enumeration", StringComparison.OrdinalIgnoreCase))
                     {
-                        var enumValues = parameters["enumeration_values"]?.AsArray()
-                            ?.Select(v => v?.ToString())
-                            ?.Where(v => !string.IsNullOrEmpty(v))
-                            ?.ToList();
-
-                        if (enumValues != null && enumValues.Any())
+                        // Check if enumeration_name parameter is provided to link to existing enum
+                        var explicitEnumName = parameters["enumeration_name"]?.ToString();
+                        if (!string.IsNullOrEmpty(explicitEnumName))
                         {
-                            var enumTypeInstance = CreateEnumerationType(_model, attributeName, enumValues, entityModule);
+                            // Link to existing enumeration by name
+                            var foundEnum = FindExistingEnumeration(explicitEnumName);
+                            if (foundEnum == null)
+                                return JsonSerializer.Serialize(new { error = $"Enumeration '{explicitEnumName}' not found in any module" });
+
+                            var enumTypeInstance = _model.Create<IEnumerationAttributeType>();
+                            enumTypeInstance.Enumeration = foundEnum.QualifiedName;
                             mxAttribute.Type = enumTypeInstance;
                         }
                         else
                         {
-                            return JsonSerializer.Serialize(new { error = "Enumeration type requires 'enumeration_values' array" });
+                            // Create new enumeration from values array
+                            var enumValues = parameters["enumeration_values"]?.AsArray()
+                                ?.Select(v => v?.ToString())
+                                ?.Where(v => !string.IsNullOrEmpty(v))
+                                ?.ToList();
+
+                            if (enumValues != null && enumValues.Any())
+                            {
+                                var enumTypeInstance = CreateEnumerationType(_model, attributeName, enumValues, entityModule);
+                                mxAttribute.Type = enumTypeInstance;
+                            }
+                            else
+                            {
+                                return JsonSerializer.Serialize(new { error = "Enumeration type requires 'enumeration_values' array or 'enumeration_name' to reference an existing enumeration" });
+                            }
                         }
+                    }
+                    else if (attributeType.StartsWith("Enumeration:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Link to existing enumeration via "Enumeration:EnumName" syntax
+                        var enumName = attributeType.Substring("Enumeration:".Length).Trim();
+
+                        // Allow explicit enumeration_name parameter to override
+                        var explicitEnumName = parameters["enumeration_name"]?.ToString();
+                        if (!string.IsNullOrEmpty(explicitEnumName))
+                            enumName = explicitEnumName;
+
+                        if (string.IsNullOrEmpty(enumName))
+                            return JsonSerializer.Serialize(new { error = "Enumeration name must be specified after the colon, e.g. 'Enumeration:OrderStatus'" });
+
+                        var foundEnum = FindExistingEnumeration(enumName);
+                        if (foundEnum == null)
+                            return JsonSerializer.Serialize(new { error = $"Enumeration '{enumName}' not found in any module" });
+
+                        var enumTypeInstance = _model.Create<IEnumerationAttributeType>();
+                        enumTypeInstance.Enumeration = foundEnum.QualifiedName;
+                        mxAttribute.Type = enumTypeInstance;
                     }
                     else
                     {
@@ -2123,6 +2161,20 @@ namespace MCPExtension.Tools
             module.AddDocument(enumDoc);
             attributeEnum.Enumeration = enumDoc.QualifiedName;
             return attributeEnum;
+        }
+
+        private IEnumeration? FindExistingEnumeration(string enumName)
+        {
+            foreach (var mod in Utils.Utils.GetAllNonAppStoreModules(_model))
+            {
+                var candidate = _model.Root.GetModuleDocuments<IEnumeration>(mod)
+                    .FirstOrDefault(e =>
+                        e.Name.Equals(enumName, StringComparison.OrdinalIgnoreCase) ||
+                        (e.QualifiedName?.ToString() ?? "").Equals(enumName, StringComparison.OrdinalIgnoreCase));
+                if (candidate != null)
+                    return candidate;
+            }
+            return null;
         }
 
         private AssociationType MapAssociationType(string type)

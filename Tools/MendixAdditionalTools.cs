@@ -1194,20 +1194,11 @@ namespace MCPExtension.Tools
                 Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType returnType = Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.Void;
                 
                 // Only set a non-void return type if explicitly specified and meaningful
-                if (!string.IsNullOrWhiteSpace(returnTypeStr) && 
+                if (!string.IsNullOrWhiteSpace(returnTypeStr) &&
                     !returnTypeStr.Trim().Equals("void", StringComparison.OrdinalIgnoreCase) &&
                     !returnTypeStr.Trim().Equals("", StringComparison.OrdinalIgnoreCase))
                 {
-                    // Check if this looks like an unintended Boolean default - if so, treat as Void
-                    if (returnTypeStr.Trim().Equals("Boolean", StringComparison.OrdinalIgnoreCase))
-                    {
-                        _logger.LogInformation($"[create_microflow] Boolean return type detected - treating as Void to avoid unintended default return values");
-                        returnType = Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.Void;
-                    }
-                    else
-                    {
-                        returnType = Utils.Utils.DataTypeFromString(returnTypeStr);
-                    }
+                    returnType = Utils.Utils.DataTypeFromString(returnTypeStr);
                 }
 
                 _logger.LogInformation($"[create_microflow] Return type string: '{returnTypeStr ?? "null"}', resolved to: {returnType}");
@@ -1300,6 +1291,19 @@ namespace MCPExtension.Tools
                 var dt when dt == Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.DateTime => "dateTime(1900)",
                 _ => "empty"
             };
+        }
+
+        /// <summary>
+        /// Normalizes Mendix expression strings by replacing double quotes with single quotes.
+        /// Mendix expressions use single-quoted string literals ('Hello'). AI agents frequently
+        /// pass double-quoted strings ("Hello") which cause CE0117 parse errors.
+        /// Double quotes are never valid in Mendix expression syntax, so this replacement is safe.
+        /// </summary>
+        private static string NormalizeMendixExpression(string expression)
+        {
+            if (string.IsNullOrEmpty(expression))
+                return expression;
+            return expression.Replace('"', '\'');
         }
 
         public async Task<object> CreateMicroflowActivity(JsonObject arguments)
@@ -1813,7 +1817,7 @@ namespace MCPExtension.Tools
                                 var valueExpr = valObj["value"]?.ToString() ?? valObj["expression"]?.ToString();
                                 if (!string.IsNullOrEmpty(attrName) && !string.IsNullOrEmpty(valueExpr))
                                 {
-                                    var expr = microflowExpressionService.CreateFromString(valueExpr);
+                                    var expr = microflowExpressionService.CreateFromString(NormalizeMendixExpression(valueExpr));
                                     initialValues.Add((attrName, expr));
                                 }
                             }
@@ -1946,7 +1950,7 @@ namespace MCPExtension.Tools
                             {
                                 var paramMapping = _model.Create<IMicroflowCallParameterMapping>();
                                 paramMapping.Parameter = targetParam.QualifiedName;
-                                paramMapping.Argument = microflowExpressionService.CreateFromString(paramValue);
+                                paramMapping.Argument = microflowExpressionService.CreateFromString(NormalizeMendixExpression(paramValue));
                                 microflowCall.AddParameterMapping(paramMapping);
                                 _logger.LogInformation($"Mapped parameter '{paramName}' = '{paramValue}'");
                             }
@@ -2833,7 +2837,7 @@ namespace MCPExtension.Tools
                     return null;
                 }
 
-                var expression = microflowExpressionService.CreateFromString(filterExpr);
+                var expression = microflowExpressionService.CreateFromString(NormalizeMendixExpression(filterExpr));
 
                 _logger.LogInformation($"Creating filter list activity: list='{listVariable}', output='{outputVariable}', attr='{attributeName}', expr='{filterExpr}'");
                 return microflowActivitiesService.CreateFilterListByAttributeActivity(
@@ -2884,7 +2888,7 @@ namespace MCPExtension.Tools
                                     activityData?["entityName"]?.ToString() ??
                                     activityData?["entity"]?.ToString();
 
-                var expression = microflowExpressionService.CreateFromString(findExpr);
+                var expression = microflowExpressionService.CreateFromString(NormalizeMendixExpression(findExpr));
 
                 // If attribute is specified, use FindByAttribute
                 if (!string.IsNullOrEmpty(attributeName) && !string.IsNullOrEmpty(entityName))
@@ -3007,7 +3011,7 @@ namespace MCPExtension.Tools
                 else if (!string.IsNullOrEmpty(expressionStr) && microflowExpressionService != null)
                 {
                     // Aggregate by expression
-                    var expression = microflowExpressionService.CreateFromString(expressionStr);
+                    var expression = microflowExpressionService.CreateFromString(NormalizeMendixExpression(expressionStr));
 
                     _logger.LogInformation($"Creating aggregate list by expression activity: list='{listVariable}', output='{outputVariable}', expr='{expressionStr}', func='{functionStr}'");
                     return microflowActivitiesService.CreateAggregateListByExpressionActivity(
@@ -3089,7 +3093,7 @@ namespace MCPExtension.Tools
                 }
 
                 // Create expression for the change value
-                var changeExpression = microflowExpressionService.CreateFromString(changeValueExpr);
+                var changeExpression = microflowExpressionService.CreateFromString(NormalizeMendixExpression(changeValueExpr));
 
                 return microflowActivitiesService.CreateChangeListActivity(
                     _model,
@@ -3250,7 +3254,7 @@ namespace MCPExtension.Tools
                 }
 
                 // Create expression for the new value
-                var newValueExpression = microflowExpressionService.CreateFromString(newValueExpr);
+                var newValueExpression = microflowExpressionService.CreateFromString(NormalizeMendixExpression(newValueExpr));
 
                 // Use the official API method
                 var activity = microflowActivitiesService.CreateChangeAttributeActivity(
@@ -3401,7 +3405,7 @@ namespace MCPExtension.Tools
                 }
 
                 // Create expression for the new value
-                var newValueExpression = microflowExpressionService.CreateFromString(newValueExpr);
+                var newValueExpression = microflowExpressionService.CreateFromString(NormalizeMendixExpression(newValueExpr));
 
                 // Use the official API method
                 var activity = microflowActivitiesService.CreateChangeAssociationActivity(
