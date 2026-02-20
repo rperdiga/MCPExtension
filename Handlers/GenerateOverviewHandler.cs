@@ -62,7 +62,7 @@ namespace MCPExtension.Handlers
                             );
                         }
 
-                        var module = Utils.Utils.GetMyFirstModule(model);
+                        var module = Utils.Utils.ResolveModule(model, null);
                         if (module?.DomainModel == null)
                         {
                             return (

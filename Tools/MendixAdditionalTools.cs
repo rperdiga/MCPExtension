@@ -120,10 +120,11 @@ namespace MCPExtension.Tools
             var dataProperty = arguments["data"]?.AsObject();
             if (dataProperty == null)
             {
-                var currentModule = Utils.Utils.GetMyFirstModule(_model);
+                var requestedModuleName = arguments["module_name"]?.ToString();
+                var currentModule = Utils.Utils.ResolveModule(_model, requestedModuleName);
                 if (currentModule == null)
                 {
-                    var error = "No module found in SaveData.";
+                    var error = string.IsNullOrWhiteSpace(requestedModuleName) ? "No module found in SaveData." : $"Module '{requestedModuleName}' not found.";
                     _logger.LogError(error);
                     SetLastError(error);
                     return JsonSerializer.Serialize(new { error, success = false });
@@ -168,10 +169,11 @@ namespace MCPExtension.Tools
                     });
                 }
 
-                var module = Utils.Utils.GetMyFirstModule(_model);
+                var saveModuleName = arguments["module_name"]?.ToString();
+                var module = Utils.Utils.ResolveModule(_model, saveModuleName);
                 if (module == null)
                 {
-                    var error = "No module found in SaveData.";
+                    var error = string.IsNullOrWhiteSpace(saveModuleName) ? "No module found in SaveData." : $"Module '{saveModuleName}' not found.";
                     _logger.LogError(error);
                     SetLastError(error);
                     return JsonSerializer.Serialize(new { error, success = false });
@@ -263,10 +265,11 @@ namespace MCPExtension.Tools
                     });
                 }
 
-                var module = Utils.Utils.GetMyFirstModule(_model);
+                var overviewModuleName = arguments["module_name"]?.ToString();
+                var module = Utils.Utils.ResolveModule(_model, overviewModuleName);
                 if (module == null)
                 {
-                    var error = "No module found in GenerateOverviewPages.";
+                    var error = string.IsNullOrWhiteSpace(overviewModuleName) ? "No module found in GenerateOverviewPages." : $"Module '{overviewModuleName}' not found.";
                     _logger.LogError(error);
                     SetLastError(error);
                     return JsonSerializer.Serialize(new { error, success = false });
@@ -345,19 +348,14 @@ namespace MCPExtension.Tools
             }
 
             var moduleName = arguments["module_name"]?.ToString();
-            
-            var module = Utils.Utils.GetMyFirstModule(_model);
+
+            var module = Utils.Utils.ResolveModule(_model, moduleName);
             if (module == null)
             {
-                var error = "No module found in ListMicroflows.";
+                var error = string.IsNullOrWhiteSpace(moduleName) ? "No module found in ListMicroflows." : $"Module '{moduleName}' not found.";
                 _logger.LogError(error);
                 SetLastError(error);
                 return JsonSerializer.Serialize(new { error });
-            }
-
-            if (!string.IsNullOrEmpty(moduleName) && module.Name != moduleName)
-            {
-                return JsonSerializer.Serialize(new { error = $"Module '{moduleName}' not found" });
             }
 
                 var microflows = module.GetDocuments()
@@ -399,10 +397,11 @@ namespace MCPExtension.Tools
                 return JsonSerializer.Serialize(new { error = error });
             }
 
-            var module = Utils.Utils.GetMyFirstModule(_model);
+            var moduleName = arguments["module_name"]?.ToString();
+            var module = Utils.Utils.ResolveModule(_model, moduleName);
             if (module == null)
             {
-                var error = "No module found in ReadMicroflowDetails.";
+                var error = string.IsNullOrWhiteSpace(moduleName) ? "No module found in ReadMicroflowDetails." : $"Module '{moduleName}' not found.";
                 _logger.LogError(error);
                 SetLastError(error);
                 return JsonSerializer.Serialize(new { error });
@@ -504,30 +503,406 @@ namespace MCPExtension.Tools
             }
         }
 
+        public async Task<object> GetStudioProLogs(JsonObject arguments)
+        {
+            try
+            {
+                var level = arguments?["level"]?.ToString()?.ToUpperInvariant() ?? "ERROR";
+                var lastNMinutes = 30;
+                if (arguments?["last_minutes"] != null && int.TryParse(arguments["last_minutes"]?.ToString(), out var mins))
+                    lastNMinutes = mins;
+
+                var logEntries = new List<object>();
+
+                // Read Studio Pro log file
+                var studioProLogPath = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "Mendix", "log", "11.5.0", "log.txt");
+
+                if (System.IO.File.Exists(studioProLogPath))
+                {
+                    var cutoff = DateTime.Now.AddMinutes(-lastNMinutes);
+                    // Read with sharing since Studio Pro has this file open
+                    using var fs = new System.IO.FileStream(studioProLogPath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite);
+                    using var reader = new System.IO.StreamReader(fs);
+                    string? line;
+                    var multiLineBuffer = new System.Text.StringBuilder();
+                    string? currentTimestamp = null;
+                    string? currentLevel = null;
+                    string? currentSource = null;
+
+                    while ((line = reader.ReadLine()) != null)
+                    {
+                        // Parse log line: "2026-02-20 01:18:03.0029 INFO Mendix.Something Message here"
+                        var match = System.Text.RegularExpressions.Regex.Match(line, @"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)\s+(INFO|WARN|ERROR|DEBUG)\s+(\S+)\s+(.*)$");
+                        if (match.Success)
+                        {
+                            // Flush previous entry
+                            if (currentTimestamp != null && ShouldIncludeLogEntry(currentLevel, level))
+                            {
+                                if (DateTime.TryParse(currentTimestamp, out var ts) && ts >= cutoff)
+                                {
+                                    logEntries.Add(new { timestamp = currentTimestamp, level = currentLevel, source = currentSource, message = multiLineBuffer.ToString().TrimEnd() });
+                                }
+                            }
+
+                            currentTimestamp = match.Groups[1].Value;
+                            currentLevel = match.Groups[2].Value;
+                            currentSource = match.Groups[3].Value;
+                            multiLineBuffer.Clear();
+                            multiLineBuffer.AppendLine(match.Groups[4].Value);
+                        }
+                        else if (currentTimestamp != null)
+                        {
+                            // Continuation line (stack trace, etc.)
+                            multiLineBuffer.AppendLine(line);
+                        }
+                    }
+
+                    // Flush last entry
+                    if (currentTimestamp != null && ShouldIncludeLogEntry(currentLevel, level))
+                    {
+                        if (DateTime.TryParse(currentTimestamp, out var ts) && ts >= cutoff)
+                        {
+                            logEntries.Add(new { timestamp = currentTimestamp, level = currentLevel, source = currentSource, message = multiLineBuffer.ToString().TrimEnd() });
+                        }
+                    }
+                }
+
+                // Also read our MCP debug log for extension-specific errors
+                var mcpErrors = new List<object>();
+                var mcpLogPath = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "..", "..", "Mendix Projects", "Sample", "resources", "mcp_debug.log");
+
+                // Try project directory path first
+                try
+                {
+                    var project = _model?.Root as Mendix.StudioPro.ExtensionsAPI.Model.Projects.IProject;
+                    if (project?.DirectoryPath != null)
+                    {
+                        mcpLogPath = System.IO.Path.Combine(project.DirectoryPath, "resources", "mcp_debug.log");
+                    }
+                }
+                catch { /* ignore */ }
+
+                if (System.IO.File.Exists(mcpLogPath))
+                {
+                    var cutoff = DateTime.Now.AddMinutes(-lastNMinutes);
+                    using var fs = new System.IO.FileStream(mcpLogPath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite);
+                    using var reader = new System.IO.StreamReader(fs);
+                    string? line;
+                    while ((line = reader.ReadLine()) != null)
+                    {
+                        if (line.Contains("error", StringComparison.OrdinalIgnoreCase) || line.Contains("exception", StringComparison.OrdinalIgnoreCase) || line.Contains("fail", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var tsMatch = System.Text.RegularExpressions.Regex.Match(line, @"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)\]");
+                            if (tsMatch.Success && DateTime.TryParse(tsMatch.Groups[1].Value, out var ts) && ts >= cutoff)
+                            {
+                                mcpErrors.Add(new { timestamp = tsMatch.Groups[1].Value, source = "MCP Extension", message = line });
+                            }
+                        }
+                    }
+                }
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    studioProLogPath = studioProLogPath,
+                    filter = new { level = level, lastMinutes = lastNMinutes },
+                    studioProEntries = logEntries.Count > 0 ? logEntries : null,
+                    mcpExtensionErrors = mcpErrors.Count > 0 ? mcpErrors : null,
+                    summary = new
+                    {
+                        studioProLogCount = logEntries.Count,
+                        mcpErrorCount = mcpErrors.Count,
+                        totalIssues = logEntries.Count + mcpErrors.Count
+                    },
+                    message = (logEntries.Count + mcpErrors.Count) == 0
+                        ? $"No {level} entries found in the last {lastNMinutes} minutes."
+                        : $"Found {logEntries.Count} Studio Pro log entries and {mcpErrors.Count} MCP extension errors."
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error reading Studio Pro logs");
+                return JsonSerializer.Serialize(new { error = $"Failed to read logs: {ex.Message}" });
+            }
+        }
+
+        private static bool ShouldIncludeLogEntry(string? entryLevel, string filterLevel)
+        {
+            if (string.IsNullOrEmpty(entryLevel)) return false;
+            return filterLevel switch
+            {
+                "ERROR" => entryLevel == "ERROR",
+                "WARN" => entryLevel == "ERROR" || entryLevel == "WARN",
+                "INFO" => entryLevel == "ERROR" || entryLevel == "WARN" || entryLevel == "INFO",
+                "ALL" => true,
+                _ => entryLevel == "ERROR"
+            };
+        }
+
+        /// <summary>
+        /// Runs mx.exe check against the project MPR file to get real Studio Pro consistency errors.
+        /// This provides structured error/warning output with error codes and locations.
+        /// </summary>
+        public async Task<object> CheckProjectErrors(JsonObject arguments)
+        {
+            try
+            {
+                var studioProVersion = arguments?["studio_pro_version"]?.ToString();
+
+                // Find the MPR file path
+                string? mprPath = null;
+                if (!string.IsNullOrEmpty(_projectDirectory))
+                {
+                    // Search for .mpr files in the project directory
+                    var mprFiles = Directory.GetFiles(_projectDirectory, "*.mpr", SearchOption.TopDirectoryOnly);
+                    if (mprFiles.Length > 0)
+                    {
+                        mprPath = mprFiles[0];
+                    }
+                }
+
+                if (string.IsNullOrEmpty(mprPath))
+                {
+                    return new { success = false, message = "Could not find .mpr file in project directory" };
+                }
+
+                if (!File.Exists(mprPath))
+                {
+                    return new { success = false, message = $"MPR file not found: {mprPath}" };
+                }
+
+                // Find mx.exe
+                string? mxPath = null;
+                string mendixDir = @"C:\Program Files\Mendix";
+
+                if (!string.IsNullOrEmpty(studioProVersion))
+                {
+                    mxPath = Path.Combine(mendixDir, studioProVersion, "modeler", "mx.exe");
+                    if (!File.Exists(mxPath))
+                    {
+                        return new { success = false, message = $"mx.exe not found for version {studioProVersion} at {mxPath}" };
+                    }
+                }
+                else
+                {
+                    // Auto-detect: first try to match the running Studio Pro process version
+                    try
+                    {
+                        var studioProProcesses = System.Diagnostics.Process.GetProcessesByName("studiopro");
+                        foreach (var proc in studioProProcesses)
+                        {
+                            try
+                            {
+                                var procPath = proc.MainModule?.FileName;
+                                if (!string.IsNullOrEmpty(procPath))
+                                {
+                                    // Extract version from path like C:\Program Files\Mendix\11.5.0\modeler\studiopro.exe
+                                    var modelerDir = Path.GetDirectoryName(procPath);
+                                    var versionDir = Path.GetDirectoryName(modelerDir);
+                                    var version = Path.GetFileName(versionDir);
+                                    if (!string.IsNullOrEmpty(version) && System.Text.RegularExpressions.Regex.IsMatch(version, @"^\d+\.\d+"))
+                                    {
+                                        var candidate = Path.Combine(mendixDir, version, "modeler", "mx.exe");
+                                        if (File.Exists(candidate))
+                                        {
+                                            mxPath = candidate;
+                                            _logger.LogInformation($"Auto-detected mx.exe from running Studio Pro process: {version}");
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            catch { /* ignore per-process errors */ }
+                        }
+                    }
+                    catch { /* ignore process enumeration errors */ }
+
+                    // Fallback: find latest installed version
+                    if (string.IsNullOrEmpty(mxPath))
+                    {
+                        try
+                        {
+                            if (Directory.Exists(mendixDir))
+                            {
+                                var dirs = Directory.GetDirectories(mendixDir)
+                                    .Select(d => Path.GetFileName(d))
+                                    .Where(d => System.Text.RegularExpressions.Regex.IsMatch(d, @"^\d+\.\d+"))
+                                    .OrderByDescending(d =>
+                                    {
+                                        var parts = d.Split('.').Select(p => { int.TryParse(p, out int v); return v; }).ToArray();
+                                        long val = 0;
+                                        if (parts.Length >= 1) val += parts[0] * 10000000L;
+                                        if (parts.Length >= 2) val += parts[1] * 100000L;
+                                        if (parts.Length >= 3) val += parts[2] * 1000L;
+                                        if (parts.Length >= 4) val += parts[3];
+                                        return val;
+                                    })
+                                    .ToList();
+
+                                foreach (var dir in dirs)
+                                {
+                                    var candidate = Path.Combine(mendixDir, dir, "modeler", "mx.exe");
+                                    if (File.Exists(candidate))
+                                    {
+                                        mxPath = candidate;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        catch { /* ignore directory access errors */ }
+                    }
+
+                    if (string.IsNullOrEmpty(mxPath))
+                    {
+                        return new { success = false, message = "Could not find mx.exe. Please specify studio_pro_version (e.g., '11.5.0')." };
+                    }
+                }
+
+                _logger.LogInformation($"Running mx check: {mxPath} check \"{mprPath}\"");
+
+                // Run mx.exe check
+                string output;
+                try
+                {
+                    var processInfo = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = mxPath,
+                        Arguments = $"check \"{mprPath}\"",
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
+
+                    using var process = System.Diagnostics.Process.Start(processInfo);
+                    if (process == null)
+                    {
+                        return new { success = false, message = "Failed to start mx.exe process" };
+                    }
+
+                    var stdoutTask = process.StandardOutput.ReadToEndAsync();
+                    var stderrTask = process.StandardError.ReadToEndAsync();
+
+                    // Wait up to 120 seconds
+                    var completed = process.WaitForExit(120000);
+                    if (!completed)
+                    {
+                        process.Kill();
+                        return new { success = false, message = "mx.exe check timed out after 120 seconds" };
+                    }
+
+                    output = await stdoutTask + await stderrTask;
+                }
+                catch (Exception ex)
+                {
+                    return new { success = false, message = $"Failed to run mx.exe check: {ex.Message}" };
+                }
+
+                // Parse the output
+                var lines = output.Split('\n').Select(l => l.Trim()).Where(l => !string.IsNullOrEmpty(l)).ToList();
+                var errors = new List<object>();
+                var warnings = new List<object>();
+                string? mprVersion = null;
+
+                var errorPattern = new System.Text.RegularExpressions.Regex(
+                    @"^\[(error|warning)\]\s*\[([^\]]+)\]\s*""([^""]+)""(?:\s*at\s*(.+))?$",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+                var versionPattern = new System.Text.RegularExpressions.Regex(
+                    @"The mpr file version is '([^']+)'");
+
+                foreach (var line in lines)
+                {
+                    var versionMatch = versionPattern.Match(line);
+                    if (versionMatch.Success)
+                    {
+                        mprVersion = versionMatch.Groups[1].Value;
+                        continue;
+                    }
+
+                    var errorMatch = errorPattern.Match(line);
+                    if (errorMatch.Success)
+                    {
+                        var entry = new
+                        {
+                            type = errorMatch.Groups[1].Value.ToLowerInvariant(),
+                            code = errorMatch.Groups[2].Value,
+                            message = errorMatch.Groups[3].Value,
+                            location = errorMatch.Groups[4].Success ? errorMatch.Groups[4].Value : "Unknown"
+                        };
+
+                        if (entry.type == "error")
+                            errors.Add(entry);
+                        else
+                            warnings.Add(entry);
+                    }
+                }
+
+                _logger.LogInformation($"mx check completed: {errors.Count} errors, {warnings.Count} warnings");
+
+                return new
+                {
+                    success = errors.Count == 0,
+                    mprPath,
+                    mprVersion,
+                    mxVersion = mxPath != null ? Path.GetFileName(Path.GetDirectoryName(Path.GetDirectoryName(mxPath))) : null,
+                    errorCount = errors.Count,
+                    warningCount = warnings.Count,
+                    errors,
+                    warnings,
+                    rawOutput = output.Length > 5000 ? output.Substring(0, 5000) + "... (truncated)" : output
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to check project errors");
+                return new { success = false, message = $"Error checking project: {ex.Message}" };
+            }
+        }
+
         public async Task<object> ListAvailableTools(JsonObject arguments)
         {
             try
             {
                 var tools = new[]
                 {
+                    "list_modules",
+                    "create_module",
                     "read_domain_model",
+                    "read_project_info",
                     "create_entity",
-                    "create_association",
-                    "delete_model_element",
-                    "diagnose_associations",
                     "create_multiple_entities",
+                    "create_association",
                     "create_multiple_associations",
                     "create_domain_model_from_schema",
+                    "delete_model_element",
+                    "diagnose_associations",
+                    "set_entity_generalization",
+                    "remove_entity_generalization",
+                    "add_event_handler",
+                    "add_attribute",
+                    "set_calculated_attribute",
+                    "create_constant",
+                    "list_constants",
+                    "create_enumeration",
+                    "list_enumerations",
                     "save_data",
                     "generate_overview_pages",
                     "list_microflows",
-                    "get_last_error",
-                    "list_available_tools",
-                    "debug_info",
                     "read_microflow_details",
                     "create_microflow",
-                    "create_microflow_activity",
-                    "create_microflow_activities_sequence"
+                    "create_microflow_activities",
+                    "check_model",
+                    "check_project_errors",
+                    "get_studio_pro_logs",
+                    "get_last_error",
+                    "list_available_tools",
+                    "debug_info"
                 };
 
                 return JsonSerializer.Serialize(new { available_tools = tools });
@@ -551,10 +926,11 @@ namespace MCPExtension.Tools
                 return JsonSerializer.Serialize(new { error });
             }
 
-            var module = Utils.Utils.GetMyFirstModule(_model);
+            var debugModuleName = arguments?["module_name"]?.ToString();
+            var module = Utils.Utils.ResolveModule(_model, debugModuleName);
             if (module == null)
             {
-                var error = "No module found in DebugInfo.";
+                var error = string.IsNullOrWhiteSpace(debugModuleName) ? "No module found in DebugInfo." : $"Module '{debugModuleName}' not found.";
                 _logger.LogError(error);
                 SetLastError(error);
                 return JsonSerializer.Serialize(new { error });
@@ -602,7 +978,32 @@ namespace MCPExtension.Tools
                     }
                     response["associations"] = allAssociations;
                     response["associationCount"] = allAssociations.Count;
-                    
+
+                    // Add microflow, constant, and enumeration counts
+                    var microflows = module.GetDocuments().OfType<IMicroflow>().ToList();
+                    response["microflowCount"] = microflows.Count;
+                    response["microflows"] = microflows.Select(mf => mf.Name).ToList();
+
+                    try
+                    {
+                        var constants = _model.Root.GetModuleDocuments<Mendix.StudioPro.ExtensionsAPI.Model.Constants.IConstant>(module);
+                        response["constantCount"] = constants.Count;
+                        response["constants"] = constants.Select(c => new { name = c.Name, defaultValue = c.DefaultValue }).ToList();
+                    }
+                    catch { response["constantCount"] = "N/A"; }
+
+                    try
+                    {
+                        var enumerations = _model.Root.GetModuleDocuments<Mendix.StudioPro.ExtensionsAPI.Model.Enumerations.IEnumeration>(module);
+                        response["enumerationCount"] = enumerations.Count;
+                        response["enumerations"] = enumerations.Select(e => new
+                        {
+                            name = e.Name,
+                            values = e.GetValues().Select(v => v.Name).ToList()
+                        }).ToList();
+                    }
+                    catch { response["enumerationCount"] = "N/A"; }
+
                     // Add comprehensive examples
                     response["examples"] = new
                     {
@@ -734,12 +1135,13 @@ namespace MCPExtension.Tools
                     return JsonSerializer.Serialize(new { error });
                 }
 
-                var module = Utils.Utils.GetMyFirstModule(_model);
+                var mfModuleName = arguments["module_name"]?.ToString();
+                var module = Utils.Utils.ResolveModule(_model, mfModuleName);
                 if (module == null)
                 {
-                    var error = "No module found.";
+                    var error = string.IsNullOrWhiteSpace(mfModuleName) ? "No module found." : $"Module '{mfModuleName}' not found.";
                     SetLastError(error);
-                    _logger.LogError($"[create_microflow] No module found for model: {_model}");
+                    _logger.LogError($"[create_microflow] {error}");
                     return JsonSerializer.Serialize(new { error });
                 }
 
@@ -963,10 +1365,11 @@ namespace MCPExtension.Tools
                     return JsonSerializer.Serialize(new { error });
                 }
 
-                var module = Utils.Utils.GetMyFirstModule(_model);
+                var actModuleName = arguments["module_name"]?.ToString();
+                var module = Utils.Utils.ResolveModule(_model, actModuleName);
                 if (module == null)
                 {
-                    var error = "No module found.";
+                    var error = string.IsNullOrWhiteSpace(actModuleName) ? "No module found." : $"Module '{actModuleName}' not found.";
                     SetLastError(error);
                     return JsonSerializer.Serialize(new { error });
                 }
@@ -1355,59 +1758,83 @@ namespace MCPExtension.Tools
         {
             try
             {
-                // Support multiple naming conventions - including "entity", "entityType", "entityName" parameters
-                var variableName = activityData?["variableName"]?.ToString() ?? 
+                var microflowActivitiesService = _serviceProvider?.GetService<IMicroflowActivitiesService>();
+                var microflowExpressionService = _serviceProvider?.GetService<IMicroflowExpressionService>();
+
+                var variableName = activityData?["variableName"]?.ToString() ??
                                   activityData?["variable_name"]?.ToString() ?? "newVariable";
-                var entityType = activityData?["entity"]?.ToString() ?? 
-                                activityData?["entityType"]?.ToString() ?? 
-                                activityData?["entityName"]?.ToString() ?? 
+                var entityType = activityData?["entity"]?.ToString() ??
+                                activityData?["entityType"]?.ToString() ??
+                                activityData?["entityName"]?.ToString() ??
                                 activityData?["variable_type"]?.ToString() ?? "String";
-                var initialValue = activityData?["initial_value"]?.ToString() ?? "''";
 
-                _logger.LogInformation($"Creating create object activity with variable '{variableName}', entityType '{entityType}'");
+                // Parse commit and refresh options
+                var commitStr = activityData?["commit"]?.ToString()?.ToLowerInvariant() ?? "no";
+                var refreshInClient = bool.Parse(activityData?["refresh_in_client"]?.ToString() ?? "false");
 
-                // Create a create object action
-                var createAction = _model.Create<ICreateObjectAction>();
-                
-                // Set the output variable name
-                createAction.OutputVariableName = variableName;
-                
-                // Try to find and set the entity if entityType is provided
-                if (!string.IsNullOrEmpty(entityType) && entityType != "String")
+                var commit = commitStr switch
                 {
-                    try
+                    "yes" => Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.CommitEnum.Yes,
+                    "yes_without_events" => Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.CommitEnum.YesWithoutEvents,
+                    _ => Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.CommitEnum.No
+                };
+
+                _logger.LogInformation($"Creating create object activity: variable='{variableName}', entity='{entityType}'");
+
+                // Find entity
+                var (entity, _) = Utils.Utils.FindEntityAcrossModules(_model, entityType);
+                if (entity == null)
+                {
+                    // Fallback to old approach if entity not found
+                    _logger.LogWarning($"Entity '{entityType}' not found. Creating basic create action.");
+                    var createAction = _model.Create<ICreateObjectAction>();
+                    createAction.OutputVariableName = variableName;
+                    var activity = _model.Create<IActionActivity>();
+                    activity.Action = createAction;
+                    return activity;
+                }
+
+                // Use the service method if available (supports initial values)
+                if (microflowActivitiesService != null && microflowExpressionService != null)
+                {
+                    // Parse initial values from activity config
+                    var initialValues = new List<(string attribute, Mendix.StudioPro.ExtensionsAPI.Model.MicroflowExpressions.IMicroflowExpression valueExpression)>();
+                    var initValuesNode = activityData?["initial_values"]?.AsArray() ??
+                                        activityData?["initialValues"]?.AsArray() ??
+                                        activityData?["values"]?.AsArray();
+
+                    if (initValuesNode != null)
                     {
-                        var module = Utils.Utils.GetMyFirstModule(_model);
-                        if (module?.DomainModel != null)
+                        foreach (var val in initValuesNode)
                         {
-                            // Look for the entity by qualified name (e.g., "MyFirstModule.Customer")
-                            var entity = module.DomainModel.GetEntities()
-                                .FirstOrDefault(e => e.QualifiedName.ToString() == entityType || e.Name == entityType);
-                            
-                            if (entity != null)
+                            if (val is JsonObject valObj)
                             {
-                                createAction.Entity = entity.QualifiedName;
-                                _logger.LogInformation($"Successfully set entity '{entity.QualifiedName}' for create action");
-                            }
-                            else
-                            {
-                                _logger.LogWarning($"Entity '{entityType}' not found in domain model. Available entities: {string.Join(", ", module.DomainModel.GetEntities().Select(e => e.QualifiedName.ToString()))}");
+                                var attrName = valObj["attribute"]?.ToString() ?? valObj["name"]?.ToString();
+                                var valueExpr = valObj["value"]?.ToString() ?? valObj["expression"]?.ToString();
+                                if (!string.IsNullOrEmpty(attrName) && !string.IsNullOrEmpty(valueExpr))
+                                {
+                                    var expr = microflowExpressionService.CreateFromString(valueExpr);
+                                    initialValues.Add((attrName, expr));
+                                }
                             }
                         }
                     }
-                    catch (Exception entityEx)
-                    {
-                        _logger.LogError(entityEx, $"Error setting entity '{entityType}' for create action");
-                    }
+
+                    _logger.LogInformation($"Using service CreateCreateObjectActivity with {initialValues.Count} initial values");
+                    return microflowActivitiesService.CreateCreateObjectActivity(
+                        _model, entity, variableName, commit, refreshInClient,
+                        initialValues.ToArray());
                 }
-                
-                // Create the action activity
-                var activity = _model.Create<IActionActivity>();
-                activity.Action = createAction;
-                
-                _logger.LogInformation($"Created create object activity with variable '{variableName}' for entity type '{entityType}'");
-                
-                return activity;
+                else
+                {
+                    // Fallback: direct creation without service
+                    var createAction = _model.Create<ICreateObjectAction>();
+                    createAction.OutputVariableName = variableName;
+                    createAction.Entity = entity.QualifiedName;
+                    var activity = _model.Create<IActionActivity>();
+                    activity.Action = createAction;
+                    return activity;
+                }
             }
             catch (Exception ex)
             {
@@ -1423,6 +1850,7 @@ namespace MCPExtension.Tools
             {
                 var microflowName = activityData?["microflow_name"]?.ToString();
                 var returnVariable = activityData?["return_variable"]?.ToString();
+                var moduleName = activityData?["module_name"]?.ToString();
 
                 if (string.IsNullOrEmpty(microflowName))
                 {
@@ -1431,13 +1859,56 @@ namespace MCPExtension.Tools
                     return null;
                 }
 
+                // Find the target microflow across all modules
+                IMicroflow? targetMicroflow = null;
+
+                // Handle qualified name format "Module.MicroflowName"
+                if (microflowName.Contains('.'))
+                {
+                    var parts = microflowName.Split('.', 2);
+                    moduleName = parts[0];
+                    microflowName = parts[1];
+                }
+
+                if (!string.IsNullOrEmpty(moduleName))
+                {
+                    var module = Utils.Utils.GetModuleByName(_model, moduleName);
+                    if (module != null)
+                    {
+                        targetMicroflow = module.GetDocuments()
+                            .OfType<IMicroflow>()
+                            .FirstOrDefault(mf => mf.Name.Equals(microflowName, StringComparison.OrdinalIgnoreCase));
+                    }
+                }
+                else
+                {
+                    // Search all non-AppStore modules
+                    foreach (var module in Utils.Utils.GetAllNonAppStoreModules(_model))
+                    {
+                        targetMicroflow = module.GetDocuments()
+                            .OfType<IMicroflow>()
+                            .FirstOrDefault(mf => mf.Name.Equals(microflowName, StringComparison.OrdinalIgnoreCase));
+                        if (targetMicroflow != null) break;
+                    }
+                }
+
+                if (targetMicroflow == null)
+                {
+                    var error = $"Target microflow '{microflowName}' not found" +
+                        (!string.IsNullOrEmpty(moduleName) ? $" in module '{moduleName}'" : " in any module");
+                    _logger.LogError(error);
+                    SetLastError(error);
+                    return null;
+                }
+
                 // Create microflow call action
                 var microflowCallAction = _model.Create<IMicroflowCallAction>();
                 var microflowCall = _model.Create<IMicroflowCall>();
-                
-                // Set the microflow call action properties
+
+                // Set the target microflow via QualifiedName
+                microflowCall.Microflow = targetMicroflow.QualifiedName;
                 microflowCallAction.MicroflowCall = microflowCall;
-                
+
                 // Set return variable if provided
                 if (!string.IsNullOrEmpty(returnVariable))
                 {
@@ -1449,12 +1920,54 @@ namespace MCPExtension.Tools
                     microflowCallAction.UseReturnVariable = false;
                 }
 
+                // Handle parameter mappings if provided
+                var parametersArray = activityData?["parameters"]?.AsArray();
+                if (parametersArray != null && parametersArray.Count > 0)
+                {
+                    var microflowService = _serviceProvider?.GetService<IMicroflowService>();
+                    var microflowExpressionService = _serviceProvider?.GetService<IMicroflowExpressionService>();
+
+                    if (microflowService != null && microflowExpressionService != null)
+                    {
+                        var targetParams = microflowService.GetParameters(targetMicroflow);
+
+                        foreach (var paramNode in parametersArray)
+                        {
+                            var paramName = paramNode?["name"]?.ToString();
+                            var paramValue = paramNode?["value"]?.ToString();
+
+                            if (string.IsNullOrEmpty(paramName) || string.IsNullOrEmpty(paramValue))
+                                continue;
+
+                            var targetParam = targetParams.FirstOrDefault(p =>
+                                p.Name.Equals(paramName, StringComparison.OrdinalIgnoreCase));
+
+                            if (targetParam != null)
+                            {
+                                var paramMapping = _model.Create<IMicroflowCallParameterMapping>();
+                                paramMapping.Parameter = targetParam.QualifiedName;
+                                paramMapping.Argument = microflowExpressionService.CreateFromString(paramValue);
+                                microflowCall.AddParameterMapping(paramMapping);
+                                _logger.LogInformation($"Mapped parameter '{paramName}' = '{paramValue}'");
+                            }
+                            else
+                            {
+                                _logger.LogWarning($"Parameter '{paramName}' not found in target microflow '{targetMicroflow.Name}'");
+                            }
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning("IMicroflowService or IMicroflowExpressionService not available - skipping parameter mappings");
+                    }
+                }
+
                 // Create the action activity
                 var activity = _model.Create<IActionActivity>();
                 activity.Action = microflowCallAction;
-                
-                _logger.LogInformation($"Created microflow call activity for microflow '{microflowName}' with return variable '{returnVariable ?? "none"}'");
-                
+
+                _logger.LogInformation($"Created microflow call activity for microflow '{targetMicroflow.Name}' (qualified: {targetMicroflow.QualifiedName}) with return variable '{returnVariable ?? "none"}'");
+
                 return activity;
             }
             catch (Exception ex)
@@ -1753,7 +2266,8 @@ namespace MCPExtension.Tools
                 if (string.IsNullOrEmpty(entityName))
                 {
                     // Get all available entities for diagnostics
-                    var allEntities = Utils.Utils.GetMyFirstModule(_model).DomainModel.GetEntities()
+                    var allEntities = Utils.Utils.GetAllNonAppStoreModules(_model)
+                        .SelectMany(m => m.DomainModel?.GetEntities() ?? Enumerable.Empty<IEntity>())
                         .Select(e => e.Name).ToList();
                     
                     string availableEntities = allEntities.Any() ? 
@@ -1765,36 +2279,35 @@ namespace MCPExtension.Tools
                     return null;
                 }
 
-                // Find the entity in the domain model
-                var module = Utils.Utils.GetMyFirstModule(_model);
-                
-                // Try to find entity by name first, then by qualified name if it contains a dot
-                IEntity? entity = null;
-                
+                // Find the entity across all modules
                 // If entityName contains a dot, extract the simple name (e.g., "MyFirstModule.Customer" -> "Customer")
                 var simpleEntityName = entityName.Contains('.') ? entityName.Split('.').Last() : entityName;
-                
-                // First try to find by simple name
-                entity = module.DomainModel.GetEntities()
-                    .FirstOrDefault(e => e.Name.Equals(simpleEntityName, StringComparison.OrdinalIgnoreCase));
-                
-                // If not found and original entityName contained a dot, try to find by full qualified name
+
+                // Try to find by simple name across all modules
+                var (entity, foundModule) = Utils.Utils.FindEntityAcrossModules(_model, simpleEntityName);
+
+                // If not found and original entityName contained a dot, try qualified name match
                 if (entity == null && entityName.Contains('.'))
                 {
-                    entity = module.DomainModel.GetEntities()
-                        .FirstOrDefault(e => e.QualifiedName.ToString().Equals(entityName, StringComparison.OrdinalIgnoreCase));
+                    foreach (var mod in Utils.Utils.GetAllNonAppStoreModules(_model))
+                    {
+                        entity = mod.DomainModel?.GetEntities()
+                            .FirstOrDefault(e => e.QualifiedName.ToString().Equals(entityName, StringComparison.OrdinalIgnoreCase));
+                        if (entity != null) break;
+                    }
                 }
 
                 if (entity == null)
                 {
-                    var availableEntities = module.DomainModel.GetEntities()
+                    var availableEntities = Utils.Utils.GetAllNonAppStoreModules(_model)
+                        .SelectMany(m => m.DomainModel?.GetEntities() ?? Enumerable.Empty<IEntity>())
                         .Select(e => $"{e.Name} (qualified: {e.QualifiedName})")
                         .ToList();
-                    
-                    string availableEntitiesStr = availableEntities.Any() ? 
+
+                    string availableEntitiesStr = availableEntities.Any() ?
                         string.Join(", ", availableEntities) : "No entities found";
-                    
-                    string error = $"Entity '{entityName}' not found in domain model. Tried simple name '{simpleEntityName}' and qualified name '{entityName}'. Available entities: {availableEntitiesStr}";
+
+                    string error = $"Entity '{entityName}' not found in any module. Tried simple name '{simpleEntityName}' and qualified name '{entityName}'. Available entities: {availableEntitiesStr}";
                     _logger.LogError(error);
                     SetLastError(error, new ArgumentException($"Entity not found: {entityName}"));
                     return null;
@@ -1923,39 +2436,50 @@ namespace MCPExtension.Tools
                     return null;
                 }
 
-                string outputVariable = activityData["output_variable"]?.ToString() ?? 
-                                       activityData["outputVariable"]?.ToString() ?? 
-                                       activityData["variable_name"]?.ToString() ?? 
+                string outputVariable = activityData["output_variable"]?.ToString() ??
+                                       activityData["outputVariable"]?.ToString() ??
+                                       activityData["variable_name"]?.ToString() ??
                                        activityData["variableName"]?.ToString() ?? "AssociatedObjects";
 
-                string associationName = activityData["association"]?.ToString() ?? 
-                                        activityData["associationName"]?.ToString() ?? 
+                string associationName = activityData["association"]?.ToString() ??
+                                        activityData["associationName"]?.ToString() ??
                                         activityData["association_name"]?.ToString() ??
                                         throw new ArgumentException("Association name is required");
 
-                string inputVariable = activityData["input_variable"]?.ToString() ?? 
-                                      activityData["inputVariable"]?.ToString() ?? 
-                                      throw new ArgumentException("Input variable is required");
+                string inputVariable = activityData["input_variable"]?.ToString() ??
+                                      activityData["inputVariable"]?.ToString() ??
+                                      activityData["entity_variable"]?.ToString() ??
+                                      throw new ArgumentException("Input variable (entity_variable) is required");
 
-                var module = Utils.Utils.GetMyFirstModule(_model);
-                // TODO: Find the correct way to access associations from IDomainModel
-                // For now, return null until we find the proper API
-                SetLastError($"Association retrieve not yet implemented - association API access needs to be researched");
-                return null;
-                // TODO: Find the correct way to access associations from IDomainModel
-                // For now, return null until we find the proper API
-                SetLastError($"Association retrieve not yet implemented - association API access needs to be researched");
-                return null;
+                // Find the association by searching all entities across all modules
+                IAssociation? association = null;
+                foreach (var module in Utils.Utils.GetAllNonAppStoreModules(_model))
+                {
+                    if (module.DomainModel == null) continue;
+                    foreach (var entity in module.DomainModel.GetEntities())
+                    {
+                        var entityAssociations = entity.GetAssociations(AssociationDirection.Both, null);
+                        var match = entityAssociations.FirstOrDefault(ea =>
+                            ea.Association.Name.Equals(associationName, StringComparison.OrdinalIgnoreCase));
+                        if (match != null)
+                        {
+                            association = match.Association;
+                            _logger.LogInformation($"Found association '{associationName}' between '{match.Parent.Name}' and '{match.Child.Name}'");
+                            break;
+                        }
+                    }
+                    if (association != null) break;
+                }
 
-                // var association = associations.FirstOrDefault(a => a.Name == associationName);
-                // if (association == null)
-                // {
-                //     SetLastError($"Association '{associationName}' not found in module");
-                //     return null;
-                // }
+                if (association == null)
+                {
+                    SetLastError($"Association '{associationName}' not found in any module");
+                    return null;
+                }
 
-                // return microflowActivitiesService.CreateAssociationRetrieveSourceActivity(
-                //     _model, association, inputVariable, outputVariable);
+                _logger.LogInformation($"Creating association retrieve: association='{associationName}', input='{inputVariable}', output='{outputVariable}'");
+                return microflowActivitiesService.CreateAssociationRetrieveSourceActivity(
+                    _model, association, outputVariable, inputVariable);
             }
             catch (Exception ex)
             {
@@ -2107,14 +2631,404 @@ namespace MCPExtension.Tools
 
         #endregion
 
-        #region List Operations - Placeholder Methods
+        #region List Operations - Full Implementation
 
-        // TODO: Implement these methods using IMicroflowActivitiesService
-        private IActionActivity? CreateListActivity(JsonObject? activityData) => null;
-        private IActionActivity? CreateSortListActivity(JsonObject? activityData) => null;
-        private IActionActivity? CreateFilterListActivity(JsonObject? activityData) => null;
-        private IActionActivity? CreateFindInListActivity(JsonObject? activityData) => null;
-        private IActionActivity? CreateAggregateListActivity(JsonObject? activityData) => null;
+        /// <summary>
+        /// Creates a create list activity (empty list of a given entity type).
+        /// </summary>
+        private IActionActivity? CreateListActivity(JsonObject? activityData)
+        {
+            try
+            {
+                var microflowActivitiesService = _serviceProvider?.GetService<IMicroflowActivitiesService>();
+                if (microflowActivitiesService == null)
+                {
+                    SetLastError("IMicroflowActivitiesService not available");
+                    return null;
+                }
+
+                string entityName = activityData?["entity_name"]?.ToString() ??
+                                   activityData?["entityName"]?.ToString() ??
+                                   activityData?["entity"]?.ToString() ??
+                                   throw new ArgumentException("Entity name is required for create list activity. Use 'entity' or 'entity_name'.");
+
+                string outputVariable = activityData?["output_variable"]?.ToString() ??
+                                       activityData?["outputVariable"]?.ToString() ??
+                                       activityData?["variable_name"]?.ToString() ??
+                                       $"{entityName}List";
+
+                var (entity, _) = Utils.Utils.FindEntityAcrossModules(_model, entityName);
+                if (entity == null)
+                {
+                    SetLastError($"Entity '{entityName}' not found in any module for create list activity");
+                    return null;
+                }
+
+                _logger.LogInformation($"Creating create list activity: entity='{entityName}', output='{outputVariable}'");
+                return microflowActivitiesService.CreateCreateListActivity(_model, entity, outputVariable);
+            }
+            catch (Exception ex)
+            {
+                SetLastError($"Failed to create list activity: {ex.Message}", ex);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Creates a sort list activity. Sorts an existing list variable by one or more attributes.
+        /// </summary>
+        private IActionActivity? CreateSortListActivity(JsonObject? activityData)
+        {
+            try
+            {
+                var microflowActivitiesService = _serviceProvider?.GetService<IMicroflowActivitiesService>();
+                if (microflowActivitiesService == null)
+                {
+                    SetLastError("IMicroflowActivitiesService not available");
+                    return null;
+                }
+
+                string listVariable = activityData?["list_variable"]?.ToString() ??
+                                     activityData?["listVariable"]?.ToString() ??
+                                     activityData?["variable_name"]?.ToString() ??
+                                     throw new ArgumentException("List variable name is required for sort list activity");
+
+                string outputVariable = activityData?["output_variable"]?.ToString() ??
+                                       activityData?["outputVariable"]?.ToString() ??
+                                       $"Sorted{listVariable}";
+
+                string entityName = activityData?["entity_name"]?.ToString() ??
+                                   activityData?["entityName"]?.ToString() ??
+                                   activityData?["entity"]?.ToString() ??
+                                   throw new ArgumentException("Entity name is required to resolve sort attributes");
+
+                var (entity, _) = Utils.Utils.FindEntityAcrossModules(_model, entityName);
+                if (entity == null)
+                {
+                    SetLastError($"Entity '{entityName}' not found for sort list activity");
+                    return null;
+                }
+
+                // Parse sort_by: can be array of {attribute, descending} or a single attribute name
+                var sortings = new List<Mendix.StudioPro.ExtensionsAPI.Model.Microflows.AttributeSorting>();
+                var sortByArray = activityData?["sort_by"]?.AsArray();
+
+                if (sortByArray != null && sortByArray.Count > 0)
+                {
+                    foreach (var sortItem in sortByArray)
+                    {
+                        string? attrName = null;
+                        bool descending = false;
+
+                        if (sortItem is JsonObject sortObj)
+                        {
+                            attrName = sortObj["attribute"]?.ToString() ??
+                                      sortObj["attribute_name"]?.ToString();
+                            descending = bool.Parse(sortObj["descending"]?.ToString() ?? "false") ||
+                                        (sortObj["direction"]?.ToString()?.ToLowerInvariant() == "desc");
+                        }
+                        else
+                        {
+                            attrName = sortItem?.ToString();
+                        }
+
+                        if (string.IsNullOrEmpty(attrName)) continue;
+
+                        var attr = entity.GetAttributes()
+                            .FirstOrDefault(a => a.Name.Equals(attrName, StringComparison.OrdinalIgnoreCase));
+                        if (attr == null)
+                        {
+                            SetLastError($"Attribute '{attrName}' not found on entity '{entityName}' for sorting");
+                            return null;
+                        }
+                        sortings.Add(new Mendix.StudioPro.ExtensionsAPI.Model.Microflows.AttributeSorting(attr, descending));
+                    }
+                }
+                else
+                {
+                    // Single attribute sort
+                    string? attrName = activityData?["attribute"]?.ToString() ??
+                                     activityData?["attribute_name"]?.ToString();
+                    bool descending = bool.Parse(activityData?["descending"]?.ToString() ?? "false") ||
+                                    (activityData?["direction"]?.ToString()?.ToLowerInvariant() == "desc");
+
+                    if (string.IsNullOrEmpty(attrName))
+                    {
+                        SetLastError("At least one attribute is required for sort list. Use 'attribute' or 'sort_by' array.");
+                        return null;
+                    }
+
+                    var attr = entity.GetAttributes()
+                        .FirstOrDefault(a => a.Name.Equals(attrName, StringComparison.OrdinalIgnoreCase));
+                    if (attr == null)
+                    {
+                        SetLastError($"Attribute '{attrName}' not found on entity '{entityName}' for sorting");
+                        return null;
+                    }
+                    sortings.Add(new Mendix.StudioPro.ExtensionsAPI.Model.Microflows.AttributeSorting(attr, descending));
+                }
+
+                _logger.LogInformation($"Creating sort list activity: list='{listVariable}', output='{outputVariable}', sortBy=[{string.Join(", ", sortings.Select(s => $"{s.Attribute.Name} {(s.SortByDescending ? "DESC" : "ASC")}"))}]");
+                return microflowActivitiesService.CreateSortListActivity(
+                    _model, listVariable, outputVariable, sortings.ToArray());
+            }
+            catch (Exception ex)
+            {
+                SetLastError($"Failed to create sort list activity: {ex.Message}", ex);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Creates a filter list activity. Filters a list by attribute value using an expression.
+        /// </summary>
+        private IActionActivity? CreateFilterListActivity(JsonObject? activityData)
+        {
+            try
+            {
+                var microflowActivitiesService = _serviceProvider?.GetService<IMicroflowActivitiesService>();
+                var microflowExpressionService = _serviceProvider?.GetService<IMicroflowExpressionService>();
+                if (microflowActivitiesService == null || microflowExpressionService == null)
+                {
+                    SetLastError("IMicroflowActivitiesService or IMicroflowExpressionService not available");
+                    return null;
+                }
+
+                string listVariable = activityData?["list_variable"]?.ToString() ??
+                                     activityData?["listVariable"]?.ToString() ??
+                                     activityData?["variable_name"]?.ToString() ??
+                                     throw new ArgumentException("List variable name is required for filter list activity");
+
+                string outputVariable = activityData?["output_variable"]?.ToString() ??
+                                       activityData?["outputVariable"]?.ToString() ??
+                                       $"Filtered{listVariable}";
+
+                string filterExpr = activityData?["filter_expression"]?.ToString() ??
+                                   activityData?["filterExpression"]?.ToString() ??
+                                   activityData?["expression"]?.ToString() ??
+                                   throw new ArgumentException("Filter expression is required for filter list activity");
+
+                string entityName = activityData?["entity_name"]?.ToString() ??
+                                   activityData?["entityName"]?.ToString() ??
+                                   activityData?["entity"]?.ToString() ??
+                                   throw new ArgumentException("Entity name is required to resolve filter attribute");
+
+                string attributeName = activityData?["attribute_name"]?.ToString() ??
+                                     activityData?["attributeName"]?.ToString() ??
+                                     activityData?["attribute"]?.ToString() ??
+                                     throw new ArgumentException("Attribute name is required for filter list by attribute");
+
+                var (entity, _) = Utils.Utils.FindEntityAcrossModules(_model, entityName);
+                if (entity == null)
+                {
+                    SetLastError($"Entity '{entityName}' not found for filter list activity");
+                    return null;
+                }
+
+                var attribute = entity.GetAttributes()
+                    .FirstOrDefault(a => a.Name.Equals(attributeName, StringComparison.OrdinalIgnoreCase));
+                if (attribute == null)
+                {
+                    SetLastError($"Attribute '{attributeName}' not found on entity '{entityName}' for filtering");
+                    return null;
+                }
+
+                var expression = microflowExpressionService.CreateFromString(filterExpr);
+
+                _logger.LogInformation($"Creating filter list activity: list='{listVariable}', output='{outputVariable}', attr='{attributeName}', expr='{filterExpr}'");
+                return microflowActivitiesService.CreateFilterListByAttributeActivity(
+                    _model, attribute, listVariable, outputVariable, expression);
+            }
+            catch (Exception ex)
+            {
+                SetLastError($"Failed to create filter list activity: {ex.Message}", ex);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Creates a find in list activity. Finds a single item by attribute or expression.
+        /// </summary>
+        private IActionActivity? CreateFindInListActivity(JsonObject? activityData)
+        {
+            try
+            {
+                var microflowActivitiesService = _serviceProvider?.GetService<IMicroflowActivitiesService>();
+                var microflowExpressionService = _serviceProvider?.GetService<IMicroflowExpressionService>();
+                if (microflowActivitiesService == null || microflowExpressionService == null)
+                {
+                    SetLastError("IMicroflowActivitiesService or IMicroflowExpressionService not available");
+                    return null;
+                }
+
+                string listVariable = activityData?["list_variable"]?.ToString() ??
+                                     activityData?["listVariable"]?.ToString() ??
+                                     activityData?["variable_name"]?.ToString() ??
+                                     throw new ArgumentException("List variable name is required for find in list activity");
+
+                string outputVariable = activityData?["output_variable"]?.ToString() ??
+                                       activityData?["outputVariable"]?.ToString() ??
+                                       "FoundItem";
+
+                string findExpr = activityData?["find_expression"]?.ToString() ??
+                                 activityData?["findExpression"]?.ToString() ??
+                                 activityData?["expression"]?.ToString() ??
+                                 throw new ArgumentException("Find expression is required for find in list activity");
+
+                // Determine if we are finding by attribute or by expression
+                string? attributeName = activityData?["attribute_name"]?.ToString() ??
+                                       activityData?["attributeName"]?.ToString() ??
+                                       activityData?["attribute"]?.ToString();
+
+                string? entityName = activityData?["entity_name"]?.ToString() ??
+                                    activityData?["entityName"]?.ToString() ??
+                                    activityData?["entity"]?.ToString();
+
+                var expression = microflowExpressionService.CreateFromString(findExpr);
+
+                // If attribute is specified, use FindByAttribute
+                if (!string.IsNullOrEmpty(attributeName) && !string.IsNullOrEmpty(entityName))
+                {
+                    var (entity, _) = Utils.Utils.FindEntityAcrossModules(_model, entityName);
+                    if (entity == null)
+                    {
+                        SetLastError($"Entity '{entityName}' not found for find in list activity");
+                        return null;
+                    }
+
+                    var attribute = entity.GetAttributes()
+                        .FirstOrDefault(a => a.Name.Equals(attributeName, StringComparison.OrdinalIgnoreCase));
+                    if (attribute == null)
+                    {
+                        SetLastError($"Attribute '{attributeName}' not found on entity '{entityName}' for find");
+                        return null;
+                    }
+
+                    _logger.LogInformation($"Creating find by attribute activity: list='{listVariable}', output='{outputVariable}', attr='{attributeName}', expr='{findExpr}'");
+                    return microflowActivitiesService.CreateFindByAttributeActivity(
+                        _model, attribute, listVariable, outputVariable, expression);
+                }
+                else
+                {
+                    // Use FindByExpression (no attribute needed)
+                    _logger.LogInformation($"Creating find by expression activity: list='{listVariable}', output='{outputVariable}', expr='{findExpr}'");
+                    return microflowActivitiesService.CreateFindByExpressionActivity(
+                        _model, listVariable, outputVariable, expression);
+                }
+            }
+            catch (Exception ex)
+            {
+                SetLastError($"Failed to create find in list activity: {ex.Message}", ex);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Creates an aggregate list activity. Supports count, sum, average, min, max, all, any.
+        /// Can aggregate by attribute, by expression, or simple (count).
+        /// </summary>
+        private IActionActivity? CreateAggregateListActivity(JsonObject? activityData)
+        {
+            try
+            {
+                var microflowActivitiesService = _serviceProvider?.GetService<IMicroflowActivitiesService>();
+                var microflowExpressionService = _serviceProvider?.GetService<IMicroflowExpressionService>();
+                if (microflowActivitiesService == null)
+                {
+                    SetLastError("IMicroflowActivitiesService not available");
+                    return null;
+                }
+
+                string listVariable = activityData?["list_variable"]?.ToString() ??
+                                     activityData?["listVariable"]?.ToString() ??
+                                     activityData?["variable_name"]?.ToString() ??
+                                     throw new ArgumentException("List variable name is required for aggregate list activity");
+
+                string outputVariable = activityData?["output_variable"]?.ToString() ??
+                                       activityData?["outputVariable"]?.ToString() ??
+                                       "AggregateResult";
+
+                string functionStr = activityData?["function"]?.ToString()?.ToLowerInvariant() ??
+                                    activityData?["aggregate_function"]?.ToString()?.ToLowerInvariant() ??
+                                    activityData?["aggregateFunction"]?.ToString()?.ToLowerInvariant() ??
+                                    "count";
+
+                // Convert function string to enum
+                Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.AggregateFunctionEnum aggregateFunction;
+                switch (functionStr)
+                {
+                    case "sum": aggregateFunction = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.AggregateFunctionEnum.Sum; break;
+                    case "average": case "avg": aggregateFunction = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.AggregateFunctionEnum.Average; break;
+                    case "count": aggregateFunction = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.AggregateFunctionEnum.Count; break;
+                    case "minimum": case "min": aggregateFunction = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.AggregateFunctionEnum.Minimum; break;
+                    case "maximum": case "max": aggregateFunction = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.AggregateFunctionEnum.Maximum; break;
+                    case "all": aggregateFunction = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.AggregateFunctionEnum.All; break;
+                    case "any": aggregateFunction = Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.AggregateFunctionEnum.Any; break;
+                    default:
+                        SetLastError($"Unknown aggregate function '{functionStr}'. Supported: sum, average, count, minimum, maximum, all, any");
+                        return null;
+                }
+
+                // Check if aggregating by attribute
+                string? attributeName = activityData?["attribute_name"]?.ToString() ??
+                                       activityData?["attributeName"]?.ToString() ??
+                                       activityData?["attribute"]?.ToString();
+
+                string? entityName = activityData?["entity_name"]?.ToString() ??
+                                    activityData?["entityName"]?.ToString() ??
+                                    activityData?["entity"]?.ToString();
+
+                // Check if aggregating by expression
+                string? expressionStr = activityData?["expression"]?.ToString() ??
+                                       activityData?["aggregate_expression"]?.ToString();
+
+                if (!string.IsNullOrEmpty(attributeName) && !string.IsNullOrEmpty(entityName))
+                {
+                    // Aggregate by attribute
+                    var (entity, _) = Utils.Utils.FindEntityAcrossModules(_model, entityName);
+                    if (entity == null)
+                    {
+                        SetLastError($"Entity '{entityName}' not found for aggregate list activity");
+                        return null;
+                    }
+
+                    var attribute = entity.GetAttributes()
+                        .FirstOrDefault(a => a.Name.Equals(attributeName, StringComparison.OrdinalIgnoreCase));
+                    if (attribute == null)
+                    {
+                        SetLastError($"Attribute '{attributeName}' not found on entity '{entityName}' for aggregation");
+                        return null;
+                    }
+
+                    _logger.LogInformation($"Creating aggregate list by attribute activity: list='{listVariable}', output='{outputVariable}', attr='{attributeName}', func='{functionStr}'");
+                    return microflowActivitiesService.CreateAggregateListByAttributeActivity(
+                        _model, attribute, listVariable, outputVariable, aggregateFunction);
+                }
+                else if (!string.IsNullOrEmpty(expressionStr) && microflowExpressionService != null)
+                {
+                    // Aggregate by expression
+                    var expression = microflowExpressionService.CreateFromString(expressionStr);
+
+                    _logger.LogInformation($"Creating aggregate list by expression activity: list='{listVariable}', output='{outputVariable}', expr='{expressionStr}', func='{functionStr}'");
+                    return microflowActivitiesService.CreateAggregateListByExpressionActivity(
+                        _model, expression, listVariable, outputVariable, aggregateFunction);
+                }
+                else
+                {
+                    // Simple aggregate (count, etc.)
+                    _logger.LogInformation($"Creating simple aggregate list activity: list='{listVariable}', output='{outputVariable}', func='{functionStr}'");
+                    return microflowActivitiesService.CreateAggregateListActivity(
+                        _model, listVariable, outputVariable, aggregateFunction);
+                }
+            }
+            catch (Exception ex)
+            {
+                SetLastError($"Failed to create aggregate list activity: {ex.Message}", ex);
+                return null;
+            }
+        }
+
+        // Placeholder - not in Phase 4 scope
         private IActionActivity? CreateJavaActionCallActivity(JsonObject? activityData) => null;
 
         #endregion
@@ -2252,22 +3166,13 @@ namespace MCPExtension.Tools
 
                 _logger.LogInformation($"Creating change attribute activity: object='{objectVariableName}', attribute='{attributeName}', entity='{entityName}', value='{newValueExpr}', changeType='{changeTypeStr}', commit='{commitStr}'");
 
-                // Find the attribute in the domain model
-                var module = Utils.Utils.GetMyFirstModule(_model);
-                if (module?.DomainModel == null)
-                {
-                    SetLastError("Domain model not found");
-                    return null;
-                }
-
+                // Find the attribute in the domain model (search across all modules)
                 IAttribute? attribute = null;
 
                 // First try to find by entity name if provided
                 if (!string.IsNullOrEmpty(entityName))
                 {
-                    var entity = module.DomainModel.GetEntities()
-                        .FirstOrDefault(e => e.Name.Equals(entityName, StringComparison.OrdinalIgnoreCase));
-                    
+                    var (entity, _) = Utils.Utils.FindEntityAcrossModules(_model, entityName);
                     if (entity != null)
                     {
                         attribute = entity.GetAttributes()
@@ -2275,28 +3180,34 @@ namespace MCPExtension.Tools
                     }
                 }
 
-                // If not found by entity, search all entities
+                // If not found by entity, search all entities across all modules
                 if (attribute == null)
                 {
-                    foreach (var entity in module.DomainModel.GetEntities())
+                    foreach (var mod in Utils.Utils.GetAllNonAppStoreModules(_model))
                     {
-                        attribute = entity.GetAttributes()
-                            .FirstOrDefault(a => a.Name.Equals(attributeName, StringComparison.OrdinalIgnoreCase));
-                        if (attribute != null)
+                        if (mod.DomainModel == null) continue;
+                        foreach (var entity in mod.DomainModel.GetEntities())
                         {
-                            _logger.LogInformation($"Found attribute '{attributeName}' in entity '{entity.Name}'");
-                            break;
+                            attribute = entity.GetAttributes()
+                                .FirstOrDefault(a => a.Name.Equals(attributeName, StringComparison.OrdinalIgnoreCase));
+                            if (attribute != null)
+                            {
+                                _logger.LogInformation($"Found attribute '{attributeName}' in entity '{entity.Name}' (module '{mod.Name}')");
+                                break;
+                            }
                         }
+                        if (attribute != null) break;
                     }
                 }
 
                 if (attribute == null)
                 {
-                    var availableAttributes = module.DomainModel.GetEntities()
+                    var availableAttributes = Utils.Utils.GetAllNonAppStoreModules(_model)
+                        .SelectMany(m => m.DomainModel?.GetEntities() ?? Enumerable.Empty<IEntity>())
                         .SelectMany(e => e.GetAttributes().Select(a => $"{e.Name}.{a.Name}"))
                         .ToList();
-                    
-                    var error = $"Attribute '{attributeName}' not found in domain model. Available attributes: {string.Join(", ", availableAttributes)}";
+
+                    var error = $"Attribute '{attributeName}' not found in any module. Available attributes: {string.Join(", ", availableAttributes)}";
                     SetLastError(error);
                     return null;
                 }
@@ -2412,41 +3323,42 @@ namespace MCPExtension.Tools
 
                 _logger.LogInformation($"Creating change association activity: object='{objectVariableName}', association='{associationName}', value='{newValueExpr}', changeType='{changeTypeStr}', commit='{commitStr}'");
 
-                // Find the association in the domain model
-                var module = Utils.Utils.GetMyFirstModule(_model);
-                if (module?.DomainModel == null)
-                {
-                    SetLastError("Domain model not found");
-                    return null;
-                }
-
+                // Find the association across all modules
                 IAssociation? association = null;
 
-                // Search through all entities for the association
-                foreach (var entity in module.DomainModel.GetEntities())
+                foreach (var mod in Utils.Utils.GetAllNonAppStoreModules(_model))
                 {
-                    var entityAssociations = entity.GetAssociations(AssociationDirection.Both, null);
-                    var foundAssociation = entityAssociations
-                        .FirstOrDefault(ea => ea.Association.Name.Equals(associationName, StringComparison.OrdinalIgnoreCase));
-                    
-                    if (foundAssociation != null)
+                    if (mod.DomainModel == null) continue;
+                    foreach (var entity in mod.DomainModel.GetEntities())
                     {
-                        association = foundAssociation.Association;
-                        _logger.LogInformation($"Found association '{associationName}' between '{foundAssociation.Parent.Name}' and '{foundAssociation.Child.Name}'");
-                        break;
+                        var entityAssociations = entity.GetAssociations(AssociationDirection.Both, null);
+                        var foundAssociation = entityAssociations
+                            .FirstOrDefault(ea => ea.Association.Name.Equals(associationName, StringComparison.OrdinalIgnoreCase));
+
+                        if (foundAssociation != null)
+                        {
+                            association = foundAssociation.Association;
+                            _logger.LogInformation($"Found association '{associationName}' between '{foundAssociation.Parent.Name}' and '{foundAssociation.Child.Name}' (module '{mod.Name}')");
+                            break;
+                        }
                     }
+                    if (association != null) break;
                 }
 
                 if (association == null)
                 {
                     var availableAssociations = new List<string>();
-                    foreach (var entity in module.DomainModel.GetEntities())
+                    foreach (var mod in Utils.Utils.GetAllNonAppStoreModules(_model))
                     {
-                        var entityAssociations = entity.GetAssociations(AssociationDirection.Both, null);
-                        availableAssociations.AddRange(entityAssociations.Select(ea => ea.Association.Name));
+                        if (mod.DomainModel == null) continue;
+                        foreach (var entity in mod.DomainModel.GetEntities())
+                        {
+                            var entityAssociations = entity.GetAssociations(AssociationDirection.Both, null);
+                            availableAssociations.AddRange(entityAssociations.Select(ea => ea.Association.Name));
+                        }
                     }
-                    
-                    var error = $"Association '{associationName}' not found in domain model. Available associations: {string.Join(", ", availableAssociations.Distinct())}";
+
+                    var error = $"Association '{associationName}' not found in any module. Available associations: {string.Join(", ", availableAssociations.Distinct())}";
                     SetLastError(error);
                     return null;
                 }
@@ -2691,10 +3603,11 @@ namespace MCPExtension.Tools
                     return JsonSerializer.Serialize(new { error });
                 }
 
-                var module = Utils.Utils.GetMyFirstModule(_model);
+                var seqModuleName = arguments["module_name"]?.ToString();
+                var module = Utils.Utils.ResolveModule(_model, seqModuleName);
                 if (module == null)
                 {
-                    var error = "No module found.";
+                    var error = string.IsNullOrWhiteSpace(seqModuleName) ? "No module found." : $"Module '{seqModuleName}' not found.";
                     SetLastError(error);
                     return JsonSerializer.Serialize(new { error });
                 }

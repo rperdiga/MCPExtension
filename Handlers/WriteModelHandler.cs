@@ -184,7 +184,7 @@ namespace MCPExtension.Handlers
                                 $"Duplicated association names detected: {string.Join(", ", duplicatedAssociationNames)}");
                         }
 
-                        var module = Utils.Utils.GetMyFirstModule(CurrentApp);
+                        var module = Utils.Utils.ResolveModule(CurrentApp, null);
                         if (module?.DomainModel == null)
                         {
                             throw new InvalidOperationException("No domain model found.");

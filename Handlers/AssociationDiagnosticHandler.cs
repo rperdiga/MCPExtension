@@ -36,7 +36,7 @@ namespace MCPExtension.Handlers
                     return;
                 }
 
-                var module = Utils.Utils.GetMyFirstModule(CurrentApp);
+                var module = Utils.Utils.ResolveModule(CurrentApp, null);
                 if (module?.DomainModel == null)
                 {
                     context.Response.StatusCode = 404;

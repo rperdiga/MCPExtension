@@ -13,6 +13,7 @@ using System.Text;
 using System.IO;
 using Mendix.StudioPro.ExtensionsAPI.Model;
 using Mendix.StudioPro.ExtensionsAPI.Model.Projects;
+using MCPExtension.MCP;
 
 namespace MCPExtension.MCP
 {
@@ -23,8 +24,15 @@ namespace MCPExtension.MCP
         private bool _isRunning;
         private IWebHost? _webHost;
         private int _port;
+        private int _activeSseConnections;
+        private int _totalToolCalls;
 
         private readonly string? _projectDirectory;
+
+        public int Port => _port;
+        public int ActiveSseConnections => _activeSseConnections;
+        public int TotalToolCalls => _totalToolCalls;
+        public event Action<ToolCallEventArgs>? OnToolCallEvent;
 
         public McpServer(ILogger<McpServer> logger, int port = 3001, string? projectDirectory = null)
         {
@@ -326,7 +334,8 @@ namespace MCPExtension.MCP
             context.Response.Headers.Add("Access-Control-Allow-Origin", "*");
             context.Response.Headers.Add("Access-Control-Allow-Headers", "Cache-Control");
 
-            LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] SSE client connected from {context.Connection.RemoteIpAddress}");
+            Interlocked.Increment(ref _activeSseConnections);
+            LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] SSE client connected from {context.Connection.RemoteIpAddress} (active: {_activeSseConnections})");
             _logger.LogInformation("SSE client connected");
 
             try
@@ -340,7 +349,6 @@ namespace MCPExtension.MCP
                 {
                     await Task.Delay(30000, context.RequestAborted); // Send keepalive every 30 seconds
                     await SendSseMessage(context.Response, "keepalive", "");
-                    // Keepalive sent silently - no logging to prevent log file clutter
                 }
             }
             catch (Exception ex)
@@ -350,7 +358,8 @@ namespace MCPExtension.MCP
             }
             finally
             {
-                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] SSE client disconnected");
+                Interlocked.Decrement(ref _activeSseConnections);
+                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] SSE client disconnected (active: {_activeSseConnections})");
                 _logger.LogInformation("SSE client disconnected");
             }
         }
@@ -481,40 +490,45 @@ namespace MCPExtension.MCP
 
         private async Task<object> HandleToolCall(JsonNode id, JsonObject paramsObj)
         {
+            var toolName = paramsObj["name"]?.ToString();
+            var arguments = paramsObj["arguments"]?.AsObject();
+
+            if (string.IsNullOrEmpty(toolName) || !_tools.ContainsKey(toolName))
+            {
+                return CreateErrorResponse(id, "Tool not found", $"Unknown tool: {toolName}");
+            }
+
+            var callId = Guid.NewGuid().ToString("N").Substring(0, 8);
+            var startTime = DateTime.Now;
+            Interlocked.Increment(ref _totalToolCalls);
+
+            LogToFile($"[{startTime:HH:mm:ss.fff}] Tool call [{callId}]: {toolName}");
+
+            // Fire "Started" event
+            OnToolCallEvent?.Invoke(new ToolCallEventArgs
+            {
+                CallId = callId,
+                ToolName = toolName,
+                Timestamp = startTime,
+                Status = ToolCallStatus.Started
+            });
+
             try
             {
-                var toolName = paramsObj["name"]?.ToString();
-                var arguments = paramsObj["arguments"]?.AsObject();
-
-                // Enhanced logging for create_microflow_activities debugging
-                if (toolName == "create_microflow_activities")
-                {
-                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] === DEBUGGING create_microflow_activities ===");
-                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Full paramsObj: {JsonSerializer.Serialize(paramsObj)}");
-                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Extracted toolName: '{toolName}'");
-                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Raw arguments object: {arguments}");
-                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Arguments JSON: {JsonSerializer.Serialize(arguments)}");
-                    
-                    if (arguments != null)
-                    {
-                        foreach (var kvp in arguments)
-                        {
-                            LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Argument Key: '{kvp.Key}', Value: '{kvp.Value}'");
-                        }
-                    }
-                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] === END DEBUG ===");
-                }
-
-                if (string.IsNullOrEmpty(toolName) || !_tools.ContainsKey(toolName))
-                {
-                    return CreateErrorResponse(id, "Tool not found", $"Unknown tool: {toolName}");
-                }
-
-                // Log the tool call and arguments for debugging
-                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Tool call: {toolName}");
-                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Arguments: {JsonSerializer.Serialize(arguments)}");
-
                 var result = await _tools[toolName](arguments ?? new JsonObject());
+                var durationMs = (long)(DateTime.Now - startTime).TotalMilliseconds;
+
+                LogToFile($"[{DateTime.Now:HH:mm:ss.fff}] Tool [{callId}] completed in {durationMs}ms");
+
+                // Fire "Completed" event
+                OnToolCallEvent?.Invoke(new ToolCallEventArgs
+                {
+                    CallId = callId,
+                    ToolName = toolName,
+                    Timestamp = startTime,
+                    Status = ToolCallStatus.Completed,
+                    DurationMs = durationMs
+                });
 
                 return new
                 {
@@ -535,6 +549,21 @@ namespace MCPExtension.MCP
             }
             catch (Exception ex)
             {
+                var durationMs = (long)(DateTime.Now - startTime).TotalMilliseconds;
+
+                LogToFile($"[{DateTime.Now:HH:mm:ss.fff}] Tool [{callId}] failed in {durationMs}ms: {ex.Message}");
+
+                // Fire "Failed" event
+                OnToolCallEvent?.Invoke(new ToolCallEventArgs
+                {
+                    CallId = callId,
+                    ToolName = toolName,
+                    Timestamp = startTime,
+                    Status = ToolCallStatus.Failed,
+                    DurationMs = durationMs,
+                    ErrorMessage = ex.Message
+                });
+
                 _logger.LogError(ex, "Error executing tool");
                 return CreateErrorResponse(id, "Tool execution error", ex.Message);
             }
@@ -559,23 +588,38 @@ namespace MCPExtension.MCP
         {
             return toolName switch
             {
-                "read_domain_model" => "Read the current domain model structure",
-                "create_entity" => "Create a new entity in the domain model",
-                "create_association" => "Create a new association between entities",
-                "delete_model_element" => "Delete an element from the domain model",
-                "diagnose_associations" => "Diagnose association creation issues",
-                "create_multiple_entities" => "Create multiple entities at once",
-                "create_multiple_associations" => "Create multiple associations at once",
-                "create_domain_model_from_schema" => "Create a complete domain model from a schema definition",
-                "save_data" => "Generate realistic sample data for Mendix domain model entities",
-                "generate_overview_pages" => "Generate overview pages for entities",
-                "list_microflows" => "List all microflows in a module",
+                "list_modules" => "List all modules in the project with metadata (name, fromAppStore, entity count). Use this to discover available modules before performing operations.",
+                "create_module" => "Create a new module in the project. Returns the created module metadata.",
+                "set_entity_generalization" => "Set inheritance (generalization) for an entity to inherit from another entity. Supports cross-module inheritance.",
+                "remove_entity_generalization" => "Remove generalization from an entity, making it a root entity.",
+                "add_event_handler" => "Add a before/after event handler (create/commit/delete/rollback) to an entity, linked to a microflow.",
+                "add_attribute" => "Add an attribute to an existing entity. Supports all types: String, Integer, Long, Decimal, Boolean, DateTime, AutoNumber, Binary, HashedString, Enumeration. Optional default_value.",
+                "set_calculated_attribute" => "Set an existing attribute to be calculated by a microflow instead of stored. The microflow receives the entity and returns the computed value.",
+                "read_domain_model" => "Read domain model structure including generalizations, event handlers, attribute default values and calculated status, association delete behaviors and owner. Specify module_name for a specific module, or omit to get all non-Marketplace modules.",
+                "create_entity" => "Create a new entity in the domain model. Specify module_name to target a specific module.",
+                "create_association" => "Create a new association between entities. Supports cross-module associations via parent_module and child_module parameters. Configure delete behavior (parent_delete_behavior, child_delete_behavior) and owner (default, both).",
+                "delete_model_element" => "Delete an element from the model. Supports element_type: entity, attribute, association, microflow, constant, enumeration. For entity/attribute/association use entity_name. For microflow/constant/enumeration use document_name (or entity_name as fallback). Specify module_name to target a specific module.",
+                "diagnose_associations" => "Diagnose association creation issues. Specify module_name or omit to diagnose the default module.",
+                "create_multiple_entities" => "Create multiple entities at once. Supports per-entity module_name override.",
+                "create_multiple_associations" => "Create multiple associations at once. Supports cross-module via per-association parent_module/child_module. Configure delete behavior and owner per association.",
+                "create_domain_model_from_schema" => "Create a complete domain model from a schema definition. Specify module_name to target a specific module.",
+                "save_data" => "Generate realistic sample data for Mendix domain model entities. Specify module_name to target a specific module.",
+                "generate_overview_pages" => "Generate overview pages for entities. Specify module_name to target a specific module.",
+                "list_microflows" => "List all microflows in a module. Specify module_name or omit for default module.",
+                "check_model" => "Validate the model for common issues: broken generalizations, missing event handler microflows, broken associations, calculated attributes with missing microflows. Use this after making changes to verify model health. Returns errors, warnings, and module statistics.",
+                "get_studio_pro_logs" => "Read Studio Pro log files and MCP extension error logs. Filter by level (ERROR, WARN, INFO, ALL) and time window (last_minutes). Use this to see if Studio Pro encountered any errors from recent operations.",
+                "check_project_errors" => "Run mx.exe check against the project MPR file to get real Studio Pro consistency errors and warnings. Returns structured error info with error codes (e.g. CE3945), messages, and locations. Use this AFTER making model changes to verify the project has no consistency errors. Optional: studio_pro_version (e.g. '11.5.0', auto-detects if omitted).",
+                "create_constant" => "Create a new constant in a module. Params: name (required), type (string/integer/boolean/decimal/datetime/float, default: string), default_value, exposed_to_client (bool), module_name.",
+                "list_constants" => "List all constants across all modules or in a specific module. Optional: module_name.",
+                "create_enumeration" => "Create a new enumeration in a module. Params: name (required), values (array of {name, caption} or strings), module_name.",
+                "list_enumerations" => "List all enumerations with their values across all modules or in a specific module. Optional: module_name.",
+                "read_project_info" => "Get a comprehensive overview of the project: all modules with entity, association, microflow, constant, and enumeration counts.",
                 "get_last_error" => "Get details about the last error",
                 "list_available_tools" => "List all available tools",
-                "debug_info" => "Get comprehensive debug information about the domain model",
-                "read_microflow_details" => "Get details about a specific microflow including activities with their positions",
-                "create_microflow" => "Create a new microflow in the module with parameters and return type",
-                "create_microflow_activities" => "Create one or more microflow activities in sequence within an existing microflow. Activities are inserted in the correct order automatically. For single activities, use an array with one item. This unified approach replaces individual activity creation for better reliability.",
+                "debug_info" => "Get comprehensive debug information about the domain model. Specify module_name to target a specific module.",
+                "read_microflow_details" => "Get details about a specific microflow including activities with their positions. Specify module_name to target a specific module.",
+                "create_microflow" => "Create a new microflow in the module with parameters and return type. Specify module_name to target a specific module.",
+                "create_microflow_activities" => "Create one or more microflow activities in sequence within an existing microflow. Supported activity_type values: create_object (entity, variableName, commit, refresh_in_client, initial_values:[{attribute,value}]), change_attribute, change_association, commit, rollback, delete, retrieve_from_database, retrieve_by_association (association_name, output_variable, input_variable, module_name), microflow_call (microflow_name or Module.MicroflowName, return_variable, parameters:[{name,value}]), create_list (entity, output_variable), change_list (list_variable, operation:add/remove/clear/set, change_value), sort_list (list_variable, entity, sort_by:[{attribute,descending}], output_variable), filter_list (list_variable, entity, attribute, filter_expression, output_variable), find_in_list (list_variable, expression; optionally entity+attribute for find-by-attribute), aggregate_list (list_variable, function:count/sum/average/min/max/all/any; optionally entity+attribute for by-attribute, or expression for by-expression), show_message, log_message. Specify module_name to target a specific module.",
                 _ => "Tool description not available"
             };
         }
@@ -584,10 +628,90 @@ namespace MCPExtension.MCP
         {
             return toolName switch
             {
-                "read_domain_model" => new
+                "list_modules" => new
                 {
                     type = "object",
                     properties = new { },
+                    required = new string[0]
+                },
+                "create_module" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Name of the new module to create." }
+                    },
+                    required = new[] { "module_name" }
+                },
+                "set_entity_generalization" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        entity_name = new { type = "string", description = "Name of the entity to set generalization on." },
+                        parent_entity = new { type = "string", description = "Name of the parent entity to inherit from." },
+                        module_name = new { type = "string", description = "Module containing the entity. Searches all modules if omitted." },
+                        parent_module = new { type = "string", description = "Module containing the parent entity. Searches all modules if omitted." }
+                    },
+                    required = new[] { "entity_name", "parent_entity" }
+                },
+                "remove_entity_generalization" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        entity_name = new { type = "string", description = "Name of the entity to remove generalization from." },
+                        module_name = new { type = "string", description = "Module containing the entity. Searches all modules if omitted." }
+                    },
+                    required = new[] { "entity_name" }
+                },
+                "add_event_handler" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        entity_name = new { type = "string", description = "Name of the entity to add the event handler to." },
+                        @event = new { type = "string", description = "Event type: 'create', 'commit', 'delete', or 'rollback'." },
+                        moment = new { type = "string", description = "When to trigger: 'before' or 'after'." },
+                        microflow = new { type = "string", description = "Name of the microflow to call when the event fires." },
+                        raise_error_on_false = new { type = "boolean", description = "If true (default), raises an error when the microflow returns false." },
+                        module_name = new { type = "string", description = "Module containing the entity. Searches all modules if omitted." }
+                    },
+                    required = new[] { "entity_name", "event", "moment", "microflow" }
+                },
+                "add_attribute" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        entity_name = new { type = "string", description = "Name of the entity to add the attribute to." },
+                        attribute_name = new { type = "string", description = "Name for the new attribute." },
+                        attribute_type = new { type = "string", description = "Type: String, Integer, Long, Decimal, Boolean, DateTime, AutoNumber, Binary, HashedString, or Enumeration." },
+                        default_value = new { type = "string", description = "Optional default value for the attribute." },
+                        enumeration_values = new { type = "array", items = new { type = "string" }, description = "Required when attribute_type is Enumeration. List of enum value names." },
+                        module_name = new { type = "string", description = "Module containing the entity. Searches all modules if omitted." }
+                    },
+                    required = new[] { "entity_name", "attribute_name", "attribute_type" }
+                },
+                "set_calculated_attribute" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        entity_name = new { type = "string", description = "Name of the entity containing the attribute." },
+                        attribute_name = new { type = "string", description = "Name of the attribute to make calculated." },
+                        microflow = new { type = "string", description = "Name of the microflow that computes the value." },
+                        module_name = new { type = "string", description = "Module containing the entity. Searches all modules if omitted." }
+                    },
+                    required = new[] { "entity_name", "attribute_name", "microflow" }
+                },
+                "read_domain_model" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Module name to read. If omitted, returns domain models from all non-Marketplace modules." }
+                    },
                     required = new string[0]
                 },
                 "create_entity" => new
@@ -596,6 +720,7 @@ namespace MCPExtension.MCP
                     properties = new
                     {
                         entity_name = new { type = "string" },
+                        module_name = new { type = "string", description = "Target module name. Falls back to default module if omitted." },
                         attributes = new
                         {
                             type = "array",
@@ -605,7 +730,8 @@ namespace MCPExtension.MCP
                                 properties = new
                                 {
                                     name = new { type = "string" },
-                                    type = new { type = "string" },
+                                    type = new { type = "string", description = "String, Integer, Long, Decimal, Boolean, DateTime, AutoNumber, Binary, HashedString, or Enumeration." },
+                                    default_value = new { type = "string", description = "Optional default value for the attribute." },
                                     enumerationValues = new
                                     {
                                         type = "array",
@@ -625,7 +751,13 @@ namespace MCPExtension.MCP
                         name = new { type = "string" },
                         parent = new { type = "string" },
                         child = new { type = "string" },
-                        type = new { type = "string" }
+                        type = new { type = "string" },
+                        module_name = new { type = "string", description = "Default module for both entities. Can be overridden per entity." },
+                        parent_module = new { type = "string", description = "Module containing the parent entity. Overrides module_name." },
+                        child_module = new { type = "string", description = "Module containing the child entity. Overrides module_name." },
+                        parent_delete_behavior = new { type = "string", description = "Behavior when parent is deleted: delete_me_and_references (cascade), delete_me_but_keep_references (default), delete_me_if_no_references (prevent)." },
+                        child_delete_behavior = new { type = "string", description = "Behavior when child is deleted: delete_me_and_references (cascade), delete_me_but_keep_references (default), delete_me_if_no_references (prevent)." },
+                        owner = new { type = "string", description = "Association owner: 'default' (child owns) or 'both' (bidirectional)." }
                     },
                     required = new[] { "name", "parent", "child" }
                 },
@@ -645,7 +777,12 @@ namespace MCPExtension.MCP
                                     name = new { type = "string" },
                                     parent = new { type = "string" },
                                     child = new { type = "string" },
-                                    type = new { type = "string" }
+                                    type = new { type = "string" },
+                                    parent_module = new { type = "string", description = "Module containing the parent entity." },
+                                    child_module = new { type = "string", description = "Module containing the child entity." },
+                                    parent_delete_behavior = new { type = "string", description = "Behavior when parent is deleted: delete_me_and_references, delete_me_but_keep_references (default), delete_me_if_no_references." },
+                                    child_delete_behavior = new { type = "string", description = "Behavior when child is deleted: delete_me_and_references, delete_me_but_keep_references (default), delete_me_if_no_references." },
+                                    owner = new { type = "string", description = "Association owner: 'default' or 'both'." }
                                 },
                                 required = new[] { "name", "parent", "child" }
                             }
@@ -658,6 +795,7 @@ namespace MCPExtension.MCP
                     type = "object",
                     properties = new
                     {
+                        module_name = new { type = "string", description = "Target module for entity creation. Falls back to default module if omitted." },
                         schema = new
                         {
                             type = "object",
@@ -718,17 +856,22 @@ namespace MCPExtension.MCP
                     type = "object",
                     properties = new
                     {
-                        element_type = new { type = "string" },
-                        entity_name = new { type = "string" },
-                        attribute_name = new { type = "string" },
-                        association_name = new { type = "string" }
+                        element_type = new { type = "string", description = "Type to delete: entity, attribute, association, microflow, constant, enumeration" },
+                        entity_name = new { type = "string", description = "Entity name (required for entity/attribute/association; also used as fallback for document_name)" },
+                        document_name = new { type = "string", description = "Document name (for microflow/constant/enumeration deletion)" },
+                        attribute_name = new { type = "string", description = "Attribute name (for attribute deletion)" },
+                        association_name = new { type = "string", description = "Association name (for association deletion)" },
+                        module_name = new { type = "string", description = "Module containing the element. Falls back to default module if omitted." }
                     },
-                    required = new[] { "element_type", "entity_name" }
+                    required = new[] { "element_type" }
                 },
                 "diagnose_associations" => new
                 {
                     type = "object",
-                    properties = new { },
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Module to diagnose. Falls back to default module if omitted." }
+                    },
                     required = new string[0]
                 },
                 "create_multiple_entities" => new
@@ -736,6 +879,7 @@ namespace MCPExtension.MCP
                     type = "object",
                     properties = new
                     {
+                        module_name = new { type = "string", description = "Default module for all entities. Individual entities can override with their own module_name." },
                         entities = new
                         {
                             type = "array",
@@ -745,6 +889,7 @@ namespace MCPExtension.MCP
                                 properties = new
                                 {
                                     entity_name = new { type = "string" },
+                                    module_name = new { type = "string", description = "Override module for this specific entity." },
                                     attributes = new
                                     {
                                         type = "array",
@@ -774,7 +919,8 @@ namespace MCPExtension.MCP
                     type = "object",
                     properties = new
                     {
-                        data = new { 
+                        module_name = new { type = "string", description = "Target module for data validation. Falls back to default module if omitted." },
+                        data = new {
                             type = "object",
                             description = "Entity data organized by ModuleName.EntityName keys with arrays of records containing VirtualId for relationships",
                             additionalProperties = new {
@@ -801,7 +947,8 @@ namespace MCPExtension.MCP
                             type = "array",
                             items = new { type = "string" }
                         },
-                        generate_index_snippet = new { type = "boolean" }
+                        generate_index_snippet = new { type = "boolean" },
+                        module_name = new { type = "string", description = "Module containing the entities. Falls back to default module if omitted." }
                     },
                     required = new[] { "entity_names" }
                 },
@@ -810,9 +957,28 @@ namespace MCPExtension.MCP
                     type = "object",
                     properties = new
                     {
-                        module_name = new { type = "string" }
+                        module_name = new { type = "string", description = "Module to list microflows from. Falls back to default module if omitted." }
                     },
-                    required = new[] { "module_name" }
+                    required = new string[0]
+                },
+                "check_model" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Module to check. If omitted, checks all non-Marketplace modules." }
+                    },
+                    required = new string[0]
+                },
+                "get_studio_pro_logs" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        level = new { type = "string", description = "Log level filter: ERROR (default), WARN, INFO, or ALL." },
+                        last_minutes = new { type = "integer", description = "Time window in minutes (default: 30). Only shows entries from this many minutes ago." }
+                    },
+                    required = new string[0]
                 },
                 "get_last_error" => new
                 {
@@ -829,7 +995,10 @@ namespace MCPExtension.MCP
                 "debug_info" => new
                 {
                     type = "object",
-                    properties = new { },
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Module to debug. Falls back to default module if omitted." }
+                    },
                     required = new string[0]
                 },
                 "read_microflow_details" => new
@@ -837,10 +1006,10 @@ namespace MCPExtension.MCP
                     type = "object",
                     properties = new
                     {
-                        module_name = new { type = "string" },
+                        module_name = new { type = "string", description = "Module containing the microflow. Falls back to default module if omitted." },
                         microflow_name = new { type = "string" }
                     },
-                    required = new[] { "module_name", "microflow_name" }
+                    required = new[] { "microflow_name" }
                 },
                 "create_microflow" => new
                 {
@@ -848,6 +1017,7 @@ namespace MCPExtension.MCP
                     properties = new
                     {
                         name = new { type = "string" },
+                        module_name = new { type = "string", description = "Target module. Falls back to default module if omitted." },
                         parameters = new
                         {
                             type = "array",
@@ -872,6 +1042,7 @@ namespace MCPExtension.MCP
                     properties = new
                     {
                         microflow_name = new { type = "string", description = "Name of the microflow to add activities to" },
+                        module_name = new { type = "string", description = "Module containing the microflow. Falls back to default module if omitted." },
                         activities = new 
                         { 
                             type = "array", 
@@ -894,6 +1065,68 @@ namespace MCPExtension.MCP
                     },
                     required = new[] { "microflow_name", "activities" }
                 },
+                "check_project_errors" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        studio_pro_version = new { type = "string", description = "Studio Pro version (e.g., '11.5.0'). Auto-detects latest if omitted." }
+                    },
+                    required = new string[0]
+                },
+                "create_constant" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        name = new { type = "string", description = "Name of the constant" },
+                        type = new { type = "string", description = "Data type: string, integer, boolean, decimal, datetime, float (default: string)" },
+                        default_value = new { type = "string", description = "Default value for the constant" },
+                        exposed_to_client = new { type = "boolean", description = "Whether the constant is exposed to the client (default: false)" },
+                        module_name = new { type = "string", description = "Target module (default module if omitted)" }
+                    },
+                    required = new[] { "name" }
+                },
+                "list_constants" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Module to list constants from. Lists all modules if omitted." }
+                    },
+                    required = new string[0]
+                },
+                "create_enumeration" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        name = new { type = "string", description = "Name of the enumeration" },
+                        values = new
+                        {
+                            type = "array",
+                            description = "Enumeration values. Each item can be a string or {name, caption}.",
+                            items = new { type = "object" }
+                        },
+                        module_name = new { type = "string", description = "Target module (default module if omitted)" }
+                    },
+                    required = new[] { "name", "values" }
+                },
+                "list_enumerations" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Module to list enumerations from. Lists all modules if omitted." }
+                    },
+                    required = new string[0]
+                },
+                "read_project_info" => new
+                {
+                    type = "object",
+                    properties = new { },
+                    required = new string[0]
+                },
                 _ => new
                 {
                     type = "object",
@@ -909,7 +1142,5 @@ namespace MCPExtension.MCP
             _webHost?.StopAsync().Wait(5000);
             _webHost?.Dispose();
         }
-
-        public int Port => _port;
     }
 }

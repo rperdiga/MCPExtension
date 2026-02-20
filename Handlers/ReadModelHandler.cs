@@ -44,7 +44,7 @@ namespace MCPExtension.Handlers
                     "read domain model",
                     async (model) =>
                     {
-                        var module = Utils.Utils.GetMyFirstModule(model);
+                        var module = Utils.Utils.ResolveModule(model, null);
                         if (module?.DomainModel == null)
                         {
                             return (

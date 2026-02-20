@@ -1,6 +1,7 @@
 ﻿using System;
 using System.ComponentModel.Composition;
 using System.Threading.Tasks;
+using Eto.Forms;
 using Mendix.StudioPro.ExtensionsAPI.UI.DockablePane;
 using Mendix.StudioPro.ExtensionsAPI.Model;
 using Mendix.StudioPro.ExtensionsAPI.Model.Projects;
@@ -80,7 +81,35 @@ namespace MCPExtension
             {
                 InitializeServices();
             }
+
+            // Create the ViewModel FIRST so the WebView is ready for status updates
             _currentViewModel = new AIAPIEngineViewModel("MCP Server", this);
+
+            // Auto-start the MCP server if not already running
+            if (_mcpServer != null && !_mcpServer.IsRunning)
+            {
+                Task.Run(async () =>
+                {
+                    try
+                    {
+                        await StartAPIEngineAsync();
+                        var connectionInfo = _mcpServer.GetConnectionInfo();
+                        Application.Instance.Invoke(() =>
+                        {
+                            _currentViewModel?.NotifyServerStarted(connectionInfo);
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.LogError(ex, "Failed to auto-start MCP server");
+                        Application.Instance.Invoke(() =>
+                        {
+                            _currentViewModel?.NotifyServerStartFailed(ex.Message);
+                        });
+                    }
+                });
+            }
+
             return _currentViewModel;
         }
 

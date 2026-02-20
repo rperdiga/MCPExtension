@@ -44,11 +44,6 @@
     <ProjectReference Include="..\csharp-sdk\src\ModelContextProtocol\ModelContextProtocol.csproj" /> -->
   </ItemGroup>
   <ItemGroup>
-    <Reference Include="Mendix.StudioPro.ExtensionsAPI">
-      <HintPath>bin\Debug\net6.0\Mendix.StudioPro.ExtensionsAPI.dll</HintPath>
-    </Reference>
-  </ItemGroup>
-  <ItemGroup>
     <Content Include="manifest.json">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>

@@ -7,7 +7,10 @@ using System.Threading.Tasks;
 using Mendix.StudioPro.ExtensionsAPI.Model;
 using Mendix.StudioPro.ExtensionsAPI.Model.Projects;
 using Mendix.StudioPro.ExtensionsAPI.Model.DomainModels;
+using Mendix.StudioPro.ExtensionsAPI.Model.Constants;
+using Mendix.StudioPro.ExtensionsAPI.Model.DataTypes;
 using Mendix.StudioPro.ExtensionsAPI.Model.Enumerations;
+using Mendix.StudioPro.ExtensionsAPI.Model.Microflows;
 using Mendix.StudioPro.ExtensionsAPI.Model.Texts;
 using Microsoft.Extensions.Logging;
 using MCPExtension.Utils;
@@ -25,14 +28,930 @@ namespace MCPExtension.Tools
             _logger = logger;
         }
 
+        public async Task<string> ListModules(JsonObject parameters)
+        {
+            try
+            {
+                var allModules = _model.Root.GetModules();
+                var moduleList = allModules
+                    .Where(m => m != null)
+                    .Select(m => new
+                    {
+                        name = m.Name,
+                        fromAppStore = m.FromAppStore,
+                        entityCount = m.DomainModel?.GetEntities().Count() ?? 0
+                    })
+                    .OrderBy(m => m.fromAppStore)
+                    .ThenBy(m => m.name)
+                    .ToList();
+
+                var result = new
+                {
+                    success = true,
+                    message = $"Found {moduleList.Count} modules ({moduleList.Count(m => !m.fromAppStore)} user modules, {moduleList.Count(m => m.fromAppStore)} Marketplace modules)",
+                    modules = moduleList,
+                    userModules = moduleList.Where(m => !m.fromAppStore).Select(m => m.name).ToList()
+                };
+
+                return JsonSerializer.Serialize(result, new JsonSerializerOptions
+                {
+                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                    WriteIndented = true
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error listing modules");
+                return JsonSerializer.Serialize(new { error = "Failed to list modules", details = ex.Message });
+            }
+        }
+
+        public async Task<string> CreateModule(JsonObject parameters)
+        {
+            try
+            {
+                var moduleName = parameters["module_name"]?.ToString();
+                if (string.IsNullOrEmpty(moduleName))
+                {
+                    return JsonSerializer.Serialize(new { error = "module_name is required" });
+                }
+
+                // Check for duplicate
+                var existing = Utils.Utils.GetModuleByName(_model, moduleName);
+                if (existing != null)
+                {
+                    return JsonSerializer.Serialize(new { error = $"Module '{moduleName}' already exists" });
+                }
+
+                using (var transaction = _model.StartTransaction("create module"))
+                {
+                    var module = _model.Create<IModule>();
+                    module.Name = moduleName;
+                    _model.Root.AddModule(module);
+                    transaction.Commit();
+                }
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = $"Module '{moduleName}' created successfully",
+                    module = new { name = moduleName, fromAppStore = false, entityCount = 0 }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error creating module");
+                MendixAdditionalTools.SetLastError($"Failed to create module: {ex.Message}", ex);
+                return JsonSerializer.Serialize(new { error = $"Failed to create module: {ex.Message}" });
+            }
+        }
+
+        public async Task<string> SetEntityGeneralization(JsonObject parameters)
+        {
+            try
+            {
+                var entityName = parameters["entity_name"]?.ToString();
+                var parentEntityName = parameters["parent_entity"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+                var parentModuleName = parameters["parent_module"]?.ToString();
+
+                if (string.IsNullOrEmpty(entityName) || string.IsNullOrEmpty(parentEntityName))
+                {
+                    return JsonSerializer.Serialize(new { error = "entity_name and parent_entity are required" });
+                }
+
+                var (entity, entityModule) = Utils.Utils.FindEntityAcrossModules(_model, entityName, moduleName);
+                if (entity == null)
+                {
+                    return JsonSerializer.Serialize(new { error = $"Entity '{entityName}' not found" + (moduleName != null ? $" in module '{moduleName}'" : "") });
+                }
+
+                var (parentEntity, _) = Utils.Utils.FindEntityAcrossModules(_model, parentEntityName, parentModuleName);
+                if (parentEntity == null)
+                {
+                    return JsonSerializer.Serialize(new { error = $"Parent entity '{parentEntityName}' not found" + (parentModuleName != null ? $" in module '{parentModuleName}'" : "") });
+                }
+
+                using (var transaction = _model.StartTransaction("set entity generalization"))
+                {
+                    var generalization = _model.Create<IGeneralization>();
+                    generalization.Generalization = parentEntity.QualifiedName;
+                    entity.Generalization = generalization;
+                    transaction.Commit();
+                }
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = $"Entity '{entityName}' now inherits from '{parentEntityName}'",
+                    entity = entityName,
+                    parent = parentEntityName
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error setting entity generalization");
+                MendixAdditionalTools.SetLastError($"Failed to set generalization: {ex.Message}", ex);
+                return JsonSerializer.Serialize(new { error = $"Failed to set generalization: {ex.Message}" });
+            }
+        }
+
+        public async Task<string> RemoveEntityGeneralization(JsonObject parameters)
+        {
+            try
+            {
+                var entityName = parameters["entity_name"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(entityName))
+                {
+                    return JsonSerializer.Serialize(new { error = "entity_name is required" });
+                }
+
+                var (entity, _) = Utils.Utils.FindEntityAcrossModules(_model, entityName, moduleName);
+                if (entity == null)
+                {
+                    return JsonSerializer.Serialize(new { error = $"Entity '{entityName}' not found" });
+                }
+
+                if (entity.Generalization is not IGeneralization)
+                {
+                    return JsonSerializer.Serialize(new { error = $"Entity '{entityName}' does not have a generalization to remove" });
+                }
+
+                using (var transaction = _model.StartTransaction("remove entity generalization"))
+                {
+                    var noGeneralization = _model.Create<INoGeneralization>();
+                    noGeneralization.Persistable = true;
+                    entity.Generalization = noGeneralization;
+                    transaction.Commit();
+                }
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = $"Generalization removed from entity '{entityName}'. It is now a root entity.",
+                    entity = entityName
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error removing entity generalization");
+                MendixAdditionalTools.SetLastError($"Failed to remove generalization: {ex.Message}", ex);
+                return JsonSerializer.Serialize(new { error = $"Failed to remove generalization: {ex.Message}" });
+            }
+        }
+
+        public async Task<string> AddEventHandler(JsonObject parameters)
+        {
+            try
+            {
+                var entityName = parameters["entity_name"]?.ToString();
+                var eventStr = parameters["event"]?.ToString();
+                var momentStr = parameters["moment"]?.ToString();
+                var microflowName = parameters["microflow"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(entityName) || string.IsNullOrEmpty(eventStr) || string.IsNullOrEmpty(momentStr) || string.IsNullOrEmpty(microflowName))
+                {
+                    return JsonSerializer.Serialize(new { error = "entity_name, event, moment, and microflow are required" });
+                }
+
+                var (entity, _) = Utils.Utils.FindEntityAcrossModules(_model, entityName, moduleName);
+                if (entity == null)
+                {
+                    return JsonSerializer.Serialize(new { error = $"Entity '{entityName}' not found" });
+                }
+
+                // Find the microflow across all non-AppStore modules
+                IMicroflow? microflow = null;
+                foreach (var mod in Utils.Utils.GetAllNonAppStoreModules(_model))
+                {
+                    microflow = mod.GetDocuments().OfType<IMicroflow>()
+                        .FirstOrDefault(mf => mf.Name.Equals(microflowName, StringComparison.OrdinalIgnoreCase));
+                    if (microflow != null) break;
+                }
+
+                if (microflow == null)
+                {
+                    return JsonSerializer.Serialize(new { error = $"Microflow '{microflowName}' not found in any module" });
+                }
+
+                var eventType = MapEventType(eventStr);
+                var moment = momentStr.ToLowerInvariant().Trim() == "before" ? ActionMoment.Before : ActionMoment.After;
+
+                bool raiseErrorOnFalse = true;
+                if (parameters.ContainsKey("raise_error_on_false"))
+                {
+                    if (parameters["raise_error_on_false"]?.AsValue().TryGetValue<bool>(out var val) == true)
+                        raiseErrorOnFalse = val;
+                }
+
+                using (var transaction = _model.StartTransaction("add event handler"))
+                {
+                    var eventHandler = _model.Create<IEventHandler>();
+                    eventHandler.Moment = moment;
+                    eventHandler.Event = eventType;
+                    eventHandler.Microflow = microflow.QualifiedName;
+                    eventHandler.RaiseErrorOnFalse = raiseErrorOnFalse;
+                    eventHandler.PassEventObject = true;
+                    entity.AddEventHandler(eventHandler);
+                    transaction.Commit();
+                }
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = $"Event handler added to '{entityName}': {momentStr} {eventStr} → {microflowName}",
+                    entity = entityName,
+                    moment = momentStr,
+                    @event = eventStr,
+                    microflow = microflowName,
+                    raiseErrorOnFalse = raiseErrorOnFalse
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error adding event handler");
+                MendixAdditionalTools.SetLastError($"Failed to add event handler: {ex.Message}", ex);
+                return JsonSerializer.Serialize(new { error = $"Failed to add event handler: {ex.Message}" });
+            }
+        }
+
+        private EventType MapEventType(string eventStr)
+        {
+            return eventStr.ToLowerInvariant().Trim() switch
+            {
+                "create" => EventType.Create,
+                "commit" => EventType.Commit,
+                "delete" => EventType.Delete,
+                "rollback" => EventType.RollBack,
+                _ => EventType.Commit
+            };
+        }
+
+        public async Task<string> AddAttribute(JsonObject parameters)
+        {
+            try
+            {
+                var entityName = parameters["entity_name"]?.ToString();
+                var attributeName = parameters["attribute_name"]?.ToString();
+                var attributeType = parameters["attribute_type"]?.ToString();
+                var defaultValue = parameters["default_value"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(entityName))
+                    return JsonSerializer.Serialize(new { error = "entity_name is required" });
+                if (string.IsNullOrEmpty(attributeName))
+                    return JsonSerializer.Serialize(new { error = "attribute_name is required" });
+                if (string.IsNullOrEmpty(attributeType))
+                    return JsonSerializer.Serialize(new { error = "attribute_type is required" });
+
+                var (entity, entityModule) = Utils.Utils.FindEntityAcrossModules(_model, entityName, moduleName);
+                if (entity == null)
+                    return JsonSerializer.Serialize(new { error = $"Entity '{entityName}' not found" + (moduleName != null ? $" in module '{moduleName}'" : "") });
+
+                // Check if attribute already exists
+                var existingAttr = entity.GetAttributes().FirstOrDefault(a => a.Name.Equals(attributeName, StringComparison.OrdinalIgnoreCase));
+                if (existingAttr != null)
+                    return JsonSerializer.Serialize(new { error = $"Attribute '{attributeName}' already exists on entity '{entityName}'" });
+
+                using (var transaction = _model.StartTransaction("add attribute"))
+                {
+                    var mxAttribute = _model.Create<IAttribute>();
+                    mxAttribute.Name = attributeName;
+
+                    if (attributeType.Equals("Enumeration", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var enumValues = parameters["enumeration_values"]?.AsArray()
+                            ?.Select(v => v?.ToString())
+                            ?.Where(v => !string.IsNullOrEmpty(v))
+                            ?.ToList();
+
+                        if (enumValues != null && enumValues.Any())
+                        {
+                            var enumTypeInstance = CreateEnumerationType(_model, attributeName, enumValues, entityModule);
+                            mxAttribute.Type = enumTypeInstance;
+                        }
+                        else
+                        {
+                            return JsonSerializer.Serialize(new { error = "Enumeration type requires 'enumeration_values' array" });
+                        }
+                    }
+                    else
+                    {
+                        mxAttribute.Type = CreateAttributeType(_model, attributeType);
+                    }
+
+                    // Set default value if provided
+                    if (!string.IsNullOrEmpty(defaultValue))
+                    {
+                        var storedValue = _model.Create<IStoredValue>();
+                        storedValue.DefaultValue = defaultValue;
+                        mxAttribute.Value = storedValue;
+                    }
+
+                    entity.AddAttribute(mxAttribute);
+                    transaction.Commit();
+                }
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = $"Attribute '{attributeName}' ({attributeType}) added to entity '{entityName}'",
+                    entity = entityName,
+                    attribute = new
+                    {
+                        name = attributeName,
+                        type = attributeType,
+                        defaultValue = defaultValue
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error adding attribute");
+                MendixAdditionalTools.SetLastError($"Failed to add attribute: {ex.Message}", ex);
+                return JsonSerializer.Serialize(new { error = $"Failed to add attribute: {ex.Message}" });
+            }
+        }
+
+        public async Task<string> SetCalculatedAttribute(JsonObject parameters)
+        {
+            try
+            {
+                var entityName = parameters["entity_name"]?.ToString();
+                var attributeName = parameters["attribute_name"]?.ToString();
+                var microflowName = parameters["microflow"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(entityName))
+                    return JsonSerializer.Serialize(new { error = "entity_name is required" });
+                if (string.IsNullOrEmpty(attributeName))
+                    return JsonSerializer.Serialize(new { error = "attribute_name is required" });
+                if (string.IsNullOrEmpty(microflowName))
+                    return JsonSerializer.Serialize(new { error = "microflow is required" });
+
+                var (entity, entityModule) = Utils.Utils.FindEntityAcrossModules(_model, entityName, moduleName);
+                if (entity == null)
+                    return JsonSerializer.Serialize(new { error = $"Entity '{entityName}' not found" + (moduleName != null ? $" in module '{moduleName}'" : "") });
+
+                var attribute = entity.GetAttributes().FirstOrDefault(a => a.Name.Equals(attributeName, StringComparison.OrdinalIgnoreCase));
+                if (attribute == null)
+                    return JsonSerializer.Serialize(new { error = $"Attribute '{attributeName}' not found on entity '{entityName}'" });
+
+                // Find the microflow across all non-AppStore modules
+                IMicroflow? microflow = null;
+                foreach (var mod in Utils.Utils.GetAllNonAppStoreModules(_model))
+                {
+                    microflow = mod.GetDocuments().OfType<IMicroflow>()
+                        .FirstOrDefault(mf => mf.Name.Equals(microflowName, StringComparison.OrdinalIgnoreCase));
+                    if (microflow != null) break;
+                }
+                if (microflow == null)
+                    return JsonSerializer.Serialize(new { error = $"Microflow '{microflowName}' not found" });
+
+                using (var transaction = _model.StartTransaction("set calculated attribute"))
+                {
+                    var calculatedValue = _model.Create<ICalculatedValue>();
+                    calculatedValue.Microflow = microflow.QualifiedName;
+                    calculatedValue.PassEntity = true;
+                    attribute.Value = calculatedValue;
+                    transaction.Commit();
+                }
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = $"Attribute '{attributeName}' on '{entityName}' is now calculated by microflow '{microflowName}'",
+                    entity = entityName,
+                    attribute = attributeName,
+                    microflow = microflowName,
+                    passEntity = true
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error setting calculated attribute");
+                MendixAdditionalTools.SetLastError($"Failed to set calculated attribute: {ex.Message}", ex);
+                return JsonSerializer.Serialize(new { error = $"Failed to set calculated attribute: {ex.Message}" });
+            }
+        }
+
+        public async Task<string> CheckModel(JsonObject parameters)
+        {
+            try
+            {
+                var moduleName = parameters?["module_name"]?.ToString();
+                var errors = new List<object>();
+                var warnings = new List<object>();
+                var info = new List<object>();
+
+                var modules = string.IsNullOrWhiteSpace(moduleName)
+                    ? Utils.Utils.GetAllNonAppStoreModules(_model).ToList()
+                    : new List<IModule> { Utils.Utils.GetModuleByName(_model, moduleName) }.Where(m => m != null).ToList()!;
+
+                if (!modules.Any())
+                {
+                    return JsonSerializer.Serialize(new { error = moduleName != null ? $"Module '{moduleName}' not found" : "No modules found" });
+                }
+
+                foreach (var module in modules)
+                {
+                    var entities = module.DomainModel?.GetEntities()?.ToList() ?? new List<IEntity>();
+
+                    foreach (var entity in entities)
+                    {
+                        // Check: Entity has no attributes (suspicious)
+                        var attrs = entity.GetAttributes();
+                        if (attrs == null || attrs.Count == 0)
+                        {
+                            warnings.Add(new { module = module.Name, entity = entity.Name, type = "no_attributes", message = $"Entity '{entity.Name}' has no attributes defined." });
+                        }
+
+                        // Check: Generalization points to a valid entity
+                        if (entity.Generalization is IGeneralization gen)
+                        {
+                            try
+                            {
+                                var parentEntity = gen.Generalization?.Resolve();
+                                if (parentEntity == null)
+                                {
+                                    errors.Add(new { module = module.Name, entity = entity.Name, type = "broken_generalization", message = $"Entity '{entity.Name}' has a generalization to '{gen.Generalization}' which cannot be resolved." });
+                                }
+                            }
+                            catch
+                            {
+                                errors.Add(new { module = module.Name, entity = entity.Name, type = "broken_generalization", message = $"Entity '{entity.Name}' has a generalization that cannot be resolved." });
+                            }
+                        }
+
+                        // Check: Event handlers point to valid microflows
+                        var handlers = entity.GetEventHandlers();
+                        if (handlers != null)
+                        {
+                            foreach (var handler in handlers)
+                            {
+                                if (handler.Microflow == null)
+                                {
+                                    errors.Add(new { module = module.Name, entity = entity.Name, type = "missing_event_microflow", message = $"Event handler on '{entity.Name}' ({handler.Moment} {handler.Event}) has no microflow assigned." });
+                                }
+                                else
+                                {
+                                    try
+                                    {
+                                        var mf = handler.Microflow.Resolve();
+                                        if (mf == null)
+                                        {
+                                            errors.Add(new { module = module.Name, entity = entity.Name, type = "broken_event_microflow", message = $"Event handler on '{entity.Name}' ({handler.Moment} {handler.Event}) references microflow '{handler.Microflow}' which cannot be resolved." });
+                                        }
+                                    }
+                                    catch
+                                    {
+                                        errors.Add(new { module = module.Name, entity = entity.Name, type = "broken_event_microflow", message = $"Event handler on '{entity.Name}' ({handler.Moment} {handler.Event}) references a microflow that cannot be resolved." });
+                                    }
+                                }
+                            }
+                        }
+
+                        // Check: Calculated attributes point to valid microflows
+                        foreach (var attr in attrs)
+                        {
+                            if (attr.Value is ICalculatedValue calcVal)
+                            {
+                                if (calcVal.Microflow == null)
+                                {
+                                    errors.Add(new { module = module.Name, entity = entity.Name, attribute = attr.Name, type = "missing_calc_microflow", message = $"Calculated attribute '{attr.Name}' on '{entity.Name}' has no microflow assigned." });
+                                }
+                                else
+                                {
+                                    try
+                                    {
+                                        var mf = calcVal.Microflow.Resolve();
+                                        if (mf == null)
+                                        {
+                                            errors.Add(new { module = module.Name, entity = entity.Name, attribute = attr.Name, type = "broken_calc_microflow", message = $"Calculated attribute '{attr.Name}' on '{entity.Name}' references microflow '{calcVal.Microflow}' which cannot be resolved." });
+                                        }
+                                    }
+                                    catch
+                                    {
+                                        errors.Add(new { module = module.Name, entity = entity.Name, attribute = attr.Name, type = "broken_calc_microflow", message = $"Calculated attribute '{attr.Name}' on '{entity.Name}' references a microflow that cannot be resolved." });
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Check: Associations are valid
+                    var associationCount = 0;
+                    var checkedAssociations = new HashSet<string>();
+                    foreach (var entity in entities)
+                    {
+                        try
+                        {
+                            var assocs = entity.GetAssociations(AssociationDirection.Both, null);
+                            foreach (var assocResult in assocs)
+                            {
+                                var assoc = assocResult.Association;
+                                if (checkedAssociations.Contains(assoc.Name)) continue;
+                                checkedAssociations.Add(assoc.Name);
+                                associationCount++;
+
+                                if (string.IsNullOrEmpty(assoc.Name))
+                                {
+                                    errors.Add(new { module = module.Name, entity = entity.Name, type = "unnamed_association", message = $"Entity '{entity.Name}' has an association with no name." });
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            warnings.Add(new { module = module.Name, entity = entity.Name, type = "association_read_error", message = $"Could not read associations for entity '{entity.Name}': {ex.Message}" });
+                        }
+                    }
+
+                    // Info: Module statistics
+                    var microflows = module.GetDocuments().OfType<IMicroflow>().Count();
+                    info.Add(new { module = module.Name, entities = entities.Count, associations = associationCount, microflows = microflows });
+                }
+
+                var hasIssues = errors.Any() || warnings.Any();
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    healthy = !errors.Any(),
+                    summary = new
+                    {
+                        modulesChecked = modules.Count,
+                        errorCount = errors.Count,
+                        warningCount = warnings.Count
+                    },
+                    errors = errors.Any() ? errors : null,
+                    warnings = warnings.Any() ? warnings : null,
+                    moduleStats = info,
+                    message = !hasIssues ? "Model is healthy. No issues found." : $"Found {errors.Count} error(s) and {warnings.Count} warning(s)."
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error checking model");
+                return JsonSerializer.Serialize(new { error = $"Failed to check model: {ex.Message}" });
+            }
+        }
+
+        #region Phase 5: Constants + Enumerations
+
+        public async Task<string> CreateConstant(JsonObject parameters)
+        {
+            try
+            {
+                var name = parameters?["name"]?.ToString();
+                var type = parameters?["type"]?.ToString()?.ToLowerInvariant() ?? "string";
+                var defaultValue = parameters?["default_value"]?.ToString() ?? "";
+                var exposedToClient = bool.Parse(parameters?["exposed_to_client"]?.ToString() ?? "false");
+                var moduleName = parameters?["module_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(name))
+                    return JsonSerializer.Serialize(new { error = "Constant name is required" });
+
+                var module = Utils.Utils.ResolveModule(_model, moduleName);
+                if (module == null)
+                    return JsonSerializer.Serialize(new { error = $"Module '{moduleName ?? "default"}' not found" });
+
+                // Check for duplicate
+                var existingConstants = _model.Root.GetModuleDocuments<IConstant>(module);
+                if (existingConstants.Any(c => c.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
+                    return JsonSerializer.Serialize(new { error = $"Constant '{name}' already exists in module '{module.Name}'" });
+
+                using var transaction = _model.StartTransaction($"Create constant {name}");
+
+                var constant = _model.Create<IConstant>();
+                constant.Name = name;
+                constant.DefaultValue = defaultValue;
+                constant.ExposedToClient = exposedToClient;
+
+                // Set data type
+                constant.DataType = type switch
+                {
+                    "string" => DataType.String,
+                    "integer" or "int" => DataType.Integer,
+                    "boolean" or "bool" => DataType.Boolean,
+                    "decimal" => DataType.Decimal,
+                    "datetime" => DataType.DateTime,
+                    "float" => DataType.Float,
+                    _ => DataType.String
+                };
+
+                module.AddDocument(constant);
+                transaction.Commit();
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = $"Constant '{name}' created in module '{module.Name}'",
+                    constant = new
+                    {
+                        name = constant.Name,
+                        qualifiedName = constant.QualifiedName?.ToString(),
+                        type,
+                        defaultValue,
+                        exposedToClient,
+                        module = module.Name
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error creating constant");
+                return JsonSerializer.Serialize(new { error = $"Failed to create constant: {ex.Message}" });
+            }
+        }
+
+        public async Task<string> ListConstants(JsonObject parameters)
+        {
+            try
+            {
+                var moduleName = parameters?["module_name"]?.ToString();
+
+                var modules = string.IsNullOrEmpty(moduleName)
+                    ? Utils.Utils.GetAllNonAppStoreModules(_model).ToList()
+                    : new List<IModule> { Utils.Utils.ResolveModule(_model, moduleName) }.Where(m => m != null).ToList();
+
+                var result = new List<object>();
+                foreach (var module in modules)
+                {
+                    var constants = _model.Root.GetModuleDocuments<IConstant>(module);
+                    foreach (var c in constants)
+                    {
+                        result.Add(new
+                        {
+                            name = c.Name,
+                            qualifiedName = c.QualifiedName?.ToString(),
+                            module = module.Name,
+                            defaultValue = c.DefaultValue,
+                            exposedToClient = c.ExposedToClient,
+                            dataType = c.DataType?.ToString()
+                        });
+                    }
+                }
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    count = result.Count,
+                    constants = result
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error listing constants");
+                return JsonSerializer.Serialize(new { error = $"Failed to list constants: {ex.Message}" });
+            }
+        }
+
+        public async Task<string> CreateEnumeration(JsonObject parameters)
+        {
+            try
+            {
+                var name = parameters?["name"]?.ToString();
+                var moduleName = parameters?["module_name"]?.ToString();
+                var valuesArray = parameters?["values"]?.AsArray();
+
+                if (string.IsNullOrEmpty(name))
+                    return JsonSerializer.Serialize(new { error = "Enumeration name is required" });
+
+                if (valuesArray == null || valuesArray.Count == 0)
+                    return JsonSerializer.Serialize(new { error = "At least one value is required for enumeration" });
+
+                var module = Utils.Utils.ResolveModule(_model, moduleName);
+                if (module == null)
+                    return JsonSerializer.Serialize(new { error = $"Module '{moduleName ?? "default"}' not found" });
+
+                // Check for duplicate
+                var existingEnums = _model.Root.GetModuleDocuments<IEnumeration>(module);
+                if (existingEnums.Any(e => e.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
+                    return JsonSerializer.Serialize(new { error = $"Enumeration '{name}' already exists in module '{module.Name}'" });
+
+                using var transaction = _model.StartTransaction($"Create enumeration {name}");
+
+                var enumeration = _model.Create<IEnumeration>();
+                enumeration.Name = name;
+
+                var createdValues = new List<object>();
+                foreach (var valueNode in valuesArray)
+                {
+                    string? valueName = null;
+                    string? caption = null;
+
+                    if (valueNode is JsonObject valueObj)
+                    {
+                        valueName = valueObj["name"]?.ToString();
+                        caption = valueObj["caption"]?.ToString();
+                    }
+                    else
+                    {
+                        valueName = valueNode?.ToString();
+                    }
+
+                    if (string.IsNullOrEmpty(valueName)) continue;
+
+                    var enumValue = _model.Create<IEnumerationValue>();
+                    enumValue.Name = valueName;
+
+                    var captionText = _model.Create<IText>();
+                    captionText.AddOrUpdateTranslation("en_US", caption ?? valueName);
+                    enumValue.Caption = captionText;
+
+                    enumeration.AddValue(enumValue);
+                    createdValues.Add(new { name = valueName, caption = caption ?? valueName });
+                }
+
+                module.AddDocument(enumeration);
+                transaction.Commit();
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = $"Enumeration '{name}' created with {createdValues.Count} values in module '{module.Name}'",
+                    enumeration = new
+                    {
+                        name = enumeration.Name,
+                        qualifiedName = enumeration.QualifiedName?.ToString(),
+                        module = module.Name,
+                        values = createdValues
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error creating enumeration");
+                return JsonSerializer.Serialize(new { error = $"Failed to create enumeration: {ex.Message}" });
+            }
+        }
+
+        public async Task<string> ListEnumerations(JsonObject parameters)
+        {
+            try
+            {
+                var moduleName = parameters?["module_name"]?.ToString();
+
+                var modules = string.IsNullOrEmpty(moduleName)
+                    ? Utils.Utils.GetAllNonAppStoreModules(_model).ToList()
+                    : new List<IModule> { Utils.Utils.ResolveModule(_model, moduleName) }.Where(m => m != null).ToList();
+
+                var result = new List<object>();
+                foreach (var module in modules)
+                {
+                    var enumerations = _model.Root.GetModuleDocuments<IEnumeration>(module);
+                    foreach (var e in enumerations)
+                    {
+                        var values = e.GetValues().Select(v => new
+                        {
+                            name = v.Name,
+                            caption = v.Caption?.GetTranslations()?.FirstOrDefault()?.Text ?? v.Name
+                        }).ToList();
+
+                        result.Add(new
+                        {
+                            name = e.Name,
+                            qualifiedName = e.QualifiedName?.ToString(),
+                            module = module.Name,
+                            valueCount = values.Count,
+                            values
+                        });
+                    }
+                }
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    count = result.Count,
+                    enumerations = result
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error listing enumerations");
+                return JsonSerializer.Serialize(new { error = $"Failed to list enumerations: {ex.Message}" });
+            }
+        }
+
+        #endregion
+
+        public async Task<string> ReadProjectInfo(JsonObject parameters)
+        {
+            try
+            {
+                var allModules = Utils.Utils.GetAllNonAppStoreModules(_model).ToList();
+                if (!allModules.Any())
+                {
+                    return JsonSerializer.Serialize(new { error = "No modules found in the project" });
+                }
+
+                var moduleInfos = allModules.Select(mod =>
+                {
+                    var entities = mod.DomainModel?.GetEntities()?.ToList() ?? new List<IEntity>();
+                    var microflows = mod.GetDocuments().OfType<IMicroflow>().Count();
+                    var constants = _model.Root.GetModuleDocuments<IConstant>(mod).Count;
+                    var enumerations = _model.Root.GetModuleDocuments<IEnumeration>(mod).Count;
+
+                    // Count associations (deduplicated)
+                    var assocNames = new HashSet<string>();
+                    foreach (var entity in entities)
+                    {
+                        try
+                        {
+                            foreach (var ea in entity.GetAssociations(AssociationDirection.Both, null))
+                                assocNames.Add(ea.Association.Name);
+                        }
+                        catch { }
+                    }
+
+                    return new
+                    {
+                        name = mod.Name,
+                        fromAppStore = mod.FromAppStore,
+                        entityCount = entities.Count,
+                        associationCount = assocNames.Count,
+                        microflowCount = microflows,
+                        constantCount = constants,
+                        enumerationCount = enumerations,
+                        entities = entities.Select(e => e.Name).ToList()
+                    };
+                }).ToList();
+
+                var totals = new
+                {
+                    modules = moduleInfos.Count,
+                    entities = moduleInfos.Sum(m => m.entityCount),
+                    associations = moduleInfos.Sum(m => m.associationCount),
+                    microflows = moduleInfos.Sum(m => m.microflowCount),
+                    constants = moduleInfos.Sum(m => m.constantCount),
+                    enumerations = moduleInfos.Sum(m => m.enumerationCount)
+                };
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    projectDirectory = _model.Root?.GetModules()?.FirstOrDefault()?.Name != null ? "Available" : "Unknown",
+                    totals = totals,
+                    modules = moduleInfos
+                }, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, WriteIndented = true });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error reading project info");
+                return JsonSerializer.Serialize(new { error = $"Failed to read project info: {ex.Message}" });
+            }
+        }
+
         public async Task<string> ReadDomainModel(JsonObject parameters)
         {
             try
             {
-                var module = Utils.Utils.GetMyFirstModule(_model);
+                var moduleName = parameters?["module_name"]?.ToString();
+
+                var options = new JsonSerializerOptions
+                {
+                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                    WriteIndented = true
+                };
+
+                if (string.IsNullOrWhiteSpace(moduleName))
+                {
+                    // Return domain models from ALL non-AppStore modules
+                    var allModules = Utils.Utils.GetAllNonAppStoreModules(_model).ToList();
+                    if (!allModules.Any())
+                    {
+                        return JsonSerializer.Serialize(new { error = "No modules found" });
+                    }
+
+                    var allModuleData = allModules.Select(mod => new
+                    {
+                        ModuleName = mod.Name,
+                        Entities = mod.DomainModel?.GetEntities().Select(entity => new
+                        {
+                            Name = entity.Name,
+                            QualifiedName = $"{mod.Name}.{entity.Name}",
+                            Generalization = GetGeneralizationInfo(entity),
+                            Attributes = GetEntityAttributes(entity),
+                            Associations = GetEntityAssociations(entity, mod),
+                            EventHandlers = GetEventHandlerInfo(entity)
+                        }).ToList()
+                    }).ToList();
+
+                    return JsonSerializer.Serialize(new
+                    {
+                        success = true,
+                        message = $"Domain models retrieved from {allModuleData.Count} modules",
+                        data = allModuleData,
+                        status = "success"
+                    }, options);
+                }
+
+                var module = Utils.Utils.GetModuleByName(_model, moduleName);
                 if (module == null)
                 {
-                    return JsonSerializer.Serialize(new { error = "Module not found" });
+                    return JsonSerializer.Serialize(new { error = $"Module '{moduleName}' not found" });
                 }
 
                 var domainModel = module.DomainModel;
@@ -45,8 +964,10 @@ namespace MCPExtension.Tools
                     {
                         Name = entity.Name,
                         QualifiedName = $"{module.Name}.{entity.Name}",
+                        Generalization = GetGeneralizationInfo(entity),
                         Attributes = GetEntityAttributes(entity),
-                        Associations = GetEntityAssociations(entity, module)
+                        Associations = GetEntityAssociations(entity, module),
+                        EventHandlers = GetEventHandlerInfo(entity)
                     }).ToList()
                 };
 
@@ -56,12 +977,6 @@ namespace MCPExtension.Tools
                     message = "Model retrieved successfully",
                     data = modelData,
                     status = "success"
-                };
-
-                var options = new JsonSerializerOptions
-                {
-                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-                    WriteIndented = true
                 };
 
                 return JsonSerializer.Serialize(result, options);
@@ -107,10 +1022,11 @@ namespace MCPExtension.Tools
                         return JsonSerializer.Serialize(new { error = "Entity name is required" });
                     }
 
-                    var module = Utils.Utils.GetMyFirstModule(_model);
+                    var moduleName = parameters["module_name"]?.ToString();
+                    var module = Utils.Utils.ResolveModule(_model, moduleName);
                     if (module?.DomainModel == null)
                     {
-                        return JsonSerializer.Serialize(new { error = "No domain model found" });
+                        return JsonSerializer.Serialize(new { error = string.IsNullOrWhiteSpace(moduleName) ? "No domain model found" : $"Module '{moduleName}' not found" });
                     }
 
                     // Check if entity already exists
@@ -221,29 +1137,27 @@ namespace MCPExtension.Tools
                         });
                     }
 
-                    var module = Utils.Utils.GetMyFirstModule(_model);
-                    if (module?.DomainModel == null)
-                    {
-                        return JsonSerializer.Serialize(new { error = "No domain model found" });
-                    }
+                    // Cross-module support: resolve entities from specified or any module
+                    var parentModuleName = parameters["parent_module"]?.ToString();
+                    var childModuleName = parameters["child_module"]?.ToString();
+                    var defaultModuleName = parameters["module_name"]?.ToString();
+                    parentModuleName ??= defaultModuleName;
+                    childModuleName ??= defaultModuleName;
 
-                    // Find parent and child entities
-                    var parentEntity = module.DomainModel.GetEntities()
-                        .FirstOrDefault(e => e.Name.Equals(parent, StringComparison.OrdinalIgnoreCase));
-                    var childEntity = module.DomainModel.GetEntities()
-                        .FirstOrDefault(e => e.Name.Equals(child, StringComparison.OrdinalIgnoreCase));
+                    var (parentEntity, parentModuleResolved) = Utils.Utils.FindEntityAcrossModules(_model, parent, parentModuleName);
+                    var (childEntity, childModuleResolved) = Utils.Utils.FindEntityAcrossModules(_model, child, childModuleName);
 
                     if (parentEntity == null)
                     {
-                        return JsonSerializer.Serialize(new { error = $"Parent entity '{parent}' not found" });
+                        return JsonSerializer.Serialize(new { error = $"Parent entity '{parent}' not found" + (parentModuleName != null ? $" in module '{parentModuleName}'" : " in any module") });
                     }
 
                     if (childEntity == null)
                     {
-                        return JsonSerializer.Serialize(new { error = $"Child entity '{child}' not found" });
+                        return JsonSerializer.Serialize(new { error = $"Child entity '{child}' not found" + (childModuleName != null ? $" in module '{childModuleName}'" : " in any module") });
                     }
 
-                    // Create association - FIXED: For "1 Customer has many Orders", 
+                    // Create association - FIXED: For "1 Customer has many Orders",
                     // we need to call childEntity.AddAssociation(parentEntity) because in Mendix:
                     // - entity.AddAssociation(otherEntity) means "entity references otherEntity"
                     // - For one-to-many, the "many" side should reference the "one" side
@@ -252,21 +1166,37 @@ namespace MCPExtension.Tools
                     mxAssociation.Name = name;
                     mxAssociation.Type = MapAssociationType(type);
 
+                    // Configure delete behavior if specified
+                    var parentDeleteBehavior = parameters["parent_delete_behavior"]?.ToString();
+                    var childDeleteBehavior = parameters["child_delete_behavior"]?.ToString();
+                    if (!string.IsNullOrEmpty(parentDeleteBehavior))
+                        mxAssociation.ParentDeleteBehavior = MapDeletingBehavior(parentDeleteBehavior);
+                    if (!string.IsNullOrEmpty(childDeleteBehavior))
+                        mxAssociation.ChildDeleteBehavior = MapDeletingBehavior(childDeleteBehavior);
+
+                    // Configure owner if specified
+                    var owner = parameters["owner"]?.ToString();
+                    if (!string.IsNullOrEmpty(owner) && owner.ToLowerInvariant().Trim() == "both")
+                        mxAssociation.Owner = AssociationOwner.Both;
+
                     _logger.LogInformation($"FIXED: Created association {mxAssociation.Name} by calling {childEntity.Name}.AddAssociation({parentEntity.Name})");
                     _logger.LogInformation($"This creates: 1 {parentEntity.Name} has many {childEntity.Name} (correct direction)");
 
                     transaction.Commit();
 
-                    return JsonSerializer.Serialize(new 
-                    { 
-                        success = true, 
+                    return JsonSerializer.Serialize(new
+                    {
+                        success = true,
                         message = $"Association '{name}' created successfully",
                         association = new
                         {
                             name = mxAssociation.Name,
                             parent = parentEntity.Name,
                             child = childEntity.Name,
-                            type = mxAssociation.Type.ToString()
+                            type = mxAssociation.Type.ToString(),
+                            parentDeleteBehavior = FormatDeletingBehavior(mxAssociation.ParentDeleteBehavior),
+                            childDeleteBehavior = FormatDeletingBehavior(mxAssociation.ChildDeleteBehavior),
+                            owner = mxAssociation.Owner.ToString()
                         }
                     });
                 }
@@ -302,10 +1232,11 @@ namespace MCPExtension.Tools
                         return JsonSerializer.Serialize(new { error = "Entities array is required" });
                     }
 
-                    var module = Utils.Utils.GetMyFirstModule(_model);
-                    if (module?.DomainModel == null)
+                    var globalModuleName = parameters["module_name"]?.ToString();
+                    var defaultModule = Utils.Utils.ResolveModule(_model, globalModuleName);
+                    if (defaultModule?.DomainModel == null)
                     {
-                        return JsonSerializer.Serialize(new { error = "No domain model found" });
+                        return JsonSerializer.Serialize(new { error = string.IsNullOrWhiteSpace(globalModuleName) ? "No domain model found" : $"Module '{globalModuleName}' not found" });
                     }
 
                     var createdEntities = new List<object>();
@@ -320,6 +1251,12 @@ namespace MCPExtension.Tools
                         var attributesArray = entityObj["attributes"]?.AsArray();
 
                         if (string.IsNullOrEmpty(entityName)) continue;
+
+                        // Per-entity module override
+                        var entityModuleName = entityObj["module_name"]?.ToString();
+                        var module = !string.IsNullOrWhiteSpace(entityModuleName)
+                            ? Utils.Utils.GetModuleByName(_model, entityModuleName) ?? defaultModule
+                            : defaultModule;
 
                         // Check if entity already exists
                         var existingEntity = module.DomainModel.GetEntities()
@@ -395,8 +1332,17 @@ namespace MCPExtension.Tools
                                         mxAttribute.Type = attributeType;
                                     }
 
+                                    // Set default value if provided
+                                    var defaultVal = attrObj["default_value"]?.ToString();
+                                    if (!string.IsNullOrEmpty(defaultVal))
+                                    {
+                                        var storedValue = _model.Create<IStoredValue>();
+                                        storedValue.DefaultValue = defaultVal;
+                                        mxAttribute.Value = storedValue;
+                                    }
+
                                     mxEntity.AddAttribute(mxAttribute);
-                                    entityAttributes.Add(new { name = attrName, type = attrType });
+                                    entityAttributes.Add(new { name = attrName, type = attrType, defaultValue = defaultVal });
                                 }
                             }
 
@@ -404,12 +1350,12 @@ namespace MCPExtension.Tools
                             PositionEntity(mxEntity, module.DomainModel.GetEntities().Count());
                         }
 
-                        createdEntities.Add(new 
-                        { 
-                            name = entityName, 
+                        createdEntities.Add(new
+                        {
+                            name = entityName,
                             persistable = persistable,
                             entityType = entityType,
-                            attributes = entityAttributes 
+                            attributes = entityAttributes
                         });
                     }
 
@@ -476,12 +1422,6 @@ namespace MCPExtension.Tools
                         });
                     }
 
-                    var module = Utils.Utils.GetMyFirstModule(_model);
-                    if (module?.DomainModel == null)
-                    {
-                        return JsonSerializer.Serialize(new { error = "No domain model found" });
-                    }
-
                     var createdAssociations = new List<object>();
 
                     foreach (var assocNode in associationsArray)
@@ -499,11 +1439,12 @@ namespace MCPExtension.Tools
                             continue; // Skip invalid associations
                         }
 
-                        // Find parent and child entities
-                        var parentEntity = module.DomainModel.GetEntities()
-                            .FirstOrDefault(e => e.Name.Equals(parent, StringComparison.OrdinalIgnoreCase));
-                        var childEntity = module.DomainModel.GetEntities()
-                            .FirstOrDefault(e => e.Name.Equals(child, StringComparison.OrdinalIgnoreCase));
+                        // Cross-module entity resolution per association
+                        var parentModuleName = assocObj["parent_module"]?.ToString();
+                        var childModuleName = assocObj["child_module"]?.ToString();
+
+                        var (parentEntity, _) = Utils.Utils.FindEntityAcrossModules(_model, parent, parentModuleName);
+                        var (childEntity, _) = Utils.Utils.FindEntityAcrossModules(_model, child, childModuleName);
 
                         if (parentEntity == null || childEntity == null)
                         {
@@ -515,12 +1456,28 @@ namespace MCPExtension.Tools
                         mxAssociation.Name = name;
                         mxAssociation.Type = MapAssociationType(type);
 
+                        // Configure delete behavior if specified
+                        var parentDeleteBehavior = assocObj["parent_delete_behavior"]?.ToString();
+                        var childDeleteBehavior = assocObj["child_delete_behavior"]?.ToString();
+                        if (!string.IsNullOrEmpty(parentDeleteBehavior))
+                            mxAssociation.ParentDeleteBehavior = MapDeletingBehavior(parentDeleteBehavior);
+                        if (!string.IsNullOrEmpty(childDeleteBehavior))
+                            mxAssociation.ChildDeleteBehavior = MapDeletingBehavior(childDeleteBehavior);
+
+                        // Configure owner if specified
+                        var assocOwner = assocObj["owner"]?.ToString();
+                        if (!string.IsNullOrEmpty(assocOwner) && assocOwner.ToLowerInvariant().Trim() == "both")
+                            mxAssociation.Owner = AssociationOwner.Both;
+
                         createdAssociations.Add(new
                         {
                             name = mxAssociation.Name,
                             parent = parentEntity.Name,
                             child = childEntity.Name,
-                            type = mxAssociation.Type.ToString()
+                            type = mxAssociation.Type.ToString(),
+                            parentDeleteBehavior = FormatDeletingBehavior(mxAssociation.ParentDeleteBehavior),
+                            childDeleteBehavior = FormatDeletingBehavior(mxAssociation.ChildDeleteBehavior),
+                            owner = mxAssociation.Owner.ToString()
                         });
                     }
 
@@ -564,10 +1521,11 @@ namespace MCPExtension.Tools
                         }
                     }
 
-                    var module = Utils.Utils.GetMyFirstModule(_model);
+                    var moduleName = parameters["module_name"]?.ToString();
+                    var module = Utils.Utils.ResolveModule(_model, moduleName);
                     if (module?.DomainModel == null)
                     {
-                        return JsonSerializer.Serialize(new { error = "No domain model found" });
+                        return JsonSerializer.Serialize(new { error = string.IsNullOrWhiteSpace(moduleName) ? "No domain model found" : $"Module '{moduleName}' not found" });
                     }
 
                     var entitiesArray = schema["entities"]?.AsArray();
@@ -656,18 +1614,19 @@ namespace MCPExtension.Tools
                                 continue; // Skip invalid associations
                             }
 
-                            // Find parent and child entities
-                            var parentEntity = module.DomainModel.GetEntities()
-                                .FirstOrDefault(e => e.Name.Equals(parent, StringComparison.OrdinalIgnoreCase));
-                            var childEntity = module.DomainModel.GetEntities()
-                                .FirstOrDefault(e => e.Name.Equals(child, StringComparison.OrdinalIgnoreCase));
+                            // Cross-module entity resolution for schema associations
+                            var parentModuleName = assocObj["parent_module"]?.ToString();
+                            var childModuleName = assocObj["child_module"]?.ToString();
+
+                            var (parentEntity, _) = Utils.Utils.FindEntityAcrossModules(_model, parent, parentModuleName);
+                            var (childEntity, _) = Utils.Utils.FindEntityAcrossModules(_model, child, childModuleName);
 
                             if (parentEntity == null || childEntity == null)
                             {
                                 continue; // Skip if entities don't exist
                             }
 
-                            // Create association - FIXED: Use child.AddAssociation(parent) for correct direction
+                            // Create association - Use child.AddAssociation(parent) for correct direction
                             var mxAssociation = childEntity.AddAssociation(parentEntity);
                             mxAssociation.Name = name;
                             mxAssociation.Type = MapAssociationType(type);
@@ -709,39 +1668,60 @@ namespace MCPExtension.Tools
                 var entityName = parameters["entity_name"]?.ToString();
                 var attributeName = parameters["attribute_name"]?.ToString();
                 var associationName = parameters["association_name"]?.ToString();
+                var documentName = parameters["document_name"]?.ToString() ?? entityName;
 
-                if (string.IsNullOrEmpty(elementType) || string.IsNullOrEmpty(entityName))
+                if (string.IsNullOrEmpty(elementType))
                 {
-                    return JsonSerializer.Serialize(new { error = "Element type and entity name are required" });
+                    return JsonSerializer.Serialize(new { error = "Element type is required" });
                 }
 
-                var module = Utils.Utils.GetMyFirstModule(_model);
-                if (module?.DomainModel == null)
+                var moduleName = parameters["module_name"]?.ToString();
+                var module = Utils.Utils.ResolveModule(_model, moduleName);
+                if (module == null)
                 {
-                    return JsonSerializer.Serialize(new { error = "No domain model found" });
+                    return JsonSerializer.Serialize(new { error = string.IsNullOrWhiteSpace(moduleName) ? "No module found" : $"Module '{moduleName}' not found" });
                 }
 
                 switch (elementType.ToLower())
                 {
                     case "entity":
+                        if (string.IsNullOrEmpty(entityName))
+                            return JsonSerializer.Serialize(new { error = "entity_name is required for entity deletion" });
+                        if (module.DomainModel == null)
+                            return JsonSerializer.Serialize(new { error = "No domain model found" });
                         return DeleteEntity(module.DomainModel, entityName);
-                    
+
                     case "attribute":
-                        if (string.IsNullOrEmpty(attributeName))
-                        {
-                            return JsonSerializer.Serialize(new { error = "Attribute name is required for attribute deletion" });
-                        }
+                        if (string.IsNullOrEmpty(entityName) || string.IsNullOrEmpty(attributeName))
+                            return JsonSerializer.Serialize(new { error = "entity_name and attribute_name are required for attribute deletion" });
+                        if (module.DomainModel == null)
+                            return JsonSerializer.Serialize(new { error = "No domain model found" });
                         return DeleteAttribute(module.DomainModel, entityName, attributeName);
-                    
+
                     case "association":
-                        if (string.IsNullOrEmpty(associationName))
-                        {
-                            return JsonSerializer.Serialize(new { error = "Association name is required for association deletion" });
-                        }
+                        if (string.IsNullOrEmpty(entityName) || string.IsNullOrEmpty(associationName))
+                            return JsonSerializer.Serialize(new { error = "entity_name and association_name are required for association deletion" });
+                        if (module.DomainModel == null)
+                            return JsonSerializer.Serialize(new { error = "No domain model found" });
                         return DeleteAssociation(module.DomainModel, entityName, associationName);
-                    
+
+                    case "microflow":
+                        if (string.IsNullOrEmpty(documentName))
+                            return JsonSerializer.Serialize(new { error = "document_name (or entity_name) is required for microflow deletion" });
+                        return DeleteDocument<IMicroflow>(module, documentName, "Microflow");
+
+                    case "constant":
+                        if (string.IsNullOrEmpty(documentName))
+                            return JsonSerializer.Serialize(new { error = "document_name (or entity_name) is required for constant deletion" });
+                        return DeleteDocument<IConstant>(module, documentName, "Constant");
+
+                    case "enumeration":
+                        if (string.IsNullOrEmpty(documentName))
+                            return JsonSerializer.Serialize(new { error = "document_name (or entity_name) is required for enumeration deletion" });
+                        return DeleteDocument<IEnumeration>(module, documentName, "Enumeration");
+
                     default:
-                        return JsonSerializer.Serialize(new { error = $"Unknown deletion type: {elementType}" });
+                        return JsonSerializer.Serialize(new { error = $"Unknown deletion type: {elementType}. Supported: entity, attribute, association, microflow, constant, enumeration" });
                 }
             }
             catch (Exception ex)
@@ -756,10 +1736,11 @@ namespace MCPExtension.Tools
         {
             try
             {
-                var module = Utils.Utils.GetMyFirstModule(_model);
+                var moduleName = parameters?["module_name"]?.ToString();
+                var module = Utils.Utils.ResolveModule(_model, moduleName);
                 if (module == null)
                 {
-                    return JsonSerializer.Serialize(new { error = "Module not found" });
+                    return JsonSerializer.Serialize(new { error = string.IsNullOrWhiteSpace(moduleName) ? "Module not found" : $"Module '{moduleName}' not found" });
                 }
 
                 var domainModel = module.DomainModel;
@@ -828,16 +1809,38 @@ namespace MCPExtension.Tools
         {
             var tools = new[]
             {
+                "list_modules",
+                "create_module",
                 "read_domain_model",
+                "read_project_info",
                 "create_entity",
-                "create_association",
                 "create_multiple_entities",
+                "create_association",
                 "create_multiple_associations",
                 "create_domain_model_from_schema",
                 "delete_model_element",
                 "diagnose_associations",
+                "set_entity_generalization",
+                "remove_entity_generalization",
+                "add_event_handler",
+                "add_attribute",
+                "set_calculated_attribute",
+                "create_constant",
+                "list_constants",
+                "create_enumeration",
+                "list_enumerations",
+                "save_data",
+                "generate_overview_pages",
+                "list_microflows",
+                "read_microflow_details",
+                "create_microflow",
+                "create_microflow_activities",
+                "check_model",
+                "check_project_errors",
+                "get_studio_pro_logs",
                 "get_last_error",
-                "list_available_tools"
+                "list_available_tools",
+                "debug_info"
             };
 
             return JsonSerializer.Serialize(new { tools = tools, status = "success" });
@@ -945,31 +1948,80 @@ namespace MCPExtension.Tools
 
         #region Helper Methods
 
-        private Dictionary<string, string> GetEntityAttributes(IEntity entity)
+        private List<object> GetEntityAttributes(IEntity entity)
         {
             return entity.GetAttributes()
                 .Where(attr => attr != null)
-                .ToDictionary(
-                    attr => attr.Name,
-                    attr => {
-                        var typeName = attr.Type?.GetType().Name ?? "Unknown";
-                        
-                        // Remove "AttributeTypeProxy" suffix
-                        typeName = typeName.Replace("AttributeTypeProxy", "");
-                        
-                        // Handle Enumerations specially
-                        if (attr.Type is IEnumerationAttributeType enumType)
-                        {
-                            var enumeration = enumType.Enumeration.Resolve();
-                            var enumValues = enumeration.GetValues()
-                                .Select(v => v.Name)
-                                .ToList();
-                            return $"Enumeration ({string.Join("/", enumValues)})";
-                        }
-                        
-                        return typeName;
+                .Select(attr =>
+                {
+                    var typeName = attr.Type?.GetType().Name ?? "Unknown";
+                    typeName = typeName.Replace("AttributeTypeProxy", "");
+
+                    // Handle Enumerations specially
+                    if (attr.Type is IEnumerationAttributeType enumType)
+                    {
+                        var enumeration = enumType.Enumeration.Resolve();
+                        var enumValues = enumeration.GetValues()
+                            .Select(v => v.Name)
+                            .ToList();
+                        typeName = $"Enumeration ({string.Join("/", enumValues)})";
                     }
-                );
+
+                    // Determine value type and default
+                    string? valueType = null;
+                    string? defaultValue = null;
+                    string? calculatedMicroflow = null;
+
+                    if (attr.Value is IStoredValue storedValue)
+                    {
+                        valueType = "stored";
+                        defaultValue = string.IsNullOrEmpty(storedValue.DefaultValue) ? null : storedValue.DefaultValue;
+                    }
+                    else if (attr.Value is ICalculatedValue calcValue)
+                    {
+                        valueType = "calculated";
+                        calculatedMicroflow = calcValue.Microflow?.ToString();
+                    }
+
+                    return (object)new
+                    {
+                        name = attr.Name,
+                        type = typeName,
+                        valueType = valueType,
+                        defaultValue = defaultValue,
+                        calculatedMicroflow = calculatedMicroflow
+                    };
+                })
+                .ToList();
+        }
+
+        private object? GetGeneralizationInfo(IEntity entity)
+        {
+            if (entity.Generalization is IGeneralization gen)
+            {
+                return new
+                {
+                    hasGeneralization = true,
+                    parent = gen.Generalization?.ToString()
+                };
+            }
+            return null;
+        }
+
+        private List<object>? GetEventHandlerInfo(IEntity entity)
+        {
+            var handlers = entity.GetEventHandlers();
+            if (handlers == null || handlers.Count == 0)
+                return null;
+
+            return handlers.Select(h => (object)new
+            {
+                moment = h.Moment.ToString().ToLowerInvariant(),
+                @event = h.Event.ToString().ToLowerInvariant(),
+                microflow = h.Microflow?.ToString(),
+                raiseErrorOnFalse = h.RaiseErrorOnFalse,
+                passEventObject = h.PassEventObject
+            }).ToList();
         }
 
         private List<Association> GetEntityAssociations(IEntity entity, IModule module)
@@ -1011,7 +2063,10 @@ namespace MCPExtension.Tools
                     Name = association.Association.Name,
                     Parent = parentName,
                     Child = childName,
-                    Type = mappedType
+                    Type = mappedType,
+                    ParentDeleteBehavior = FormatDeletingBehavior(association.Association.ParentDeleteBehavior),
+                    ChildDeleteBehavior = FormatDeletingBehavior(association.Association.ChildDeleteBehavior),
+                    Owner = association.Association.Owner.ToString()
                 };
 
                 entityAssociations.Add(associationModel);
@@ -1028,6 +2083,8 @@ namespace MCPExtension.Tools
                     return model.Create<IDecimalAttributeType>();
                 case "integer":
                     return model.Create<IIntegerAttributeType>();
+                case "long":
+                    return model.Create<ILongAttributeType>();
                 case "string":
                     return model.Create<IStringAttributeType>();
                 case "boolean":
@@ -1036,6 +2093,10 @@ namespace MCPExtension.Tools
                     return model.Create<IDateTimeAttributeType>();
                 case "autonumber":
                     return model.Create<IAutoNumberAttributeType>();
+                case "binary":
+                    return model.Create<IBinaryAttributeType>();
+                case "hashedstring":
+                    return model.Create<IHashedStringAttributeType>();
                 default:
                     return model.Create<IStringAttributeType>();
             }
@@ -1070,9 +2131,9 @@ namespace MCPExtension.Tools
             {
                 return AssociationType.Reference;
             }
-            
+
             var normalizedType = type.ToLowerInvariant().Trim();
-            
+
             switch (normalizedType)
             {
                 case "one-to-many":
@@ -1084,6 +2145,30 @@ namespace MCPExtension.Tools
                 default:
                     return AssociationType.Reference;
             }
+        }
+
+        private DeletingBehavior MapDeletingBehavior(string behavior)
+        {
+            if (string.IsNullOrEmpty(behavior))
+                return DeletingBehavior.DeleteMeButKeepReferences;
+
+            return behavior.ToLowerInvariant().Trim() switch
+            {
+                "delete_me_and_references" or "cascade" => DeletingBehavior.DeleteMeAndReferences,
+                "delete_me_if_no_references" or "prevent" => DeletingBehavior.DeleteMeIfNoReferences,
+                _ => DeletingBehavior.DeleteMeButKeepReferences
+            };
+        }
+
+        private string FormatDeletingBehavior(DeletingBehavior behavior)
+        {
+            return behavior switch
+            {
+                DeletingBehavior.DeleteMeAndReferences => "delete_me_and_references",
+                DeletingBehavior.DeleteMeIfNoReferences => "delete_me_if_no_references",
+                DeletingBehavior.DeleteMeButKeepReferences => "delete_me_but_keep_references",
+                _ => "delete_me_but_keep_references"
+            };
         }
 
         private void PositionEntity(IEntity entity, int entityCount)
@@ -1125,6 +2210,26 @@ namespace MCPExtension.Tools
 
             UsedNames.Add(uniqueName);
             return uniqueName;
+        }
+
+        private string DeleteDocument<T>(IModule module, string documentName, string typeName) where T : class, IDocument
+        {
+            using (var transaction = _model.StartTransaction($"Delete {typeName}"))
+            {
+                var document = module.GetDocuments().OfType<T>()
+                    .FirstOrDefault(d => d.Name.Equals(documentName, StringComparison.OrdinalIgnoreCase));
+
+                if (document == null)
+                {
+                    return JsonSerializer.Serialize(new { error = $"{typeName} '{documentName}' not found in module '{module.Name}'" });
+                }
+
+                module.RemoveDocument(document);
+                transaction.Commit();
+
+                _logger.LogInformation($"Deleted {typeName} '{documentName}' from module '{module.Name}'");
+                return JsonSerializer.Serialize(new { success = true, message = $"{typeName} '{documentName}' deleted successfully from module '{module.Name}'" });
+            }
         }
 
         private string DeleteEntity(IDomainModel domainModel, string entityName)
@@ -1434,6 +2539,15 @@ namespace MCPExtension.Tools
                             mxAttribute.Type = attributeType;
                         }
 
+                        // Set default value if provided
+                        var defaultVal = attrObj["default_value"]?.ToString();
+                        if (!string.IsNullOrEmpty(defaultVal))
+                        {
+                            var storedValue = _model.Create<IStoredValue>();
+                            storedValue.DefaultValue = defaultVal;
+                            mxAttribute.Value = storedValue;
+                        }
+
                         newEntity.AddAttribute(mxAttribute);
                     }
                 }
@@ -1509,6 +2623,15 @@ namespace MCPExtension.Tools
                             mxAttribute.Type = attributeType;
                         }
 
+                        // Set default value if provided
+                        var defaultVal = attrObj["default_value"]?.ToString();
+                        if (!string.IsNullOrEmpty(defaultVal))
+                        {
+                            var storedValue = _model.Create<IStoredValue>();
+                            storedValue.DefaultValue = defaultVal;
+                            mxAttribute.Value = storedValue;
+                        }
+
                         mxEntity.AddAttribute(mxAttribute);
                     }
                 }
@@ -1557,5 +2680,8 @@ namespace MCPExtension.Tools
         public string Parent { get; set; }
         public string Child { get; set; }
         public string Type { get; set; }
+        public string ParentDeleteBehavior { get; set; }
+        public string ChildDeleteBehavior { get; set; }
+        public string Owner { get; set; }
     }
 }

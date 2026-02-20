@@ -1,8 +1,9 @@
-﻿using Eto.Forms;
+using Eto.Forms;
 using Mendix.StudioPro.ExtensionsAPI.UI.WebView;
 using Mendix.StudioPro.ExtensionsAPI.UI.DockablePane;
 using Mendix.StudioPro.ExtensionsAPI.Model;
 using Mendix.StudioPro.ExtensionsAPI.Model.Projects;
+using MCPExtension.MCP;
 using System;
 using System.Text.Json;
 using System.Net.NetworkInformation;
@@ -16,352 +17,549 @@ namespace MCPExtension
     {
         private readonly AIAPIEngine parentPanel;
         private IWebView? currentWebView;
+        private Action<ToolCallEventArgs>? _toolCallHandler;
 
-        private bool IsPortInUse(int port)
-        {
-            try
-            {
-                IPGlobalProperties ipProperties = IPGlobalProperties.GetIPGlobalProperties();
-                IPEndPoint[] ipEndPoints = ipProperties.GetActiveTcpListeners();
-                return ipEndPoints.Any(endPoint => endPoint.Port == port);
+        private const string EMBEDDED_HTML = @"
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset=""UTF-8"">
+    <title>MCP Server</title>
+    <style>
+        :root {
+            --primary: #3b82f6;
+            --primary-hover: #2563eb;
+            --success: #10b981;
+            --danger: #ef4444;
+            --danger-hover: #dc2626;
+            --warning: #f59e0b;
+            --bg: #f1f5f9;
+            --bg-card: #ffffff;
+            --bg-dark: #1e293b;
+            --bg-header: #0f172a;
+            --border: #e2e8f0;
+            --text: #1e293b;
+            --text-dim: #64748b;
+            --text-muted: #94a3b8;
+            --mono: 'Consolas', 'SF Mono', 'Monaco', monospace;
+            --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            --radius: 8px;
+            --radius-sm: 4px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: var(--sans);
+            background: var(--bg);
+            color: var(--text);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /* Header */
+        .header {
+            background: var(--bg-header);
+            color: #fff;
+            padding: 14px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 15px;
+            font-weight: 600;
+            letter-spacing: -0.01em;
+        }
+
+        .header-icon {
+            width: 22px;
+            height: 22px;
+            background: var(--primary);
+            border-radius: 5px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--danger);
+            transition: all 0.3s ease;
+        }
+
+        .status-dot.running {
+            background: var(--success);
+            box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
+        }
+
+        .status-dot.starting {
+            background: var(--warning);
+            animation: pulse 1.2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        .status-label {
+            font-size: 13px;
+            color: #94a3b8;
+            font-weight: 500;
+        }
+
+        /* Main content area */
+        .content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        /* Stats Panel */
+        .stats-panel {
+            display: none;
+            background: var(--bg-card);
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            overflow: hidden;
+        }
+
+        .stats-panel.visible { display: block; }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .stat {
+            text-align: center;
+            padding: 12px 8px;
+            border-right: 1px solid var(--border);
+        }
+
+        .stat:last-child { border-right: none; }
+
+        .stat-value {
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--text);
+            line-height: 1.2;
+        }
+
+        .stat-label {
+            font-size: 10px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-top: 2px;
+        }
+
+        .endpoints {
+            padding: 10px 14px;
+            font-family: var(--mono);
+            font-size: 11px;
+            color: var(--text-dim);
+            line-height: 1.6;
+            background: #f8fafc;
+        }
+
+        /* Controls */
+        .controls {
+            display: flex;
+            gap: 8px;
+            flex-shrink: 0;
+        }
+
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 600;
+            font-family: var(--sans);
+            cursor: pointer;
+            transition: all 0.15s ease;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .btn:hover { transform: translateY(-1px); }
+        .btn:active { transform: translateY(0); }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+        .btn-primary { background: var(--primary); color: #fff; }
+        .btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
+        .btn-danger { background: var(--danger); color: #fff; }
+        .btn-danger:hover:not(:disabled) { background: var(--danger-hover); }
+        .btn-ghost { background: transparent; color: var(--text-dim); border: 1px solid var(--border); }
+        .btn-ghost:hover:not(:disabled) { background: #f8fafc; color: var(--text); }
+
+        /* Activity Panel */
+        .activity-panel {
+            flex: 1;
+            min-height: 0;
+            background: var(--bg-card);
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .activity-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 14px;
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+
+        .activity-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .activity-count {
+            font-size: 11px;
+            color: var(--text-muted);
+            font-family: var(--mono);
+        }
+
+        .activity-feed {
+            flex: 1;
+            overflow-y: auto;
+            font-family: var(--mono);
+            font-size: 12px;
+        }
+
+        .empty-state {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            min-height: 80px;
+            color: var(--text-muted);
+            font-family: var(--sans);
+            font-size: 13px;
+        }
+
+        .entry {
+            display: grid;
+            grid-template-columns: 68px 1fr auto auto;
+            gap: 8px;
+            padding: 7px 14px;
+            border-bottom: 1px solid #f1f5f9;
+            align-items: center;
+            animation: slideIn 0.2s ease;
+        }
+
+        .entry:hover { background: #f8fafc; }
+
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(-2px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .entry-time { color: var(--text-muted); font-size: 11px; }
+        .entry-tool { color: var(--text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        .badge {
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+        }
+
+        .badge-running { background: #fef3c7; color: #92400e; }
+        .badge-ok { background: #d1fae5; color: #065f46; }
+        .badge-err { background: #fee2e2; color: #991b1b; }
+
+        .entry-duration {
+            color: var(--text-muted);
+            font-size: 11px;
+            text-align: right;
+            min-width: 48px;
+        }
+
+        /* Spinner */
+        .spinner {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border: 2px solid #fbbf24;
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+            vertical-align: middle;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Status bar */
+        .status-bar {
+            padding: 6px 20px;
+            background: var(--bg-dark);
+            font-size: 11px;
+            color: #64748b;
+            flex-shrink: 0;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .status-bar .success { color: var(--success); }
+        .status-bar .error { color: var(--danger); }
+        .status-bar .info { color: var(--primary); }
+    </style>
+
+    <script>
+        const MAX_ENTRIES = 100;
+        const activeEntries = new Map();
+
+        function handleMessageFromHost(event) {
+            let data = event.data;
+
+            if (typeof data === 'string') {
+                try { data = JSON.parse(data); } catch(e) {
+                    // Legacy plain-string backward compat
+                    if (data === 'Running') { updateServerUI('running', {}); return; }
+                    if (data === 'NotRunning') { updateServerUI('stopped', {}); return; }
+                    return;
+                }
             }
-            catch (Exception)
-            {
-                return false;
+
+            if (!data || !data.type) return;
+
+            switch (data.type) {
+                case 'serverStatus': updateServerUI(data.status, data); break;
+                case 'toolCallEvent': handleToolCallEvent(data); break;
             }
         }
 
-        private const string EMBEDDED_HTML = @"
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset=""UTF-8"">
-            <title>MCP Server</title>
-            <style>
-                /* Common Base Styles */
-                :root {
-                    /* Color palette */
-                    --primary-color: #007bff;
-                    --success-color: #28a745;
-                    --danger-color: #dc3545;
-                    --background-color: #f8f9fa;
-                    --border-color: #ddd;
-                    --text-primary: #2c3e50;
-                    --text-secondary: #6c757d;
-                    --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.1);
-                    --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.1);
-    
-                    /* Spacing */
-                    --spacing-sm: 8px;
-                    --spacing-md: 16px;
-                    --spacing-lg: 24px;
-    
-                    /* Border radius */
-                    --border-radius-sm: 6px;
-                    --border-radius-md: 8px;
-                }
+        function updateServerUI(status, data) {
+            const dot = document.getElementById('statusDot');
+            const label = document.getElementById('statusLabel');
+            const startBtn = document.getElementById('startBtn');
+            const stopBtn = document.getElementById('stopBtn');
+            const statsPanel = document.getElementById('statsPanel');
+            const statusMsg = document.getElementById('statusMsg');
 
-                /* Base Layout */
-                body {
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                    margin: 0;
-                    padding: var(--spacing-lg);
-                    background-color: var(--background-color);
-                    color: var(--text-primary);
-                }
+            dot.className = 'status-dot';
 
-                /* Common Components */
-                .panel {
-                    background: white;
-                    border-radius: var(--border-radius-md);
-                    padding: var(--spacing-lg);
-                    box-shadow: var(--shadow-sm);
-                    margin-bottom: var(--spacing-lg);
-                }
-
-                /* Headers */
-                h1 {
-                    color: var(--text-primary);
-                    font-size: 24px;
-                    margin-bottom: var(--spacing-lg);
-                    display: flex;
-                    align-items: center;
-                    gap: var(--spacing-md);
-                }
-
-                /* Buttons */
-                button {
-                    padding: var(--spacing-sm) var(--spacing-lg);
-                    border: none;
-                    border-radius: var(--border-radius-md);
-                    cursor: pointer;
-                    font-size: 16px;
-                    transition: all 0.2s ease;
-                    background-color: var(--primary-color);
-                    color: white;
-                }
-
-                button:hover {
-                    transform: translateY(-1px);
-                    box-shadow: var(--shadow-sm);
-                }
-
-                button:disabled {
-                    background-color: var(--text-secondary);
-                    cursor: not-allowed;
-                    transform: none;
-                }
-
-                /* Status Indicators */
-                .status-indicator {
-                    width: 12px;
-                    height: 12px;
-                    border-radius: 50%;
-                    display: inline-block;
-                }
-
-                .status-running {
-                    background-color: var(--success-color);
-                    box-shadow: 0 0 8px var(--success-color);
-                }
-
-                .status-stopped {
-                    background-color: var(--danger-color);
-                    box-shadow: 0 0 8px var(--danger-color);
-                }
-
-                /* Tree View Specific */
-                .tree-view {
-                    background: white;
-                    border-radius: var(--border-radius-md);
-                    padding: var(--spacing-lg);
-                    box-shadow: var(--shadow-sm);
-                }
-
-                .module-header, .entity-header {
-                    padding: var(--spacing-md);
-                    cursor: pointer;
-                    border-radius: var(--border-radius-md);
-                    display: flex;
-                    align-items: center;
-                    margin-bottom: var(--spacing-sm);
-                }
-
-                .module-header {
-                    background-color: #e3e8ef;
-                    border: 1px solid #d1d9e6;
-                }
-
-                .entity-header {
-                    background-color: var(--background-color);
-                    border: 1px solid var(--border-color);
-                }
-
-                /* Chat Panel Specific */
-                #chatDisplay, #chatInput {
-                    width: 100%;
-                    border: 1px solid var(--border-color);
-                    border-radius: var(--border-radius-md);
-                    background-color: white;
-                    box-shadow: var(--shadow-sm);
-                }
-
-                #chatDisplay {
-                    height: 300px;
-                    padding: var(--spacing-md);
-                    margin-bottom: var(--spacing-md);
-                    overflow-y: auto;
-                }
-
-                #chatInput {
-                    height: 100px;
-                    padding: var(--spacing-md);
-                    resize: vertical;
-                    font-family: inherit;
-                }
-
-                /* Modal Styles */
-                .modal {
-                    position: fixed;
-                    top: 0;
-                    left: 0;
-                    width: 100%;
-                    height: 100%;
-                    background-color: rgba(0, 0, 0, 0.5);
-                    display: none;
-                    justify-content: center;
-                    align-items: center;
-                    z-index: 1000;
-                    backdrop-filter: blur(2px);
-                }
-
-                .modal-content {
-                    background-color: white;
-                    padding: var(--spacing-lg);
-                    border-radius: var(--border-radius-md);
-                    width: 300px;
-                    box-shadow: var(--shadow-md);
-                }
-
-                /* Form Elements */
-                input {
-                    width: 100%;
-                    padding: var(--spacing-sm);
-                    border: 1px solid var(--border-color);
-                    border-radius: var(--border-radius-md);
-                    margin-bottom: var(--spacing-md);
-                }
-
-                input:focus {
-                    outline: none;
-                    border-color: var(--primary-color);
-                    box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.25);
-                }
-
-                /* Engine Panel Specific */
-                .control-panel {
-                    background: white;
-                    border-radius: var(--border-radius-md);
-                    padding: var(--spacing-lg);
-                    box-shadow: var(--shadow-sm);
-                    margin-bottom: var(--spacing-lg);
-                }
-
-                #stopButton {
-                    background-color: var(--danger-color);
-                }
-
-                .status-text {
-                    font-size: 14px;
-                    margin-left: var(--spacing-md);
-                    color: var(--text-secondary);
-                }
-
-                /* Status message styles */
-                .success {
-                    color: #28a745;
-                    font-weight: 500;
-                }
-
-                .error {
-                    color: #dc3545;
-                    font-weight: 500;
-                }
-
-                .info {
-                    color: #17a2b8;
-                    font-weight: 500;
-                }
-            </style>
-
-            <script>
-                function handleMessageFromHost(event) {
-                    const data = event.data;
-                    console.log('Received event:', event);
-                    console.log('Event data:', data);
-                    console.log('Data type:', typeof data);
-                    console.log('Data message:', data.message);
-                    
-                    if (data.message === 'Running') {
-                        console.log('Handling Running message');
-                        const indicator = document.getElementById('statusIndicator');
-                        const statusText = document.getElementById('statusText');
-                        const startButton = document.getElementById('startButton');
-                        const stopButton = document.getElementById('stopButton');
-            
-                        indicator.className = 'status-indicator status-running';
-                        statusText.textContent = 'Running';
-                        startButton.disabled = true;
-                        stopButton.disabled = false;
-            
-                        const statusDiv = document.getElementById('status');
-                        statusDiv.textContent = 'MCP Server started successfully';
-                        statusDiv.className = 'success';
-                    } 
-                    else if (data.message === 'NotRunning') {
-                        console.log('Handling NotRunning message');
-                        const indicator = document.getElementById('statusIndicator');
-                        const statusText = document.getElementById('statusText');
-                        const startButton = document.getElementById('startButton');
-                        const stopButton = document.getElementById('stopButton');
-            
-                        indicator.className = 'status-indicator status-stopped';
-                        statusText.textContent = 'Stopped';
-                        startButton.disabled = false;
-                        stopButton.disabled = true;
-            
-                        const statusDiv = document.getElementById('status');
-                        statusDiv.textContent = 'MCP Server stopped successfully';
-                        statusDiv.className = 'success';
+            switch (status) {
+                case 'running':
+                    dot.classList.add('running');
+                    label.textContent = 'Running';
+                    startBtn.disabled = true;
+                    stopBtn.disabled = false;
+                    statsPanel.classList.add('visible');
+                    if (data.port) document.getElementById('statPort').textContent = data.port;
+                    if (data.toolCount) document.getElementById('statTools').textContent = data.toolCount;
+                    if (data.sseConnections !== undefined) document.getElementById('statSSE').textContent = data.sseConnections;
+                    if (data.totalToolCalls !== undefined) document.getElementById('statCalls').textContent = data.totalToolCalls;
+                    if (data.connectionInfo) {
+                        document.getElementById('endpoints').innerHTML = data.connectionInfo.replace(/\n/g, '<br>');
                     }
-                    else {
-                        console.log('No matching message handler for:', data.message);
+                    statusMsg.textContent = 'Server started successfully';
+                    statusMsg.className = 'success';
+                    break;
+
+                case 'starting':
+                    dot.classList.add('starting');
+                    label.textContent = 'Starting...';
+                    startBtn.disabled = true;
+                    stopBtn.disabled = true;
+                    statusMsg.textContent = 'Starting MCP Server...';
+                    statusMsg.className = 'info';
+                    break;
+
+                case 'stopped':
+                    label.textContent = 'Stopped';
+                    startBtn.disabled = false;
+                    stopBtn.disabled = true;
+                    statsPanel.classList.remove('visible');
+                    statusMsg.textContent = 'Server stopped';
+                    statusMsg.className = '';
+                    break;
+
+                case 'error':
+                    label.textContent = 'Error';
+                    startBtn.disabled = false;
+                    stopBtn.disabled = true;
+                    statsPanel.classList.remove('visible');
+                    statusMsg.textContent = data.errorMessage || 'Failed to start server';
+                    statusMsg.className = 'error';
+                    break;
+            }
+        }
+
+        function handleToolCallEvent(data) {
+            const feed = document.getElementById('activityFeed');
+            const empty = document.getElementById('emptyState');
+            if (empty) empty.style.display = 'none';
+
+            if (data.status === 'started') {
+                const el = document.createElement('div');
+                el.className = 'entry';
+                el.id = 'c-' + data.callId;
+                el.innerHTML =
+                    '<span class=""entry-time"">' + data.timestamp + '</span>' +
+                    '<span class=""entry-tool"">' + data.toolName + '</span>' +
+                    '<span class=""badge badge-running""><span class=""spinner""></span></span>' +
+                    '<span class=""entry-duration"">...</span>';
+                feed.appendChild(el);
+                activeEntries.set(data.callId, el);
+
+                // Trim old entries
+                while (feed.children.length > MAX_ENTRIES + 1) {
+                    const first = feed.firstElementChild;
+                    if (first && first.id !== 'emptyState') {
+                        activeEntries.delete(first.id.replace('c-', ''));
+                        feed.removeChild(first);
                     }
                 }
 
-                function updateServerStatus(status) {
-                    const indicator = document.getElementById('statusIndicator');
-                    const statusText = document.getElementById('statusText');
-                    const startButton = document.getElementById('startButton');
-                    const stopButton = document.getElementById('stopButton');
-        
-                    if (status === true || status === 'running') {
-                        indicator.className = 'status-indicator status-running';
-                        statusText.textContent = 'Running';
-                        startButton.disabled = true;
-                        stopButton.disabled = false;
-                    } else if (status === 'starting') {
-                        indicator.className = 'status-indicator';
-                        indicator.style.backgroundColor = '#ffc107'; // warning/orange color
-                        statusText.textContent = 'Starting...';
-                        startButton.disabled = true;
-                        stopButton.disabled = true;
-                    } else if (status === 'stopping') {
-                        indicator.className = 'status-indicator';
-                        indicator.style.backgroundColor = '#ffc107'; // warning/orange color
-                        statusText.textContent = 'Stopping...';
-                        startButton.disabled = true;
-                        stopButton.disabled = true;
+                feed.scrollTop = feed.scrollHeight;
+            }
+            else if (data.status === 'completed' || data.status === 'failed') {
+                const el = activeEntries.get(data.callId);
+                if (el) {
+                    const badge = el.querySelector('.badge');
+                    const dur = el.querySelector('.entry-duration');
+
+                    if (data.status === 'completed') {
+                        badge.className = 'badge badge-ok';
+                        badge.innerHTML = 'OK';
                     } else {
-                        indicator.className = 'status-indicator status-stopped';
-                        statusText.textContent = 'Stopped';
-                        startButton.disabled = false;
-                        stopButton.disabled = true;
+                        badge.className = 'badge badge-err';
+                        badge.innerHTML = 'ERR';
+                        el.title = data.errorMessage || '';
                     }
+
+                    dur.textContent = data.durationMs + 'ms';
+                    activeEntries.delete(data.callId);
                 }
+            }
 
-                function init() {
-                    window.chrome.webview.addEventListener('message', handleMessageFromHost);
-                    chrome.webview.postMessage({ message: 'MessageListenerRegistered' });
-                }
+            // Update stats
+            if (data.totalToolCalls !== undefined)
+                document.getElementById('statCalls').textContent = data.totalToolCalls;
+            if (data.sseConnections !== undefined)
+                document.getElementById('statSSE').textContent = data.sseConnections;
 
-                function startEngine() {
-                    chrome.webview.postMessage({ message: 'startEngine' });
-                }
+            // Update count display
+            var count = feed.querySelectorAll('.entry').length;
+            document.getElementById('activityCount').textContent = count + ' calls';
+        }
 
-                function stopEngine() {
-                    chrome.webview.postMessage({ message: 'stopEngine' });
-                }
-            </script>
+        function clearLog() {
+            const feed = document.getElementById('activityFeed');
+            feed.innerHTML = '<div id=""emptyState"" class=""empty-state"">Log cleared</div>';
+            activeEntries.clear();
+            document.getElementById('activityCount').textContent = '0 calls';
+        }
 
+        function init() {
+            window.chrome.webview.addEventListener('message', handleMessageFromHost);
+            chrome.webview.postMessage({ message: 'MessageListenerRegistered' });
+        }
 
+        function startEngine() {
+            updateServerUI('starting', {});
+            chrome.webview.postMessage({ message: 'startEngine' });
+        }
 
+        function stopEngine() {
+            chrome.webview.postMessage({ message: 'stopEngine' });
+        }
+    </script>
+</head>
+<body onload=""init()"">
+    <div class=""header"">
+        <div class=""header-left"">
+            <div class=""header-icon"">M</div>
+            MCP Server
+        </div>
+        <div class=""header-right"">
+            <span id=""statusDot"" class=""status-dot""></span>
+            <span id=""statusLabel"" class=""status-label"">Stopped</span>
+        </div>
+    </div>
 
-        </head>
-        <body onload=""init()"">
-            <h1>
-                MCP Server (HTTP/SSE)
-                <span id=""statusIndicator"" class=""status-indicator status-stopped""></span>
-                <span id=""statusText"" class=""status-text"">Stopped</span>
-            </h1>
-            <div class=""control-panel"">
-                <button id=""startButton"" onclick=""startEngine()"">Start MCP Server</button>
-                <button id=""stopButton"" onclick=""stopEngine()"" style=""background-color: #dc3545;"" disabled>Stop MCP Server</button>
-                <div id=""status""></div>
-                <div id=""connectionInfo"" style=""margin-top: 16px; padding: 12px; background-color: #f8f9fa; border-radius: 6px; font-family: monospace; font-size: 12px; white-space: pre-line; display: none;""></div>
+    <div class=""content"">
+        <div id=""statsPanel"" class=""stats-panel"">
+            <div class=""stats-grid"">
+                <div class=""stat"">
+                    <div class=""stat-value"" id=""statPort"">--</div>
+                    <div class=""stat-label"">Port</div>
+                </div>
+                <div class=""stat"">
+                    <div class=""stat-value"" id=""statTools"">--</div>
+                    <div class=""stat-label"">Tools</div>
+                </div>
+                <div class=""stat"">
+                    <div class=""stat-value"" id=""statSSE"">0</div>
+                    <div class=""stat-label"">SSE Clients</div>
+                </div>
+                <div class=""stat"">
+                    <div class=""stat-value"" id=""statCalls"">0</div>
+                    <div class=""stat-label"">Total Calls</div>
+                </div>
             </div>
-        </body>
-        </html>";
+            <div class=""endpoints"" id=""endpoints""></div>
+        </div>
+
+        <div class=""controls"">
+            <button id=""startBtn"" class=""btn btn-primary"" onclick=""startEngine()"">Start Server</button>
+            <button id=""stopBtn"" class=""btn btn-danger"" onclick=""stopEngine()"" disabled>Stop Server</button>
+            <button class=""btn btn-ghost"" onclick=""clearLog()"">Clear Log</button>
+        </div>
+
+        <div class=""activity-panel"">
+            <div class=""activity-header"">
+                <span class=""activity-title"">Activity Feed</span>
+                <span id=""activityCount"" class=""activity-count"">0 calls</span>
+            </div>
+            <div id=""activityFeed"" class=""activity-feed"">
+                <div id=""emptyState"" class=""empty-state"">Waiting for tool calls...</div>
+            </div>
+        </div>
+    </div>
+
+    <div class=""status-bar"">
+        <span id=""statusMsg""></span>
+        <span>MCP Extension v1.0</span>
+    </div>
+</body>
+</html>";
+
         public AIAPIEngineViewModel(string title, AIAPIEngine panel) : base()
         {
             Title = title;
@@ -372,7 +570,6 @@ namespace MCPExtension
         {
             try
             {
-                // Use the Mendix project directory instead of the extension assembly location
                 var project = parentPanel.CurrentAppModel.Root as IProject;
                 if (project?.DirectoryPath == null)
                 {
@@ -384,14 +581,35 @@ namespace MCPExtension
                 {
                     System.IO.Directory.CreateDirectory(resourcesDir);
                 }
-                
+
                 return System.IO.Path.Combine(resourcesDir, "mcp_debug.log");
             }
             catch (Exception ex)
             {
-                // Fallback to current directory if we can't determine project directory
                 System.Diagnostics.Debug.WriteLine($"Could not determine log file path: {ex.Message}");
                 return System.IO.Path.Combine(Environment.CurrentDirectory, "mcp_debug.log");
+            }
+        }
+
+        private void LogToFile(string message)
+        {
+            try
+            {
+                System.IO.File.AppendAllText(GetLogFilePath(), message + Environment.NewLine);
+            }
+            catch { }
+        }
+
+        private void PostJsonMessage(object data)
+        {
+            try
+            {
+                var json = JsonSerializer.Serialize(data);
+                currentWebView?.PostMessage(json);
+            }
+            catch (Exception ex)
+            {
+                LogToFile($"[{DateTime.Now:HH:mm:ss.fff}] PostJsonMessage error: {ex.Message}");
             }
         }
 
@@ -399,88 +617,80 @@ namespace MCPExtension
         {
             try
             {
-                // Log to a file we can check
-                var logMessage = $"[{DateTime.Now:HH:mm:ss.fff}] WebView received message: {e.Message}";
-                System.IO.File.AppendAllText(GetLogFilePath(), logMessage + Environment.NewLine);
-                
+                LogToFile($"[{DateTime.Now:HH:mm:ss.fff}] WebView message: {e.Message}");
+
                 if (e.Message.Contains("MessageListenerRegistered"))
                 {
-                    System.IO.File.AppendAllText(GetLogFilePath(), "[MessageListenerRegistered] Checking server status..." + Environment.NewLine);
-                    
-                    // Check if MCP server is running by checking the actual server status
                     var isRunning = parentPanel.McpServer?.IsRunning ?? false;
-                    System.IO.File.AppendAllText(GetLogFilePath(), $"[MessageListenerRegistered] MCP Server IsRunning: {isRunning}" + Environment.NewLine);
-                    
-                    var messageToSend = isRunning ? "Running" : "NotRunning";
-                    System.IO.File.AppendAllText(GetLogFilePath(), $"[MessageListenerRegistered] Sending initial message: {messageToSend}" + Environment.NewLine);
-                    currentWebView?.PostMessage(messageToSend);
+                    if (isRunning)
+                    {
+                        SubscribeToToolCallEvents();
+                        PostJsonMessage(new
+                        {
+                            type = "serverStatus",
+                            status = "running",
+                            connectionInfo = parentPanel.McpServer.GetConnectionInfo(),
+                            port = parentPanel.McpServer.Port,
+                            toolCount = 32,
+                            sseConnections = parentPanel.McpServer.ActiveSseConnections,
+                            totalToolCalls = parentPanel.McpServer.TotalToolCalls
+                        });
+                    }
+                    else if (parentPanel.McpServer != null)
+                    {
+                        // Server exists but still starting
+                        PostJsonMessage(new { type = "serverStatus", status = "starting" });
+                    }
+                    else
+                    {
+                        PostJsonMessage(new { type = "serverStatus", status = "stopped" });
+                    }
                     return;
                 }
 
                 if (e.Message.Contains("startEngine"))
                 {
-                    System.IO.File.AppendAllText(GetLogFilePath(), "[startEngine] Command received" + Environment.NewLine);
-                    
-                    // Run on background thread to avoid blocking UI
                     Task.Run(async () =>
                     {
                         try
                         {
-                            System.IO.File.AppendAllText(GetLogFilePath(), "[startEngine] Starting server on background thread..." + Environment.NewLine);
                             string result = await parentPanel.StartAPIEngineAsync();
-                            System.IO.File.AppendAllText(GetLogFilePath(), $"[startEngine] StartAPIEngineAsync result: {result}" + Environment.NewLine);
-                            
-                            // Check actual server status after start
                             var isRunning = parentPanel.McpServer?.IsRunning ?? false;
-                            var messageToSend = isRunning ? "Running" : "NotRunning";
-                            System.IO.File.AppendAllText(GetLogFilePath(), $"[startEngine] Sending message after start: {messageToSend}" + Environment.NewLine);
-                            
-                            // Post message back to UI thread
+
                             Application.Instance.Invoke(() =>
                             {
-                                currentWebView?.PostMessage(messageToSend);
+                                if (isRunning)
+                                    NotifyServerStarted(parentPanel.McpServer.GetConnectionInfo());
+                                else
+                                    NotifyServerStartFailed("Server failed to start");
                             });
                         }
                         catch (Exception ex)
                         {
-                            System.IO.File.AppendAllText(GetLogFilePath(), $"[startEngine] Exception in background thread: {ex.Message}" + Environment.NewLine);
                             Application.Instance.Invoke(() =>
                             {
-                                currentWebView?.PostMessage("NotRunning");
+                                NotifyServerStartFailed(ex.Message);
                             });
                         }
                     });
                 }
                 else if (e.Message.Contains("stopEngine"))
                 {
-                    System.IO.File.AppendAllText(GetLogFilePath(), "[stopEngine] Command received" + Environment.NewLine);
-                    
-                    // Run on background thread to avoid blocking UI
                     Task.Run(async () =>
                     {
                         try
                         {
-                            System.IO.File.AppendAllText(GetLogFilePath(), "[stopEngine] Stopping server on background thread..." + Environment.NewLine);
-                            string result = await parentPanel.StopAPIEngineAsync();
-                            System.IO.File.AppendAllText(GetLogFilePath(), $"[stopEngine] StopAPIEngineAsync result: {result}" + Environment.NewLine);
-                            
-                            // Check actual server status after stop
-                            var isRunning = parentPanel.McpServer?.IsRunning ?? false;
-                            var messageToSend = isRunning ? "Running" : "NotRunning";
-                            System.IO.File.AppendAllText(GetLogFilePath(), $"[stopEngine] Sending message after stop: {messageToSend}" + Environment.NewLine);
-                            
-                            // Post message back to UI thread
+                            await parentPanel.StopAPIEngineAsync();
                             Application.Instance.Invoke(() =>
                             {
-                                currentWebView?.PostMessage(messageToSend);
+                                NotifyServerStopped("Server stopped by user");
                             });
                         }
                         catch (Exception ex)
                         {
-                            System.IO.File.AppendAllText(GetLogFilePath(), $"[stopEngine] Exception in background thread: {ex.Message}" + Environment.NewLine);
                             Application.Instance.Invoke(() =>
                             {
-                                currentWebView?.PostMessage("NotRunning");
+                                NotifyServerStopFailed(ex.Message);
                             });
                         }
                     });
@@ -488,25 +698,8 @@ namespace MCPExtension
             }
             catch (Exception ex)
             {
-                var errorMessage = $"[{DateTime.Now:HH:mm:ss.fff}] Exception in WebView_MessageReceived: {ex.Message}";
-                System.IO.File.AppendAllText(GetLogFilePath(), errorMessage + Environment.NewLine);
-                MessageBox.Show($"Error handling message from WebView: {ex.Message}\nStack trace: {ex.StackTrace}");
-                currentWebView?.PostMessage("NotRunning");
-            }
-        }
-
-        private void UpdateStatus(string message)
-        {
-            try
-            {
-                System.Diagnostics.Debug.WriteLine($"UpdateStatus called with: {message}");
-                // Send status message to JavaScript for display
-                currentWebView?.PostMessage($"Status|{message}");
-                System.Diagnostics.Debug.WriteLine($"Sent status message: Status|{message}");
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"Error updating status: {ex.Message}");
+                LogToFile($"[{DateTime.Now:HH:mm:ss.fff}] WebView_MessageReceived error: {ex.Message}");
+                PostJsonMessage(new { type = "serverStatus", status = "error", errorMessage = ex.Message });
             }
         }
 
@@ -527,22 +720,71 @@ namespace MCPExtension
             }
         }
 
-        // Methods to notify UI of server state changes from background tasks
+        private void SubscribeToToolCallEvents()
+        {
+            if (parentPanel.McpServer != null && _toolCallHandler == null)
+            {
+                _toolCallHandler = HandleToolCallEvent;
+                parentPanel.McpServer.OnToolCallEvent += _toolCallHandler;
+            }
+        }
+
+        private void UnsubscribeFromToolCallEvents()
+        {
+            if (parentPanel.McpServer != null && _toolCallHandler != null)
+            {
+                parentPanel.McpServer.OnToolCallEvent -= _toolCallHandler;
+                _toolCallHandler = null;
+            }
+        }
+
+        private void HandleToolCallEvent(ToolCallEventArgs args)
+        {
+            try
+            {
+                var message = new
+                {
+                    type = "toolCallEvent",
+                    callId = args.CallId,
+                    toolName = args.ToolName,
+                    timestamp = args.Timestamp.ToString("HH:mm:ss"),
+                    status = args.Status.ToString().ToLowerInvariant(),
+                    durationMs = args.DurationMs,
+                    errorMessage = args.ErrorMessage,
+                    totalToolCalls = parentPanel.McpServer?.TotalToolCalls ?? 0,
+                    sseConnections = parentPanel.McpServer?.ActiveSseConnections ?? 0
+                };
+
+                Application.Instance.Invoke(() =>
+                {
+                    PostJsonMessage(message);
+                });
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"HandleToolCallEvent error: {ex.Message}");
+            }
+        }
+
         public void NotifyServerStarted(string connectionInfo)
         {
             try
             {
-                System.Diagnostics.Debug.WriteLine($"NotifyServerStarted called with: {connectionInfo}");
-                UpdateStatus($"MCP Server started successfully");
-                currentWebView?.PostMessage("Running");
-                
-                // Also log that we sent the Running message
-                System.Diagnostics.Debug.WriteLine("Sent 'Running' message to WebView");
+                SubscribeToToolCallEvents();
+                PostJsonMessage(new
+                {
+                    type = "serverStatus",
+                    status = "running",
+                    connectionInfo = connectionInfo,
+                    port = parentPanel.McpServer?.Port ?? 0,
+                    toolCount = 32,
+                    sseConnections = parentPanel.McpServer?.ActiveSseConnections ?? 0,
+                    totalToolCalls = parentPanel.McpServer?.TotalToolCalls ?? 0
+                });
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error in NotifyServerStarted: {ex.Message}");
-                UpdateStatus($"Error notifying server started: {ex.Message}");
+                LogToFile($"[{DateTime.Now:HH:mm:ss.fff}] NotifyServerStarted error: {ex.Message}");
             }
         }
 
@@ -550,14 +792,16 @@ namespace MCPExtension
         {
             try
             {
-                System.Diagnostics.Debug.WriteLine($"NotifyServerStartFailed called with: {errorMessage}");
-                UpdateStatus($"Failed to start MCP Server: {errorMessage}");
-                currentWebView?.PostMessage("NotRunning");
+                PostJsonMessage(new
+                {
+                    type = "serverStatus",
+                    status = "error",
+                    errorMessage = errorMessage
+                });
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error in NotifyServerStartFailed: {ex.Message}");
-                UpdateStatus($"Error notifying server start failed: {ex.Message}");
+                LogToFile($"[{DateTime.Now:HH:mm:ss.fff}] NotifyServerStartFailed error: {ex.Message}");
             }
         }
 
@@ -565,12 +809,12 @@ namespace MCPExtension
         {
             try
             {
-                UpdateStatus("MCP Server stopped");
-                currentWebView?.PostMessage("NotRunning");
+                UnsubscribeFromToolCallEvents();
+                PostJsonMessage(new { type = "serverStatus", status = "stopped" });
             }
             catch (Exception ex)
             {
-                UpdateStatus($"Error notifying server stopped: {ex.Message}");
+                LogToFile($"[{DateTime.Now:HH:mm:ss.fff}] NotifyServerStopped error: {ex.Message}");
             }
         }
 
@@ -578,12 +822,16 @@ namespace MCPExtension
         {
             try
             {
-                UpdateStatus($"Failed to stop MCP Server: {errorMessage}");
-                currentWebView?.PostMessage("Running");
+                PostJsonMessage(new
+                {
+                    type = "serverStatus",
+                    status = "running",
+                    errorMessage = "Failed to stop: " + errorMessage
+                });
             }
             catch (Exception ex)
             {
-                UpdateStatus($"Error notifying server stop failed: {ex.Message}");
+                LogToFile($"[{DateTime.Now:HH:mm:ss.fff}] NotifyServerStopFailed error: {ex.Message}");
             }
         }
     }

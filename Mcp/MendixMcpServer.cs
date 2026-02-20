@@ -24,6 +24,10 @@ namespace MCPExtension
 
         private readonly string? _projectDirectory;
 
+        public event Action<ToolCallEventArgs>? OnToolCallEvent;
+        public int ActiveSseConnections => _mcpServer?.ActiveSseConnections ?? 0;
+        public int TotalToolCalls => _mcpServer?.TotalToolCalls ?? 0;
+
         public MendixMcpServer(IServiceProvider serviceProvider, ILogger<MendixMcpServer> logger, int port = 3001, string? projectDirectory = null)
         {
             _serviceProvider = serviceProvider;
@@ -40,6 +44,9 @@ namespace MCPExtension
 
                 var mcpLogger = _serviceProvider.GetRequiredService<ILogger<McpServer>>();
                 _mcpServer = new McpServer(mcpLogger, _port, _projectDirectory);
+
+                // Relay tool call events to subscribers
+                _mcpServer.OnToolCallEvent += (args) => OnToolCallEvent?.Invoke(args);
 
                 // Register tools
                 _logger.LogInformation("Registering MCP tools...");
@@ -71,15 +78,51 @@ namespace MCPExtension
             // Create tool instances with dependencies
             var domainModelTools = new MendixDomainModelTools(currentApp, _serviceProvider.GetRequiredService<ILogger<MendixDomainModelTools>>());
             var additionalTools = new MendixAdditionalTools(
-                currentApp, 
+                currentApp,
                 _serviceProvider.GetRequiredService<ILogger<MendixAdditionalTools>>(),
                 _serviceProvider.GetRequiredService<IPageGenerationService>(),
                 _serviceProvider.GetRequiredService<INavigationManagerService>(),
-                _serviceProvider
+                _serviceProvider,
+                _projectDirectory
             );
 
             // Register domain model tools with wrapper functions
-            _mcpServer.RegisterTool("read_domain_model", async (JsonObject parameters) => 
+            _mcpServer.RegisterTool("list_modules", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.ListModules(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("create_module", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.CreateModule(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("set_entity_generalization", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.SetEntityGeneralization(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("remove_entity_generalization", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.RemoveEntityGeneralization(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("add_event_handler", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.AddEventHandler(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("add_attribute", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.AddAttribute(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("set_calculated_attribute", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.SetCalculatedAttribute(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("read_domain_model", async (JsonObject parameters) =>
             {
                 var result = await domainModelTools.ReadDomainModel(parameters);
                 return (object)result;
@@ -136,7 +179,47 @@ namespace MCPExtension
                 var result = await additionalTools.ListMicroflows(parameters);
                 return (object)result;
             });
-            _mcpServer.RegisterTool("get_last_error", async (JsonObject parameters) => 
+            _mcpServer.RegisterTool("check_model", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.CheckModel(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("create_constant", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.CreateConstant(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("list_constants", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.ListConstants(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("create_enumeration", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.CreateEnumeration(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("list_enumerations", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.ListEnumerations(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("read_project_info", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.ReadProjectInfo(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("get_studio_pro_logs", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.GetStudioProLogs(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("check_project_errors", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.CheckProjectErrors(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("get_last_error", async (JsonObject parameters) =>
             {
                 var result = await additionalTools.GetLastError(parameters);
                 return (object)result;
@@ -215,7 +298,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 17, // Updated number of registered tools (unified create_microflow_activities)
+                registeredTools = 32, // Phase 7: +read_project_info
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",

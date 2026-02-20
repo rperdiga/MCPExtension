@@ -44,7 +44,7 @@ namespace MCPExtension.Handlers
             System.Diagnostics.Debug.WriteLine($"Debug API request: {requestBody}");
 
             // Get module and entity information
-            var module = Utils.Utils.GetMyFirstModule(CurrentApp);
+            var module = Utils.Utils.ResolveModule(CurrentApp, null);
             var response = new Dictionary<string, object>();
 
             if (module?.DomainModel != null)
