@@ -1885,7 +1885,12 @@ namespace MCPExtension.Tools
                 "manage_folders",
                 "validate_name",
                 "copy_model_element",
-                "list_java_actions"
+                "list_java_actions",
+                "read_runtime_settings",
+                "set_runtime_settings",
+                "read_configurations",
+                "set_configuration",
+                "read_version_control"
             };
 
             return JsonSerializer.Serialize(new { tools = tools, status = "success" });

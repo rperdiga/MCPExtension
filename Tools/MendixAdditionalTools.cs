@@ -12,7 +12,10 @@ using Mendix.StudioPro.ExtensionsAPI.Model.Microflows;
 using Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions;
 using Mendix.StudioPro.ExtensionsAPI.Model.DomainModels;
 using Mendix.StudioPro.ExtensionsAPI.Model.JavaActions;
+using Mendix.StudioPro.ExtensionsAPI.Model.Settings;
+using Mendix.StudioPro.ExtensionsAPI.Model.Constants;
 using Mendix.StudioPro.ExtensionsAPI.Services;
+using Mendix.StudioPro.ExtensionsAPI.UI.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.DependencyInjection;
 using MCPExtension.Utils;
@@ -27,11 +30,12 @@ namespace MCPExtension.Tools
         private readonly INavigationManagerService _navigationManagerService;
         private readonly IServiceProvider _serviceProvider;
         private readonly string? _projectDirectory;
+        private readonly IVersionControlService? _versionControlService;
         private static string? _lastError;
         private static Exception? _lastException;
 
         public MendixAdditionalTools(
-            IModel model, 
+            IModel model,
             ILogger<MendixAdditionalTools> logger,
             IPageGenerationService pageGenerationService,
             INavigationManagerService navigationManagerService,
@@ -44,6 +48,7 @@ namespace MCPExtension.Tools
             _navigationManagerService = navigationManagerService;
             _serviceProvider = serviceProvider;
             _projectDirectory = projectDirectory;
+            _versionControlService = serviceProvider.GetService<IVersionControlService>();
         }
 
         private string GetDebugLogPath()
@@ -908,7 +913,12 @@ namespace MCPExtension.Tools
                     "manage_folders",
                     "validate_name",
                     "copy_model_element",
-                    "list_java_actions"
+                    "list_java_actions",
+                    "read_runtime_settings",
+                    "set_runtime_settings",
+                    "read_configurations",
+                    "set_configuration",
+                    "read_version_control"
                 };
 
                 return JsonSerializer.Serialize(new { available_tools = tools });
@@ -4195,6 +4205,288 @@ namespace MCPExtension.Tools
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error listing Java actions");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        #endregion
+
+        #region Phase 10: Project Settings & Runtime Configuration
+
+        private IProjectSettings? GetProjectSettings()
+        {
+            var project = _model.Root as IProject;
+            return project?.GetProjectDocuments().OfType<IProjectSettings>().FirstOrDefault();
+        }
+
+        private T? GetSettingsPart<T>() where T : class, IProjectSettingsPart
+        {
+            var settings = GetProjectSettings();
+            return settings?.GetSettingsParts().OfType<T>().FirstOrDefault();
+        }
+
+        public async Task<string> ReadRuntimeSettings(JsonObject parameters)
+        {
+            try
+            {
+                var runtimeSettings = GetSettingsPart<IRuntimeSettings>();
+                if (runtimeSettings == null)
+                    return JsonSerializer.Serialize(new { error = "Could not find runtime settings in the project" });
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    afterStartupMicroflow = runtimeSettings.AfterStartupMicroflow?.ToString(),
+                    beforeShutdownMicroflow = runtimeSettings.BeforeShutdownMicroflow?.ToString(),
+                    healthCheckMicroflow = runtimeSettings.HealthCheckMicroflow?.ToString()
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error reading runtime settings");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> SetRuntimeSettings(JsonObject parameters)
+        {
+            try
+            {
+                var runtimeSettings = GetSettingsPart<IRuntimeSettings>();
+                if (runtimeSettings == null)
+                    return JsonSerializer.Serialize(new { error = "Could not find runtime settings in the project" });
+
+                using var transaction = _model.StartTransaction("Set runtime settings");
+                bool changed = false;
+
+                if (parameters.ContainsKey("after_startup_microflow"))
+                {
+                    var mfName = parameters["after_startup_microflow"]?.ToString();
+                    runtimeSettings.AfterStartupMicroflow = string.IsNullOrEmpty(mfName) ? null : _model.ToQualifiedName<IMicroflow>(mfName);
+                    changed = true;
+                }
+                if (parameters.ContainsKey("before_shutdown_microflow"))
+                {
+                    var mfName = parameters["before_shutdown_microflow"]?.ToString();
+                    runtimeSettings.BeforeShutdownMicroflow = string.IsNullOrEmpty(mfName) ? null : _model.ToQualifiedName<IMicroflow>(mfName);
+                    changed = true;
+                }
+                if (parameters.ContainsKey("health_check_microflow"))
+                {
+                    var mfName = parameters["health_check_microflow"]?.ToString();
+                    runtimeSettings.HealthCheckMicroflow = string.IsNullOrEmpty(mfName) ? null : _model.ToQualifiedName<IMicroflow>(mfName);
+                    changed = true;
+                }
+
+                if (parameters.ContainsKey("clear_after_startup") && parameters["clear_after_startup"]?.GetValue<bool>() == true)
+                {
+                    runtimeSettings.AfterStartupMicroflow = null;
+                    changed = true;
+                }
+                if (parameters.ContainsKey("clear_before_shutdown") && parameters["clear_before_shutdown"]?.GetValue<bool>() == true)
+                {
+                    runtimeSettings.BeforeShutdownMicroflow = null;
+                    changed = true;
+                }
+                if (parameters.ContainsKey("clear_health_check") && parameters["clear_health_check"]?.GetValue<bool>() == true)
+                {
+                    runtimeSettings.HealthCheckMicroflow = null;
+                    changed = true;
+                }
+
+                if (!changed)
+                    return JsonSerializer.Serialize(new { error = "No settings parameters provided. Use after_startup_microflow, before_shutdown_microflow, health_check_microflow, or clear_* flags." });
+
+                transaction.Commit();
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    afterStartupMicroflow = runtimeSettings.AfterStartupMicroflow?.ToString(),
+                    beforeShutdownMicroflow = runtimeSettings.BeforeShutdownMicroflow?.ToString(),
+                    healthCheckMicroflow = runtimeSettings.HealthCheckMicroflow?.ToString()
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error setting runtime settings");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> ReadConfigurations(JsonObject parameters)
+        {
+            try
+            {
+                var configSettings = GetSettingsPart<IConfigurationSettings>();
+                if (configSettings == null)
+                    return JsonSerializer.Serialize(new { error = "Could not find configuration settings in the project" });
+
+                var configName = parameters?["configuration_name"]?.ToString();
+                var configs = configSettings.GetConfigurations();
+
+                if (!string.IsNullOrEmpty(configName))
+                    configs = configs.Where(c => c.Name.Equals(configName, StringComparison.OrdinalIgnoreCase)).ToList();
+
+                var result = configs.Select(c => new
+                {
+                    name = c.Name,
+                    applicationRootUrl = c.ApplicationRootUrl,
+                    customSettings = c.GetCustomSettings().Select(cs => new { name = cs.Name, value = cs.Value }).ToList(),
+                    constantValues = c.GetConstantValues().Select(cv => new
+                    {
+                        constant = cv.Constant?.ToString(),
+                        valueType = cv.SharedOrPrivateValue?.GetType().Name
+                    }).ToList()
+                }).ToList();
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    totalConfigurations = result.Count,
+                    configurations = result
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error reading configurations");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> SetConfiguration(JsonObject parameters)
+        {
+            try
+            {
+                var configSettings = GetSettingsPart<IConfigurationSettings>();
+                if (configSettings == null)
+                    return JsonSerializer.Serialize(new { error = "Could not find configuration settings in the project" });
+
+                var configName = parameters["configuration_name"]?.ToString();
+                if (string.IsNullOrEmpty(configName))
+                    return JsonSerializer.Serialize(new { error = "configuration_name is required" });
+
+                using var transaction = _model.StartTransaction($"Set configuration '{configName}'");
+
+                var config = configSettings.GetConfigurations()
+                    .FirstOrDefault(c => c.Name.Equals(configName, StringComparison.OrdinalIgnoreCase));
+
+                bool created = false;
+                if (config == null)
+                {
+                    var createIfMissing = parameters["create_if_missing"]?.GetValue<bool>() ?? true;
+                    if (!createIfMissing)
+                        return JsonSerializer.Serialize(new { error = $"Configuration '{configName}' not found and create_if_missing is false" });
+
+                    config = _model.Create<IConfiguration>();
+                    config.Name = configName;
+                    configSettings.AddConfiguration(config);
+                    created = true;
+                }
+
+                if (parameters.ContainsKey("application_root_url"))
+                {
+                    config.ApplicationRootUrl = parameters["application_root_url"]?.ToString() ?? "";
+                }
+
+                if (parameters.ContainsKey("custom_settings") && parameters["custom_settings"] is JsonArray customSettingsArr)
+                {
+                    // Remove existing custom settings first
+                    foreach (var existing in config.GetCustomSettings().ToList())
+                        config.RemoveCustomSetting(existing);
+
+                    foreach (var item in customSettingsArr)
+                    {
+                        var setting = _model.Create<ICustomSetting>();
+                        setting.Name = item?["name"]?.ToString() ?? "";
+                        setting.Value = item?["value"]?.ToString() ?? "";
+                        config.AddCustomSetting(setting);
+                    }
+                }
+
+                transaction.Commit();
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    created,
+                    configuration = new
+                    {
+                        name = config.Name,
+                        applicationRootUrl = config.ApplicationRootUrl,
+                        customSettingsCount = config.GetCustomSettings().Count,
+                        constantValuesCount = config.GetConstantValues().Count
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error setting configuration");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> ReadVersionControl(JsonObject parameters)
+        {
+            try
+            {
+                if (_versionControlService == null)
+                    return JsonSerializer.Serialize(new { error = "Version control service is not available" });
+
+                var isVc = _versionControlService.IsProjectVersionControlled(_model);
+                if (!isVc)
+                {
+                    return JsonSerializer.Serialize(new
+                    {
+                        success = true,
+                        isVersionControlled = false,
+                        message = "Project is not under version control"
+                    });
+                }
+
+                string? branchName = null;
+                string? commitId = null;
+                string? commitAuthor = null;
+                string? commitDate = null;
+                string? commitMessage = null;
+
+                try
+                {
+                    var branch = _versionControlService.GetCurrentBranch(_model);
+                    branchName = branch?.Name;
+
+                    if (branch != null)
+                    {
+                        try
+                        {
+                            var headCommit = _versionControlService.GetHeadCommit(_model, branch);
+                            commitId = headCommit?.ID;
+                            commitAuthor = headCommit?.Author;
+                            commitDate = headCommit?.Date;
+                            commitMessage = headCommit?.Message;
+                        }
+                        catch (Exception) { /* Branch may have no commits */ }
+                    }
+                }
+                catch (Exception) { /* Git config may not be readable */ }
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    isVersionControlled = true,
+                    branch = branchName,
+                    headCommit = new
+                    {
+                        id = commitId,
+                        author = commitAuthor,
+                        date = commitDate,
+                        message = commitMessage
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error reading version control info");
                 return JsonSerializer.Serialize(new { error = ex.Message });
             }
         }

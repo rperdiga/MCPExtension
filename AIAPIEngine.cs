@@ -6,6 +6,7 @@ using Mendix.StudioPro.ExtensionsAPI.UI.DockablePane;
 using Mendix.StudioPro.ExtensionsAPI.Model;
 using Mendix.StudioPro.ExtensionsAPI.Model.Projects;
 using Mendix.StudioPro.ExtensionsAPI.Services;
+using Mendix.StudioPro.ExtensionsAPI.UI.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using MCPExtension.Tools;
@@ -31,6 +32,7 @@ namespace MCPExtension
         private readonly IMicroflowExpressionService _microflowExpressionService;
         private readonly IMicroflowActivitiesService _microflowActivitiesService;
         private readonly INameValidationService _nameValidationService;
+        private readonly IVersionControlService? _versionControlService;
 
         // Public property for the ViewModel to check server status
         public MendixMcpServer McpServer => _mcpServer;
@@ -45,7 +47,8 @@ namespace MCPExtension
             IMicroflowService microflowService,
             IMicroflowExpressionService microflowExpressionService,
             IMicroflowActivitiesService microflowActivitiesService,
-            INameValidationService nameValidationService)
+            INameValidationService nameValidationService,
+            IVersionControlService versionControlService = null)
         {
             _pageGenerationService = pageGenerationService;
             _navigationManagerService = navigationManagerService;
@@ -53,6 +56,7 @@ namespace MCPExtension
             _microflowExpressionService = microflowExpressionService;
             _microflowActivitiesService = microflowActivitiesService;
             _nameValidationService = nameValidationService;
+            _versionControlService = versionControlService;
             
             _jsonOptions = new JsonSerializerOptions
             {
@@ -136,6 +140,8 @@ namespace MCPExtension
             services.AddSingleton(_microflowExpressionService);
             services.AddSingleton(_microflowActivitiesService);
             services.AddSingleton(_nameValidationService);
+            if (_versionControlService != null)
+                services.AddSingleton(_versionControlService);
 
             // Register our tools
             services.AddSingleton<MendixDomainModelTools>();

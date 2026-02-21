@@ -625,6 +625,11 @@ namespace MCPExtension.MCP
                 "validate_name" => "Validate a candidate name for a Mendix model element. Returns whether the name is valid and optionally auto-fixes it to a valid name.",
                 "copy_model_element" => "Deep-copy an entity, microflow, constant, or enumeration within the same module or to a different module. The copy gets a new name.",
                 "list_java_actions" => "List all Java actions in a module or across the project, including their parameter names and descriptions.",
+                "read_runtime_settings" => "Read project runtime settings: AfterStartupMicroflow, BeforeShutdownMicroflow, and HealthCheckMicroflow assignments.",
+                "set_runtime_settings" => "Assign or clear microflows for runtime hooks (after startup, before shutdown, health check). Use qualified names like 'MyModule.ASu_Startup'.",
+                "read_configurations" => "List run configurations with their application root URLs, custom settings, and constant value overrides.",
+                "set_configuration" => "Create or update a run configuration with application root URL and custom settings. Creates the configuration if it doesn't exist.",
+                "read_version_control" => "Read version control status: whether the project is under VC, current branch name, and head commit details (ID, author, date, message).",
                 _ => "Tool description not available"
             };
         }
@@ -1192,6 +1197,53 @@ namespace MCPExtension.MCP
                     {
                         module_name = new { type = "string", description = "Module to list Java actions from. Lists all modules if omitted." }
                     },
+                    required = new string[0]
+                },
+                "read_runtime_settings" => new
+                {
+                    type = "object",
+                    properties = new { },
+                    required = new string[0]
+                },
+                "set_runtime_settings" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        after_startup_microflow = new { type = "string", description = "Qualified name of microflow to run after startup (e.g. 'MyModule.ASu_Startup')" },
+                        before_shutdown_microflow = new { type = "string", description = "Qualified name of microflow to run before shutdown" },
+                        health_check_microflow = new { type = "string", description = "Qualified name of microflow for health check endpoint" },
+                        clear_after_startup = new { type = "boolean", description = "Set true to clear the after-startup microflow assignment" },
+                        clear_before_shutdown = new { type = "boolean", description = "Set true to clear the before-shutdown microflow assignment" },
+                        clear_health_check = new { type = "boolean", description = "Set true to clear the health-check microflow assignment" }
+                    },
+                    required = new string[0]
+                },
+                "read_configurations" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        configuration_name = new { type = "string", description = "Name of specific configuration to read. Lists all if omitted." }
+                    },
+                    required = new string[0]
+                },
+                "set_configuration" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        configuration_name = new { type = "string", description = "Name of the configuration to create or update" },
+                        application_root_url = new { type = "string", description = "Application root URL (e.g. 'http://localhost:8080/')" },
+                        custom_settings = new { type = "array", description = "Array of {name, value} objects for custom runtime settings", items = new { type = "object" } },
+                        create_if_missing = new { type = "boolean", description = "Create the configuration if it doesn't exist (default: true)" }
+                    },
+                    required = new[] { "configuration_name" }
+                },
+                "read_version_control" => new
+                {
+                    type = "object",
+                    properties = new { },
                     required = new string[0]
                 },
                 _ => new

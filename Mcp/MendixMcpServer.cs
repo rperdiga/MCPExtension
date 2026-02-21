@@ -287,6 +287,33 @@ namespace MCPExtension
                 return (object)result;
             });
 
+            // Phase 10: Project Settings & Runtime Configuration
+            _mcpServer.RegisterTool("read_runtime_settings", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ReadRuntimeSettings(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("set_runtime_settings", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.SetRuntimeSettings(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("read_configurations", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ReadConfigurations(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("set_configuration", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.SetConfiguration(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("read_version_control", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ReadVersionControl(parameters);
+                return (object)result;
+            });
+
             _logger.LogInformation("MCP tools registered successfully");
         }
 
@@ -326,7 +353,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 37, // Phase 9: +5 entity config & organization tools
+                registeredTools = 42, // Phase 10: +5 project settings & runtime tools
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",
