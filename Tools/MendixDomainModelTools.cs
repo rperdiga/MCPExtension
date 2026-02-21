@@ -1958,7 +1958,10 @@ namespace MCPExtension.Tools
                 "insert_before_activity",
                 "list_pages",
                 "delete_document",
-                "sync_filesystem"
+                "sync_filesystem",
+                "update_microflow",
+                "read_attribute_details",
+                "configure_constant_values"
             };
 
             return JsonSerializer.Serialize(new { tools = tools, status = "success" });

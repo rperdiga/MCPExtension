@@ -1270,7 +1270,10 @@ namespace MCPExtension.Tools
                     "insert_before_activity",
                     "list_pages",
                     "delete_document",
-                    "sync_filesystem"
+                    "sync_filesystem",
+                    "update_microflow",
+                    "read_attribute_details",
+                    "configure_constant_values"
                 };
 
                 return JsonSerializer.Serialize(new { available_tools = tools });
@@ -6432,6 +6435,320 @@ namespace MCPExtension.Tools
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error synchronizing with file system");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        #endregion
+
+        #region Phase 18: Quality of Life Improvements
+
+        public async Task<string> UpdateMicroflow(JsonObject parameters)
+        {
+            try
+            {
+                var microflowName = parameters["microflow_name"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(microflowName))
+                    return JsonSerializer.Serialize(new { error = "microflow_name is required" });
+
+                // Support qualified names
+                if (microflowName.Contains('.') && string.IsNullOrEmpty(moduleName))
+                {
+                    var parts = microflowName.Split('.', 2);
+                    moduleName = parts[0];
+                    microflowName = parts[1];
+                }
+
+                var module = Utils.Utils.ResolveModule(_model, moduleName);
+                if (module == null)
+                    return JsonSerializer.Serialize(new { error = $"Module '{moduleName ?? "(default)"}' not found" });
+
+                var microflow = module.GetDocuments().OfType<IMicroflow>()
+                    .FirstOrDefault(mf => mf.Name.Equals(microflowName, StringComparison.OrdinalIgnoreCase));
+                if (microflow == null)
+                    return JsonSerializer.Serialize(new { error = $"Microflow '{microflowName}' not found in module '{module.Name}'" });
+
+                var changes = new List<string>();
+
+                using var transaction = _model.StartTransaction($"Update microflow '{microflowName}'");
+
+                // Change return type
+                var returnTypeStr = parameters["return_type"]?.ToString()?.ToLowerInvariant();
+                if (!string.IsNullOrEmpty(returnTypeStr))
+                {
+                    DataType? newReturnType = returnTypeStr switch
+                    {
+                        "void" or "nothing" => DataType.Void,
+                        "boolean" or "bool" => DataType.Boolean,
+                        "string" => DataType.String,
+                        "integer" or "int" => DataType.Integer,
+                        "decimal" => DataType.Decimal,
+                        "float" => DataType.Float,
+                        "datetime" or "date" => DataType.DateTime,
+                        _ => null
+                    };
+
+                    // Handle entity types: "Object:Module.Entity" or "List:Module.Entity"
+                    if (newReturnType == null && returnTypeStr.StartsWith("object:"))
+                    {
+                        var entityQualifiedName = returnTypeStr.Substring(7);
+                        var (entity, _) = Utils.Utils.FindEntityAcrossModules(_model, entityQualifiedName, null);
+                        if (entity != null)
+                            newReturnType = DataType.Object(entity.QualifiedName);
+                        else
+                            return JsonSerializer.Serialize(new { error = $"Entity '{entityQualifiedName}' not found for return type" });
+                    }
+                    else if (newReturnType == null && returnTypeStr.StartsWith("list:"))
+                    {
+                        var entityQualifiedName = returnTypeStr.Substring(5);
+                        var (entity, _) = Utils.Utils.FindEntityAcrossModules(_model, entityQualifiedName, null);
+                        if (entity != null)
+                            newReturnType = DataType.List(entity.QualifiedName);
+                        else
+                            return JsonSerializer.Serialize(new { error = $"Entity '{entityQualifiedName}' not found for return type" });
+                    }
+
+                    if (newReturnType == null)
+                    {
+                        transaction.Rollback();
+                        return JsonSerializer.Serialize(new { error = $"Unknown return type '{returnTypeStr}'. Supported: void, boolean, string, integer, decimal, float, datetime, object:Module.Entity, list:Module.Entity" });
+                    }
+
+                    microflow.ReturnType = newReturnType;
+                    changes.Add($"returnType = {FormatDataType(newReturnType)}");
+                }
+
+                // Change return variable name
+                var returnVarName = parameters["return_variable_name"]?.ToString();
+                if (returnVarName != null)
+                {
+                    microflow.ReturnVariableName = returnVarName;
+                    changes.Add($"returnVariableName = '{returnVarName}'");
+                }
+
+                // Change URL
+                var url = parameters["url"]?.ToString();
+                if (url != null)
+                {
+                    microflow.Url = url;
+                    changes.Add($"url = '{url}'");
+                }
+
+                if (changes.Count == 0)
+                {
+                    transaction.Rollback();
+                    return JsonSerializer.Serialize(new { error = "No modifiable properties supplied. Provide return_type, return_variable_name, or url." });
+                }
+
+                transaction.Commit();
+
+                _logger.LogInformation($"Updated microflow {module.Name}.{microflow.Name}: {string.Join(", ", changes)}");
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    microflow = $"{module.Name}.{microflow.Name}",
+                    changes = changes
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error updating microflow");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> ReadAttributeDetails(JsonObject parameters)
+        {
+            try
+            {
+                var entityName = parameters["entity_name"]?.ToString();
+                var attributeName = parameters["attribute_name"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(entityName))
+                    return JsonSerializer.Serialize(new { error = "entity_name is required" });
+                if (string.IsNullOrEmpty(attributeName))
+                    return JsonSerializer.Serialize(new { error = "attribute_name is required" });
+
+                var (entity, foundModule) = Utils.Utils.FindEntityAcrossModules(_model, entityName, moduleName);
+                if (entity == null)
+                    return JsonSerializer.Serialize(new { error = $"Entity '{entityName}' not found" });
+
+                var attribute = entity.GetAttributes()
+                    .FirstOrDefault(a => a.Name.Equals(attributeName, StringComparison.OrdinalIgnoreCase));
+                if (attribute == null)
+                    return JsonSerializer.Serialize(new { error = $"Attribute '{attributeName}' not found on entity '{entityName}'" });
+
+                var result = new Dictionary<string, object?>
+                {
+                    ["name"] = attribute.Name,
+                    ["qualifiedName"] = attribute.QualifiedName?.FullName,
+                    ["entity"] = entityName,
+                    ["module"] = foundModule?.Name,
+                    ["documentation"] = string.IsNullOrEmpty(attribute.Documentation) ? null : attribute.Documentation
+                };
+
+                // Type details
+                var attrType = attribute.Type;
+                if (attrType is IStringAttributeType stringType)
+                {
+                    result["type"] = "String";
+                    result["maxLength"] = stringType.Length;
+                }
+                else if (attrType is IDateTimeAttributeType dateType)
+                {
+                    result["type"] = "DateTime";
+                    result["localizeDate"] = dateType.LocalizeDate;
+                }
+                else if (attrType is IEnumerationAttributeType enumType)
+                {
+                    result["type"] = "Enumeration";
+                    result["enumeration"] = enumType.Enumeration?.FullName;
+                }
+                else if (attrType is IBooleanAttributeType)
+                    result["type"] = "Boolean";
+                else if (attrType is IIntegerAttributeType)
+                    result["type"] = "Integer";
+                else if (attrType is ILongAttributeType)
+                    result["type"] = "Long";
+                else if (attrType is IAutoNumberAttributeType)
+                    result["type"] = "AutoNumber";
+                else if (attrType is IDecimalAttributeType)
+                    result["type"] = "Decimal";
+                else if (attrType is IBinaryAttributeType)
+                    result["type"] = "Binary";
+                else if (attrType is IHashedStringAttributeType)
+                    result["type"] = "HashedString";
+                else
+                    result["type"] = attrType?.GetType().Name ?? "Unknown";
+
+                // Value details (stored vs calculated)
+                var value = attribute.Value;
+                if (value is IStoredValue storedValue)
+                {
+                    result["valueType"] = "stored";
+                    result["defaultValue"] = string.IsNullOrEmpty(storedValue.DefaultValue) ? null : storedValue.DefaultValue;
+                }
+                else if (value is ICalculatedValue calculatedValue)
+                {
+                    result["valueType"] = "calculated";
+                    result["calculatedMicroflow"] = calculatedValue.Microflow?.FullName;
+                    result["passEntity"] = calculatedValue.PassEntity;
+                }
+
+                return JsonSerializer.Serialize(new { success = true, attribute = result });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error reading attribute details");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> ConfigureConstantValues(JsonObject parameters)
+        {
+            try
+            {
+                var configName = parameters["configuration_name"]?.ToString();
+                var constantName = parameters["constant_name"]?.ToString();
+                var constantModule = parameters["module_name"]?.ToString();
+                var newValue = parameters["value"]?.ToString();
+
+                if (string.IsNullOrEmpty(configName))
+                    return JsonSerializer.Serialize(new { error = "configuration_name is required (e.g. 'Development', 'Production')" });
+                if (string.IsNullOrEmpty(constantName))
+                    return JsonSerializer.Serialize(new { error = "constant_name is required" });
+                if (newValue == null)
+                    return JsonSerializer.Serialize(new { error = "value is required" });
+
+                // Navigate to project settings -> configurations
+                var project = _model.Root as IProject;
+                if (project == null)
+                    return JsonSerializer.Serialize(new { error = "Cannot access project root" });
+
+                var projectSettings = project.GetProjectDocuments()
+                    .OfType<Mendix.StudioPro.ExtensionsAPI.Model.Settings.IProjectSettings>()
+                    .FirstOrDefault();
+                if (projectSettings == null)
+                    return JsonSerializer.Serialize(new { error = "Cannot access project settings" });
+
+                var configSettings = projectSettings.GetSettingsParts()
+                    .OfType<Mendix.StudioPro.ExtensionsAPI.Model.Settings.IConfigurationSettings>()
+                    .FirstOrDefault();
+                if (configSettings == null)
+                    return JsonSerializer.Serialize(new { error = "Cannot access configuration settings" });
+
+                var configurations = configSettings.GetConfigurations();
+                var config = configurations.FirstOrDefault(c => c.Name.Equals(configName, StringComparison.OrdinalIgnoreCase));
+                if (config == null)
+                {
+                    var availConfigs = configurations.Select(c => c.Name).ToList();
+                    return JsonSerializer.Serialize(new { error = $"Configuration '{configName}' not found. Available: {string.Join(", ", availConfigs)}" });
+                }
+
+                // Find the constant
+                IConstant? constant = null;
+                foreach (var module in _model.Root.GetModules())
+                {
+                    if (!string.IsNullOrEmpty(constantModule) && !module.Name.Equals(constantModule, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var doc = module.GetDocuments().OfType<IConstant>()
+                        .FirstOrDefault(c => c.Name.Equals(constantName, StringComparison.OrdinalIgnoreCase));
+                    if (doc != null) { constant = doc; break; }
+                }
+                if (constant == null)
+                    return JsonSerializer.Serialize(new { error = $"Constant '{constantName}' not found" });
+
+                // Check if there's an existing constant value override
+                var existingCV = config.GetConstantValues()
+                    .FirstOrDefault(cv => cv.Constant?.FullName == constant.QualifiedName?.FullName);
+
+                using var transaction = _model.StartTransaction($"Set constant value for '{constantName}' in '{configName}'");
+
+                if (existingCV != null)
+                {
+                    // Update existing
+                    if (existingCV.SharedOrPrivateValue is ISharedValue existingShared)
+                    {
+                        existingShared.Value = newValue;
+                    }
+                    else
+                    {
+                        // Replace with a shared value
+                        var sharedValue = _model.Create<ISharedValue>();
+                        sharedValue.Value = newValue;
+                        existingCV.SharedOrPrivateValue = sharedValue;
+                    }
+                }
+                else
+                {
+                    // Create new constant value
+                    var constantValue = _model.Create<IConstantValue>();
+                    constantValue.Constant = constant.QualifiedName;
+                    var sharedValue = _model.Create<ISharedValue>();
+                    sharedValue.Value = newValue;
+                    constantValue.SharedOrPrivateValue = sharedValue;
+                    config.AddConstantValue(constantValue);
+                }
+
+                transaction.Commit();
+
+                _logger.LogInformation($"Set constant '{constantName}' = '{newValue}' in configuration '{configName}'");
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    configuration = configName,
+                    constant = constant.QualifiedName?.FullName ?? constantName,
+                    value = newValue,
+                    message = $"Set constant '{constantName}' = '{newValue}' in configuration '{configName}'"
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error configuring constant values");
                 return JsonSerializer.Serialize(new { error = ex.Message });
             }
         }

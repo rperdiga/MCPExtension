@@ -658,6 +658,9 @@ namespace MCPExtension.MCP
                 "list_pages" => "List all pages in a module or across all modules. Returns page name, module, qualified name, and excluded status.",
                 "delete_document" => "Delete a document (page, microflow, or any document type) from a module. Searches recursively in subfolders. Optionally filter by document_type to prevent accidental deletion of wrong type.",
                 "sync_filesystem" => "Synchronize model with the file system. Imports changes from JavaScript actions, widgets, and other file-based resources. Equivalent to 'Synchronize App Directory' menu item.",
+                "update_microflow" => "Update microflow properties: return type (void, boolean, string, integer, decimal, float, datetime, object:Module.Entity, list:Module.Entity), return variable name, and URL.",
+                "read_attribute_details" => "Read detailed information about a single attribute: type details (string length, datetime localization, enumeration), default value, calculated microflow, and documentation.",
+                "configure_constant_values" => "Set a constant value override for a specific run configuration (e.g. Development, Production). Creates or updates the constant value in the specified configuration.",
                 _ => "Tool description not available"
             };
         }
@@ -1603,6 +1606,42 @@ namespace MCPExtension.MCP
                     type = "object",
                     properties = new { },
                     required = new string[0]
+                },
+                "update_microflow" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        microflow_name = new { type = "string", description = "Name of the microflow (or Module.MicroflowName)" },
+                        module_name = new { type = "string", description = "Module name (optional if using qualified name)" },
+                        return_type = new { type = "string", description = "New return type: void, boolean, string, integer, decimal, float, datetime, object:Module.Entity, list:Module.Entity" },
+                        return_variable_name = new { type = "string", description = "New return variable name" },
+                        url = new { type = "string", description = "Published REST URL for the microflow" }
+                    },
+                    required = new[] { "microflow_name" }
+                },
+                "read_attribute_details" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        entity_name = new { type = "string", description = "Entity containing the attribute" },
+                        attribute_name = new { type = "string", description = "Name of the attribute to read" },
+                        module_name = new { type = "string", description = "Module name (optional, searches all if omitted)" }
+                    },
+                    required = new[] { "entity_name", "attribute_name" }
+                },
+                "configure_constant_values" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        configuration_name = new { type = "string", description = "Run configuration name (e.g. 'Development', 'Production')" },
+                        constant_name = new { type = "string", description = "Name of the constant to set" },
+                        module_name = new { type = "string", description = "Module containing the constant (optional)" },
+                        value = new { type = "string", description = "New value for the constant in this configuration" }
+                    },
+                    required = new[] { "configuration_name", "constant_name", "value" }
                 },
                 _ => new
                 {

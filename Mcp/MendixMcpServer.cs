@@ -468,6 +468,25 @@ namespace MCPExtension
                 return (object)result;
             });
 
+            // Phase 18: Quality of Life Improvements
+            _mcpServer.RegisterTool("update_microflow", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.UpdateMicroflow(parameters);
+                return (object)result;
+            });
+
+            _mcpServer.RegisterTool("read_attribute_details", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ReadAttributeDetails(parameters);
+                return (object)result;
+            });
+
+            _mcpServer.RegisterTool("configure_constant_values", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ConfigureConstantValues(parameters);
+                return (object)result;
+            });
+
             _logger.LogInformation("MCP tools registered successfully");
         }
 
@@ -507,7 +526,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 69, // Phase 17: +3 page & document management tools
+                registeredTools = 72, // Phase 18: +3 quality of life tools
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",
