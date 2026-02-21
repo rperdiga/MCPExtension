@@ -27,6 +27,7 @@ namespace MCPExtension
         public event Action<ToolCallEventArgs>? OnToolCallEvent;
         public int ActiveSseConnections => _mcpServer?.ActiveSseConnections ?? 0;
         public int TotalToolCalls => _mcpServer?.TotalToolCalls ?? 0;
+        public int RegisteredToolCount => _mcpServer?.RegisteredToolCount ?? 0;
 
         public MendixMcpServer(IServiceProvider serviceProvider, ILogger<MendixMcpServer> logger, int port = 3001, string? projectDirectory = null)
         {
@@ -417,6 +418,18 @@ namespace MCPExtension
                 return (object)result;
             });
 
+            // Phase 15: Domain Model Service & Navigation
+            _mcpServer.RegisterTool("query_associations", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.QueryAssociations(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("manage_navigation", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ManageNavigation(parameters);
+                return (object)result;
+            });
+
             _logger.LogInformation("MCP tools registered successfully");
         }
 
@@ -456,7 +469,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 61, // Phase 14: +5 modify existing elements tools
+                registeredTools = 63, // Phase 15: +2 association queries & navigation tools
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",

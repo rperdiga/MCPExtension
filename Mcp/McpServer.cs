@@ -32,6 +32,7 @@ namespace MCPExtension.MCP
         public int Port => _port;
         public int ActiveSseConnections => _activeSseConnections;
         public int TotalToolCalls => _totalToolCalls;
+        public int RegisteredToolCount => _tools.Count;
         public event Action<ToolCallEventArgs>? OnToolCallEvent;
 
         public McpServer(ILogger<McpServer> logger, int port = 3001, string? projectDirectory = null)
@@ -649,6 +650,8 @@ namespace MCPExtension.MCP
                 "update_constant" => "Modify an existing constant: change default_value and/or exposed_to_client. Supports qualified names like 'Module.ConstantName'.",
                 "update_enumeration" => "Add or remove values from an existing enumeration. Provide add_values (array of new value names) and/or remove_values (array of value names to remove). Supports qualified names like 'Module.EnumName'.",
                 "set_documentation" => "Set documentation on an entity, attribute, association, or domain_model. Use empty string to clear documentation.",
+                "query_associations" => "Query associations using the Domain Model Service. Find all associations in a module, between two specific entities, or for a single entity with direction filter (parent/child/both). Returns rich details including parent/child entities, modules, type, owner, and delete behaviors.",
+                "manage_navigation" => "Add pages to the responsive web navigation profile. Provide an array of pages with caption, page_name, and module_name. Pages are added as navigation items visible in the app's menu.",
                 _ => "Tool description not available"
             };
         }
@@ -1478,6 +1481,42 @@ namespace MCPExtension.MCP
                         module_name = new { type = "string", description = "Module containing the element. Searches all modules if omitted." }
                     },
                     required = new[] { "element_type", "documentation" }
+                },
+                "query_associations" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        entity_name = new { type = "string", description = "Entity to query associations for. If omitted, returns all associations." },
+                        second_entity = new { type = "string", description = "Second entity name — when provided with entity_name, finds associations between the two entities." },
+                        module_name = new { type = "string", description = "Filter by module. Used to scope entity lookup or to get all associations in a module." },
+                        direction = new { type = "string", description = "Filter direction when querying single entity: 'parent' (entity owns), 'child' (entity is referenced), 'both' (default)." }
+                    },
+                    required = new string[0]
+                },
+                "manage_navigation" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        pages = new
+                        {
+                            type = "array",
+                            description = "Array of page entries to add to responsive web navigation",
+                            items = new
+                            {
+                                type = "object",
+                                properties = new
+                                {
+                                    caption = new { type = "string", description = "Menu caption displayed in navigation" },
+                                    page_name = new { type = "string", description = "Name of the page to navigate to" },
+                                    module_name = new { type = "string", description = "Module containing the page" }
+                                },
+                                required = new[] { "caption", "page_name", "module_name" }
+                            }
+                        }
+                    },
+                    required = new[] { "pages" }
                 },
                 _ => new
                 {

@@ -1262,7 +1262,9 @@ namespace MCPExtension.Tools
                     "update_association",
                     "update_constant",
                     "update_enumeration",
-                    "set_documentation"
+                    "set_documentation",
+                    "query_associations",
+                    "manage_navigation"
                 };
 
                 return JsonSerializer.Serialize(new { available_tools = tools });
@@ -5670,6 +5672,65 @@ namespace MCPExtension.Tools
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error querying model elements");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        #endregion
+
+        #region Phase 15: Navigation Management
+
+        public async Task<string> ManageNavigation(JsonObject parameters)
+        {
+            try
+            {
+                var pagesNode = parameters["pages"];
+                if (pagesNode is not JsonArray pagesArray || pagesArray.Count == 0)
+                    return JsonSerializer.Serialize(new { error = "pages is required: array of {caption, page_name, module_name}" });
+
+                var resolvedPages = new List<(string caption, Mendix.StudioPro.ExtensionsAPI.Model.Pages.IPage page)>();
+
+                foreach (var item in pagesArray)
+                {
+                    if (item is not JsonObject pageObj)
+                        return JsonSerializer.Serialize(new { error = "Each page entry must be an object with caption, page_name, and module_name" });
+
+                    var caption = pageObj["caption"]?.ToString();
+                    var pageName = pageObj["page_name"]?.ToString();
+                    var moduleName = pageObj["module_name"]?.ToString();
+
+                    if (string.IsNullOrEmpty(caption))
+                        return JsonSerializer.Serialize(new { error = "caption is required for each page entry" });
+                    if (string.IsNullOrEmpty(pageName))
+                        return JsonSerializer.Serialize(new { error = "page_name is required for each page entry" });
+                    if (string.IsNullOrEmpty(moduleName))
+                        return JsonSerializer.Serialize(new { error = "module_name is required for each page entry" });
+
+                    var module = _model.Root.GetModules().FirstOrDefault(m => m.Name.Equals(moduleName, StringComparison.OrdinalIgnoreCase));
+                    if (module == null)
+                        return JsonSerializer.Serialize(new { error = $"Module '{moduleName}' not found" });
+
+                    var page = module.GetDocuments().OfType<Mendix.StudioPro.ExtensionsAPI.Model.Pages.IPage>()
+                        .FirstOrDefault(p => p.Name.Equals(pageName, StringComparison.OrdinalIgnoreCase));
+                    if (page == null)
+                        return JsonSerializer.Serialize(new { error = $"Page '{pageName}' not found in module '{moduleName}'" });
+
+                    resolvedPages.Add((caption, page));
+                }
+
+                _navigationManagerService.PopulateWebNavigationWith(_model, resolvedPages.ToArray());
+
+                _logger.LogInformation($"Added {resolvedPages.Count} pages to web navigation");
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = $"Added {resolvedPages.Count} page(s) to responsive web navigation",
+                    pages = resolvedPages.Select(p => new { caption = p.caption, page = p.page.Name }).ToList()
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error managing navigation");
                 return JsonSerializer.Serialize(new { error = ex.Message });
             }
         }

@@ -1950,7 +1950,9 @@ namespace MCPExtension.Tools
                 "update_association",
                 "update_constant",
                 "update_enumeration",
-                "set_documentation"
+                "set_documentation",
+                "query_associations",
+                "manage_navigation"
             };
 
             return JsonSerializer.Serialize(new { tools = tools, status = "success" });
@@ -4067,6 +4069,132 @@ namespace MCPExtension.Tools
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error setting documentation");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        #endregion
+
+        #region Phase 15: Cross-Module Association Queries
+
+        public async Task<string> QueryAssociations(JsonObject parameters)
+        {
+            try
+            {
+                var entityName = parameters["entity_name"]?.ToString();
+                var secondEntity = parameters["second_entity"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+                var direction = parameters["direction"]?.ToString()?.ToLowerInvariant() ?? "both";
+
+                // Build entity-to-module lookup and collect all associations using entity-level API
+                var entityModuleMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var seenAssociations = new HashSet<string>(); // Deduplicate by association name
+                var allAssociations = new List<(IAssociation assoc, string parentEntity, string parentModule, string childEntity, string childModule)>();
+
+                var modules = _model.Root.GetModules();
+                foreach (var mod in modules)
+                {
+                    foreach (var entity in mod.DomainModel.GetEntities())
+                        entityModuleMap[entity.Name] = mod.Name;
+                }
+
+                // Collect all associations via entity.GetAssociations(Both)
+                foreach (var mod in modules)
+                {
+                    foreach (var entity in mod.DomainModel.GetEntities())
+                    {
+                        foreach (var ea in entity.GetAssociations(AssociationDirection.Both))
+                        {
+                            var assocName = ea.Association.Name;
+                            if (seenAssociations.Contains(assocName)) continue;
+                            seenAssociations.Add(assocName);
+
+                            allAssociations.Add((
+                                ea.Association,
+                                ea.Parent?.Name ?? "",
+                                entityModuleMap.GetValueOrDefault(ea.Parent?.Name ?? "", ""),
+                                ea.Child?.Name ?? "",
+                                entityModuleMap.GetValueOrDefault(ea.Child?.Name ?? "", "")
+                            ));
+                        }
+                    }
+                }
+
+                // Apply filters
+                IEnumerable<(IAssociation assoc, string parentEntity, string parentModule, string childEntity, string childModule)> filtered = allAssociations;
+
+                if (!string.IsNullOrEmpty(entityName) && !string.IsNullOrEmpty(secondEntity))
+                {
+                    // Find associations between two specific entities
+                    var (e1, _) = Utils.Utils.FindEntityAcrossModules(_model, entityName, moduleName);
+                    if (e1 == null)
+                        return JsonSerializer.Serialize(new { error = $"Entity '{entityName}' not found" });
+                    var (e2, _) = Utils.Utils.FindEntityAcrossModules(_model, secondEntity, null);
+                    if (e2 == null)
+                        return JsonSerializer.Serialize(new { error = $"Entity '{secondEntity}' not found" });
+
+                    filtered = filtered.Where(a =>
+                        (a.parentEntity.Equals(entityName, StringComparison.OrdinalIgnoreCase) && a.childEntity.Equals(secondEntity, StringComparison.OrdinalIgnoreCase)) ||
+                        (a.parentEntity.Equals(secondEntity, StringComparison.OrdinalIgnoreCase) && a.childEntity.Equals(entityName, StringComparison.OrdinalIgnoreCase)));
+                }
+                else if (!string.IsNullOrEmpty(entityName))
+                {
+                    // Find associations of a specific entity
+                    var (e, _) = Utils.Utils.FindEntityAcrossModules(_model, entityName, moduleName);
+                    if (e == null)
+                        return JsonSerializer.Serialize(new { error = $"Entity '{entityName}' not found" });
+
+                    filtered = direction switch
+                    {
+                        "parent" => filtered.Where(a => a.childEntity.Equals(entityName, StringComparison.OrdinalIgnoreCase)),
+                        "child" => filtered.Where(a => a.parentEntity.Equals(entityName, StringComparison.OrdinalIgnoreCase)),
+                        _ => filtered.Where(a =>
+                            a.parentEntity.Equals(entityName, StringComparison.OrdinalIgnoreCase) ||
+                            a.childEntity.Equals(entityName, StringComparison.OrdinalIgnoreCase))
+                    };
+                }
+                else if (!string.IsNullOrEmpty(moduleName))
+                {
+                    // Filter by module
+                    var module = modules.FirstOrDefault(m => m.Name.Equals(moduleName, StringComparison.OrdinalIgnoreCase));
+                    if (module == null)
+                        return JsonSerializer.Serialize(new { error = $"Module '{moduleName}' not found" });
+
+                    filtered = filtered.Where(a =>
+                        a.parentModule.Equals(moduleName, StringComparison.OrdinalIgnoreCase) ||
+                        a.childModule.Equals(moduleName, StringComparison.OrdinalIgnoreCase));
+                }
+
+                var associations = filtered.Select(a => new
+                {
+                    name = a.assoc.Name,
+                    parent = a.parentEntity,
+                    parentModule = a.parentModule,
+                    child = a.childEntity,
+                    childModule = a.childModule,
+                    type = a.assoc.Type.ToString(),
+                    owner = a.assoc.Owner.ToString(),
+                    parentDeleteBehavior = FormatDeletingBehavior(a.assoc.ParentDeleteBehavior),
+                    childDeleteBehavior = FormatDeletingBehavior(a.assoc.ChildDeleteBehavior)
+                }).ToList();
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    count = associations.Count,
+                    query = new
+                    {
+                        entityName,
+                        secondEntity,
+                        moduleName,
+                        direction
+                    },
+                    associations
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error querying associations");
                 return JsonSerializer.Serialize(new { error = ex.Message });
             }
         }

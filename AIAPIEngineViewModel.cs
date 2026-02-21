@@ -633,7 +633,7 @@ namespace MCPExtension
                             status = "running",
                             connectionInfo = parentPanel.McpServer.GetConnectionInfo(),
                             port = parentPanel.McpServer.Port,
-                            toolCount = 32,
+                            toolCount = parentPanel.McpServer?.RegisteredToolCount ?? 0,
                             sseConnections = parentPanel.McpServer.ActiveSseConnections,
                             totalToolCalls = parentPanel.McpServer.TotalToolCalls
                         });
@@ -779,7 +779,7 @@ namespace MCPExtension
                     status = "running",
                     connectionInfo = connectionInfo,
                     port = parentPanel.McpServer?.Port ?? 0,
-                    toolCount = 32,
+                    toolCount = parentPanel.McpServer?.RegisteredToolCount ?? 0,
                     sseConnections = parentPanel.McpServer?.ActiveSseConnections ?? 0,
                     totalToolCalls = parentPanel.McpServer?.TotalToolCalls ?? 0
                 });
