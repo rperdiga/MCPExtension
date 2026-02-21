@@ -1939,7 +1939,13 @@ namespace MCPExtension.Tools
                 "list_nanoflows",
                 "list_scheduled_events",
                 "list_rest_services",
-                "query_model_elements"
+                "query_model_elements",
+                "rename_entity",
+                "rename_attribute",
+                "rename_association",
+                "rename_document",
+                "rename_module",
+                "rename_enumeration_value"
             };
 
             return JsonSerializer.Serialize(new { tools = tools, status = "success" });
@@ -3118,6 +3124,392 @@ namespace MCPExtension.Tools
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error copying model element");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        #endregion
+
+        #region Phase 13: Rename & Refactor
+
+        public async Task<string> RenameEntity(JsonObject parameters)
+        {
+            try
+            {
+                var entityName = parameters["entity_name"]?.ToString();
+                var newName = parameters["new_name"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(entityName))
+                    return JsonSerializer.Serialize(new { error = "entity_name is required" });
+                if (string.IsNullOrEmpty(newName))
+                    return JsonSerializer.Serialize(new { error = "new_name is required" });
+
+                if (_nameValidationService != null)
+                {
+                    var validation = _nameValidationService.IsNameValid(newName);
+                    if (!validation.IsValid)
+                        return JsonSerializer.Serialize(new { error = $"Invalid name '{newName}': {validation.ErrorMessage}" });
+                }
+
+                var (entity, module) = Utils.Utils.FindEntityAcrossModules(_model, entityName, moduleName);
+                if (entity == null)
+                    return JsonSerializer.Serialize(new { error = $"Entity '{entityName}' not found{(moduleName != null ? $" in module '{moduleName}'" : "")}" });
+
+                var oldName = entity.Name;
+                using var transaction = _model.StartTransaction($"Rename entity '{oldName}' to '{newName}'");
+                entity.Name = newName;
+                transaction.Commit();
+
+                _logger.LogInformation($"Renamed entity '{oldName}' to '{newName}' in module '{module!.Name}'");
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = $"Entity renamed from '{oldName}' to '{newName}'",
+                    module = module.Name,
+                    oldName,
+                    newName,
+                    qualifiedName = $"{module.Name}.{newName}"
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error renaming entity");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> RenameAttribute(JsonObject parameters)
+        {
+            try
+            {
+                var entityName = parameters["entity_name"]?.ToString();
+                var attributeName = parameters["attribute_name"]?.ToString();
+                var newName = parameters["new_name"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(entityName))
+                    return JsonSerializer.Serialize(new { error = "entity_name is required" });
+                if (string.IsNullOrEmpty(attributeName))
+                    return JsonSerializer.Serialize(new { error = "attribute_name is required" });
+                if (string.IsNullOrEmpty(newName))
+                    return JsonSerializer.Serialize(new { error = "new_name is required" });
+
+                if (_nameValidationService != null)
+                {
+                    var validation = _nameValidationService.IsNameValid(newName);
+                    if (!validation.IsValid)
+                        return JsonSerializer.Serialize(new { error = $"Invalid name '{newName}': {validation.ErrorMessage}" });
+                }
+
+                var (entity, module) = Utils.Utils.FindEntityAcrossModules(_model, entityName, moduleName);
+                if (entity == null)
+                    return JsonSerializer.Serialize(new { error = $"Entity '{entityName}' not found{(moduleName != null ? $" in module '{moduleName}'" : "")}" });
+
+                var attribute = entity.GetAttributes()
+                    .FirstOrDefault(a => a.Name.Equals(attributeName, StringComparison.OrdinalIgnoreCase));
+                if (attribute == null)
+                    return JsonSerializer.Serialize(new { error = $"Attribute '{attributeName}' not found on entity '{entity.Name}'" });
+
+                var oldName = attribute.Name;
+                using var transaction = _model.StartTransaction($"Rename attribute '{oldName}' to '{newName}' on '{entity.Name}'");
+                attribute.Name = newName;
+                transaction.Commit();
+
+                _logger.LogInformation($"Renamed attribute '{oldName}' to '{newName}' on entity '{entity.Name}'");
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = $"Attribute renamed from '{oldName}' to '{newName}' on entity '{entity.Name}'",
+                    entity = entity.Name,
+                    module = module!.Name,
+                    oldName,
+                    newName
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error renaming attribute");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> RenameAssociation(JsonObject parameters)
+        {
+            try
+            {
+                var associationName = parameters["association_name"]?.ToString();
+                var newName = parameters["new_name"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(associationName))
+                    return JsonSerializer.Serialize(new { error = "association_name is required" });
+                if (string.IsNullOrEmpty(newName))
+                    return JsonSerializer.Serialize(new { error = "new_name is required" });
+
+                if (_nameValidationService != null)
+                {
+                    var validation = _nameValidationService.IsNameValid(newName);
+                    if (!validation.IsValid)
+                        return JsonSerializer.Serialize(new { error = $"Invalid name '{newName}': {validation.ErrorMessage}" });
+                }
+
+                // Search for the association across all entities in the target module(s)
+                IAssociation? foundAssociation = null;
+                IModule? foundModule = null;
+
+                var modules = moduleName != null
+                    ? new[] { Utils.Utils.ResolveModule(_model, moduleName) }.Where(m => m != null)
+                    : _model.Root.GetModules().Where(m => !m.FromAppStore);
+
+                foreach (var mod in modules)
+                {
+                    foreach (var entity in mod!.DomainModel.GetEntities())
+                    {
+                        var assoc = entity.GetAssociations(AssociationDirection.Both, null)
+                            .FirstOrDefault(a => a.Association.Name.Equals(associationName, StringComparison.OrdinalIgnoreCase));
+                        if (assoc != null)
+                        {
+                            foundAssociation = assoc.Association;
+                            foundModule = mod;
+                            break;
+                        }
+                    }
+                    if (foundAssociation != null) break;
+                }
+
+                if (foundAssociation == null)
+                    return JsonSerializer.Serialize(new { error = $"Association '{associationName}' not found{(moduleName != null ? $" in module '{moduleName}'" : "")}" });
+
+                var oldName = foundAssociation.Name;
+                using var transaction = _model.StartTransaction($"Rename association '{oldName}' to '{newName}'");
+                foundAssociation.Name = newName;
+                transaction.Commit();
+
+                _logger.LogInformation($"Renamed association '{oldName}' to '{newName}' in module '{foundModule!.Name}'");
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = $"Association renamed from '{oldName}' to '{newName}'",
+                    module = foundModule.Name,
+                    oldName,
+                    newName
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error renaming association");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> RenameDocument(JsonObject parameters)
+        {
+            try
+            {
+                var documentName = parameters["document_name"]?.ToString();
+                var newName = parameters["new_name"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+                var documentType = parameters["document_type"]?.ToString()?.ToLowerInvariant();
+
+                if (string.IsNullOrEmpty(documentName))
+                    return JsonSerializer.Serialize(new { error = "document_name is required" });
+                if (string.IsNullOrEmpty(newName))
+                    return JsonSerializer.Serialize(new { error = "new_name is required" });
+
+                if (_nameValidationService != null)
+                {
+                    var validation = _nameValidationService.IsNameValid(newName);
+                    if (!validation.IsValid)
+                        return JsonSerializer.Serialize(new { error = $"Invalid name '{newName}': {validation.ErrorMessage}" });
+                }
+
+                // Handle qualified name (Module.DocumentName)
+                if (documentName.Contains('.') && moduleName == null)
+                {
+                    var parts = documentName.Split('.', 2);
+                    moduleName = parts[0];
+                    documentName = parts[1];
+                }
+
+                var modules = moduleName != null
+                    ? new[] { Utils.Utils.ResolveModule(_model, moduleName) }.Where(m => m != null)
+                    : _model.Root.GetModules().Where(m => !m.FromAppStore);
+
+                IDocument? foundDoc = null;
+                IModule? foundModule = null;
+
+                foreach (var mod in modules)
+                {
+                    var docs = mod!.GetDocuments();
+
+                    // Filter by type if specified
+                    IEnumerable<IDocument> filtered = documentType switch
+                    {
+                        "microflow" => docs.OfType<IMicroflow>(),
+                        "constant" => docs.OfType<IConstant>(),
+                        "enumeration" => docs.OfType<IEnumeration>(),
+                        _ => docs
+                    };
+
+                    foundDoc = filtered.FirstOrDefault(d => d.Name.Equals(documentName, StringComparison.OrdinalIgnoreCase));
+                    if (foundDoc != null)
+                    {
+                        foundModule = mod;
+                        break;
+                    }
+                }
+
+                if (foundDoc == null)
+                    return JsonSerializer.Serialize(new { error = $"Document '{documentName}'{(documentType != null ? $" (type: {documentType})" : "")} not found{(moduleName != null ? $" in module '{moduleName}'" : "")}" });
+
+                var oldName = foundDoc.Name;
+                var detectedType = foundDoc.GetType().Name;
+                using var transaction = _model.StartTransaction($"Rename document '{oldName}' to '{newName}'");
+                foundDoc.Name = newName;
+                transaction.Commit();
+
+                _logger.LogInformation($"Renamed document '{oldName}' to '{newName}' in module '{foundModule!.Name}'");
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = $"Document renamed from '{oldName}' to '{newName}' (all by-name references updated)",
+                    module = foundModule.Name,
+                    documentType = detectedType,
+                    oldName,
+                    newName,
+                    qualifiedName = $"{foundModule.Name}.{newName}"
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error renaming document");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> RenameModule(JsonObject parameters)
+        {
+            try
+            {
+                var moduleName = parameters["module_name"]?.ToString();
+                var newName = parameters["new_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(moduleName))
+                    return JsonSerializer.Serialize(new { error = "module_name is required" });
+                if (string.IsNullOrEmpty(newName))
+                    return JsonSerializer.Serialize(new { error = "new_name is required" });
+
+                if (_nameValidationService != null)
+                {
+                    var validation = _nameValidationService.IsNameValid(newName);
+                    if (!validation.IsValid)
+                        return JsonSerializer.Serialize(new { error = $"Invalid name '{newName}': {validation.ErrorMessage}" });
+                }
+
+                var module = _model.Root.GetModules()
+                    .FirstOrDefault(m => m.Name.Equals(moduleName, StringComparison.OrdinalIgnoreCase));
+                if (module == null)
+                    return JsonSerializer.Serialize(new { error = $"Module '{moduleName}' not found" });
+
+                var oldName = module.Name;
+                using var transaction = _model.StartTransaction($"Rename module '{oldName}' to '{newName}'");
+                module.Name = newName;
+                transaction.Commit();
+
+                _logger.LogInformation($"Renamed module '{oldName}' to '{newName}' (all qualified references updated)");
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = $"Module renamed from '{oldName}' to '{newName}' (all qualified references updated)",
+                    oldName,
+                    newName
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error renaming module");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> RenameEnumerationValue(JsonObject parameters)
+        {
+            try
+            {
+                var enumerationName = parameters["enumeration_name"]?.ToString();
+                var valueName = parameters["value_name"]?.ToString();
+                var newName = parameters["new_name"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(enumerationName))
+                    return JsonSerializer.Serialize(new { error = "enumeration_name is required" });
+                if (string.IsNullOrEmpty(valueName))
+                    return JsonSerializer.Serialize(new { error = "value_name is required" });
+                if (string.IsNullOrEmpty(newName))
+                    return JsonSerializer.Serialize(new { error = "new_name is required" });
+
+                if (_nameValidationService != null)
+                {
+                    var validation = _nameValidationService.IsNameValid(newName);
+                    if (!validation.IsValid)
+                        return JsonSerializer.Serialize(new { error = $"Invalid name '{newName}': {validation.ErrorMessage}" });
+                }
+
+                // Handle qualified name (Module.EnumName)
+                if (enumerationName.Contains('.') && moduleName == null)
+                {
+                    var parts = enumerationName.Split('.', 2);
+                    moduleName = parts[0];
+                    enumerationName = parts[1];
+                }
+
+                IEnumeration? foundEnum = null;
+                IModule? foundModule = null;
+
+                var modules = moduleName != null
+                    ? new[] { Utils.Utils.ResolveModule(_model, moduleName) }.Where(m => m != null)
+                    : _model.Root.GetModules().Where(m => !m.FromAppStore);
+
+                foreach (var mod in modules)
+                {
+                    var en = _model.Root.GetModuleDocuments<IEnumeration>(mod!)
+                        .FirstOrDefault(e => e.Name.Equals(enumerationName, StringComparison.OrdinalIgnoreCase));
+                    if (en != null)
+                    {
+                        foundEnum = en;
+                        foundModule = mod;
+                        break;
+                    }
+                }
+
+                if (foundEnum == null)
+                    return JsonSerializer.Serialize(new { error = $"Enumeration '{enumerationName}' not found{(moduleName != null ? $" in module '{moduleName}'" : "")}" });
+
+                var value = foundEnum.GetValues()
+                    .FirstOrDefault(v => v.Name.Equals(valueName, StringComparison.OrdinalIgnoreCase));
+                if (value == null)
+                    return JsonSerializer.Serialize(new { error = $"Value '{valueName}' not found in enumeration '{foundEnum.Name}'" });
+
+                var oldValueName = value.Name;
+                using var transaction = _model.StartTransaction($"Rename enumeration value '{oldValueName}' to '{newName}' in '{foundEnum.Name}'");
+                value.Name = newName;
+                transaction.Commit();
+
+                _logger.LogInformation($"Renamed enumeration value '{oldValueName}' to '{newName}' in '{foundEnum.Name}'");
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = $"Enumeration value renamed from '{oldValueName}' to '{newName}' in '{foundEnum.Name}'",
+                    enumeration = foundEnum.Name,
+                    module = foundModule!.Name,
+                    oldName = oldValueName,
+                    newName
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error renaming enumeration value");
                 return JsonSerializer.Serialize(new { error = ex.Message });
             }
         }

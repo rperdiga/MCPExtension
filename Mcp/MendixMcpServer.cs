@@ -331,6 +331,38 @@ namespace MCPExtension
                 return (object)result;
             });
 
+            // Phase 13: Rename & Refactor
+            _mcpServer.RegisterTool("rename_entity", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.RenameEntity(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("rename_attribute", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.RenameAttribute(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("rename_association", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.RenameAssociation(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("rename_document", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.RenameDocument(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("rename_module", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.RenameModule(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("rename_enumeration_value", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.RenameEnumerationValue(parameters);
+                return (object)result;
+            });
+
             // Phase 12: Untyped Model Introspection
             _mcpServer.RegisterTool("read_security_info", async (JsonObject parameters) =>
             {
@@ -397,7 +429,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 50, // Phase 12: +5 untyped model introspection tools
+                registeredTools = 56, // Phase 13: +6 rename & refactor tools
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",

@@ -1251,7 +1251,13 @@ namespace MCPExtension.Tools
                     "list_nanoflows",
                     "list_scheduled_events",
                     "list_rest_services",
-                    "query_model_elements"
+                    "query_model_elements",
+                    "rename_entity",
+                    "rename_attribute",
+                    "rename_association",
+                    "rename_document",
+                    "rename_module",
+                    "rename_enumeration_value"
                 };
 
                 return JsonSerializer.Serialize(new { available_tools = tools });

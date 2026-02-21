@@ -638,6 +638,12 @@ namespace MCPExtension.MCP
                 "list_scheduled_events" => "List all scheduled events with their interval, type, and enabled status.",
                 "list_rest_services" => "List all published REST services with their paths, versions, authentication, and resources.",
                 "query_model_elements" => "Generic escape-hatch tool: query any metamodel type by name (e.g. 'Navigation$NavigationProfile', 'Microflows$Nanoflow', 'Pages$Page'). Returns names, qualified names, and optionally all properties. Future-proofs the extension for any model element type.",
+                "rename_entity" => "Rename an entity. All by-name references are automatically updated by the Mendix model.",
+                "rename_attribute" => "Rename an attribute on an entity. All references to this attribute are automatically updated.",
+                "rename_association" => "Rename an association. All references to this association are automatically updated.",
+                "rename_document" => "Rename a document (microflow, page, constant, enumeration, or any document type). All by-name references are automatically updated. Supports qualified names like 'Module.DocumentName'.",
+                "rename_module" => "Rename a module. All qualified references to the module and its documents are automatically updated.",
+                "rename_enumeration_value" => "Rename a value within an enumeration. Supports qualified enumeration names like 'Module.EnumName'.",
                 _ => "Tool description not available"
             };
         }
@@ -1332,6 +1338,74 @@ namespace MCPExtension.MCP
                         max_results = new { type = "integer", description = "Maximum number of results to return (default: 50)" }
                     },
                     required = new[] { "type_name" }
+                },
+                "rename_entity" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        entity_name = new { type = "string", description = "Name of the entity to rename" },
+                        new_name = new { type = "string", description = "New name for the entity" },
+                        module_name = new { type = "string", description = "Module containing the entity. Searches all modules if omitted." }
+                    },
+                    required = new[] { "entity_name", "new_name" }
+                },
+                "rename_attribute" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        entity_name = new { type = "string", description = "Name of the entity containing the attribute" },
+                        attribute_name = new { type = "string", description = "Current name of the attribute to rename" },
+                        new_name = new { type = "string", description = "New name for the attribute" },
+                        module_name = new { type = "string", description = "Module containing the entity. Searches all modules if omitted." }
+                    },
+                    required = new[] { "entity_name", "attribute_name", "new_name" }
+                },
+                "rename_association" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        association_name = new { type = "string", description = "Current name of the association to rename" },
+                        new_name = new { type = "string", description = "New name for the association" },
+                        module_name = new { type = "string", description = "Module containing the association. Searches all modules if omitted." }
+                    },
+                    required = new[] { "association_name", "new_name" }
+                },
+                "rename_document" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        document_name = new { type = "string", description = "Current name of the document (or qualified name like 'Module.Name')" },
+                        new_name = new { type = "string", description = "New name for the document" },
+                        module_name = new { type = "string", description = "Module containing the document. Searches all modules if omitted." },
+                        document_type = new { type = "string", description = "Optional type filter: 'microflow', 'constant', 'enumeration'. Searches all types if omitted." }
+                    },
+                    required = new[] { "document_name", "new_name" }
+                },
+                "rename_module" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Current name of the module to rename" },
+                        new_name = new { type = "string", description = "New name for the module" }
+                    },
+                    required = new[] { "module_name", "new_name" }
+                },
+                "rename_enumeration_value" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        enumeration_name = new { type = "string", description = "Name of the enumeration (or qualified name like 'Module.EnumName')" },
+                        value_name = new { type = "string", description = "Current name of the value to rename" },
+                        new_name = new { type = "string", description = "New name for the enumeration value" },
+                        module_name = new { type = "string", description = "Module containing the enumeration. Searches all modules if omitted." }
+                    },
+                    required = new[] { "enumeration_name", "value_name", "new_name" }
                 },
                 _ => new
                 {
