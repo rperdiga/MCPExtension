@@ -1267,7 +1267,10 @@ namespace MCPExtension.Tools
                     "manage_navigation",
                     "check_variable_name",
                     "modify_microflow_activity",
-                    "insert_before_activity"
+                    "insert_before_activity",
+                    "list_pages",
+                    "delete_document",
+                    "sync_filesystem"
                 };
 
                 return JsonSerializer.Serialize(new { available_tools = tools });
@@ -6238,6 +6241,197 @@ namespace MCPExtension.Tools
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error inserting activity before position");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        #endregion
+
+        #region Phase 17: Page & Document Management
+
+        public async Task<string> ListPages(JsonObject parameters)
+        {
+            try
+            {
+                var moduleName = parameters["module_name"]?.ToString();
+                var includeExcluded = parameters["include_excluded"]?.GetValue<bool>() ?? false;
+
+                var modules = _model.Root.GetModules();
+                var results = new List<object>();
+
+                IEnumerable<IModule> targetModules;
+                if (!string.IsNullOrEmpty(moduleName))
+                {
+                    var module = modules.FirstOrDefault(m => m.Name.Equals(moduleName, StringComparison.OrdinalIgnoreCase));
+                    if (module == null)
+                        return JsonSerializer.Serialize(new { error = $"Module '{moduleName}' not found" });
+                    targetModules = new[] { module };
+                }
+                else
+                {
+                    targetModules = modules;
+                }
+
+                foreach (var module in targetModules)
+                {
+                    var pages = new List<Mendix.StudioPro.ExtensionsAPI.Model.Pages.IPage>();
+
+                    // Get pages from root level
+                    pages.AddRange(module.GetDocuments().OfType<Mendix.StudioPro.ExtensionsAPI.Model.Pages.IPage>());
+
+                    // Get pages from subfolders recursively
+                    CollectPagesRecursive(module, pages);
+
+                    foreach (var page in pages)
+                    {
+                        if (!includeExcluded && page.Excluded)
+                            continue;
+
+                        results.Add(new
+                        {
+                            name = page.Name,
+                            module = module.Name,
+                            qualifiedName = $"{module.Name}.{page.Name}",
+                            excluded = page.Excluded
+                        });
+                    }
+                }
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    count = results.Count,
+                    moduleName = moduleName ?? "(all)",
+                    pages = results
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error listing pages");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        private void CollectPagesRecursive(IFolderBase parent, List<Mendix.StudioPro.ExtensionsAPI.Model.Pages.IPage> pages)
+        {
+            foreach (var folder in parent.GetFolders())
+            {
+                pages.AddRange(folder.GetDocuments().OfType<Mendix.StudioPro.ExtensionsAPI.Model.Pages.IPage>());
+                CollectPagesRecursive(folder, pages);
+            }
+        }
+
+        public async Task<string> DeleteDocument(JsonObject parameters)
+        {
+            try
+            {
+                var documentName = parameters["document_name"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+                var documentType = parameters["document_type"]?.ToString()?.ToLowerInvariant();
+
+                if (string.IsNullOrEmpty(documentName))
+                    return JsonSerializer.Serialize(new { error = "document_name is required" });
+                if (string.IsNullOrEmpty(moduleName))
+                    return JsonSerializer.Serialize(new { error = "module_name is required" });
+
+                var module = _model.Root.GetModules()
+                    .FirstOrDefault(m => m.Name.Equals(moduleName, StringComparison.OrdinalIgnoreCase));
+                if (module == null)
+                    return JsonSerializer.Serialize(new { error = $"Module '{moduleName}' not found" });
+
+                // Search for the document at root level first
+                IDocument? doc = null;
+                IFolderBase? parentFolder = null;
+
+                // Check root level
+                doc = module.GetDocuments().FirstOrDefault(d => d.Name.Equals(documentName, StringComparison.OrdinalIgnoreCase));
+                if (doc != null)
+                    parentFolder = module;
+
+                // Search in subfolders if not found
+                if (doc == null)
+                {
+                    (doc, parentFolder) = FindDocumentWithParent(module, documentName);
+                }
+
+                if (doc == null || parentFolder == null)
+                    return JsonSerializer.Serialize(new { error = $"Document '{documentName}' not found in module '{moduleName}'" });
+
+                // Optionally filter by type
+                if (!string.IsNullOrEmpty(documentType))
+                {
+                    bool typeMatch = documentType switch
+                    {
+                        "page" => doc is Mendix.StudioPro.ExtensionsAPI.Model.Pages.IPage,
+                        "microflow" => doc is IMicroflow,
+                        _ => true
+                    };
+                    if (!typeMatch)
+                        return JsonSerializer.Serialize(new { error = $"Document '{documentName}' exists but is not a {documentType}" });
+                }
+
+                var docTypeName = doc switch
+                {
+                    Mendix.StudioPro.ExtensionsAPI.Model.Pages.IPage => "page",
+                    IMicroflow => "microflow",
+                    _ => doc.GetType().Name
+                };
+
+                using var transaction = _model.StartTransaction($"Delete {docTypeName} '{documentName}'");
+                parentFolder.RemoveDocument(doc);
+                transaction.Commit();
+
+                _logger.LogInformation($"Deleted {docTypeName} '{documentName}' from module '{moduleName}'");
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = $"Deleted {docTypeName} '{documentName}' from module '{moduleName}'",
+                    deletedDocument = documentName,
+                    documentType = docTypeName,
+                    module = moduleName
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error deleting document");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        private (IDocument? doc, IFolderBase? parent) FindDocumentWithParent(IFolderBase parent, string documentName)
+        {
+            foreach (var folder in parent.GetFolders())
+            {
+                var doc = folder.GetDocuments().FirstOrDefault(d => d.Name.Equals(documentName, StringComparison.OrdinalIgnoreCase));
+                if (doc != null) return (doc, folder);
+                var result = FindDocumentWithParent(folder, documentName);
+                if (result.doc != null) return result;
+            }
+            return (null, null);
+        }
+
+        public async Task<string> SyncFilesystem(JsonObject parameters)
+        {
+            try
+            {
+                // IAppService is a UI service — try to get it from service provider
+                var appService = _serviceProvider?.GetService<IAppService>();
+
+                if (appService == null)
+                    return JsonSerializer.Serialize(new { error = "IAppService is not available. This service may not be accessible from extensions." });
+
+                appService.SynchronizeWithFileSystem(_model);
+
+                _logger.LogInformation("Synchronized model with file system");
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = "Synchronized model with file system. JavaScript actions, widgets, and other file-based changes have been imported."
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error synchronizing with file system");
                 return JsonSerializer.Serialize(new { error = ex.Message });
             }
         }

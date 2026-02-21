@@ -449,6 +449,25 @@ namespace MCPExtension
                 return (object)result;
             });
 
+            // Phase 17: Page & Document Management
+            _mcpServer.RegisterTool("list_pages", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ListPages(parameters);
+                return (object)result;
+            });
+
+            _mcpServer.RegisterTool("delete_document", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.DeleteDocument(parameters);
+                return (object)result;
+            });
+
+            _mcpServer.RegisterTool("sync_filesystem", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.SyncFilesystem(parameters);
+                return (object)result;
+            });
+
             _logger.LogInformation("MCP tools registered successfully");
         }
 
@@ -488,7 +507,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 66, // Phase 16: +3 microflow manipulation tools
+                registeredTools = 69, // Phase 17: +3 page & document management tools
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",

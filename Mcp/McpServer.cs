@@ -655,6 +655,9 @@ namespace MCPExtension.MCP
                 "check_variable_name" => "Check if a variable name is already in use in a microflow. Returns whether the name is available, lists existing variables, and suggests an alternative if the name is taken.",
                 "modify_microflow_activity" => "Modify properties of an existing microflow activity by position. Supports changing caption, disabled state, output_variable, commit mode, refresh_in_client, and other action-specific properties. Use read_microflow_details first to see activity positions.",
                 "insert_before_activity" => "Insert a new activity before a specific position in a microflow. Uses the same activity format as add_microflow_activity. Use read_microflow_details to find the target position.",
+                "list_pages" => "List all pages in a module or across all modules. Returns page name, module, qualified name, and excluded status.",
+                "delete_document" => "Delete a document (page, microflow, or any document type) from a module. Searches recursively in subfolders. Optionally filter by document_type to prevent accidental deletion of wrong type.",
+                "sync_filesystem" => "Synchronize model with the file system. Imports changes from JavaScript actions, widgets, and other file-based resources. Equivalent to 'Synchronize App Directory' menu item.",
                 _ => "Tool description not available"
             };
         }
@@ -1573,6 +1576,33 @@ namespace MCPExtension.MCP
                         }
                     },
                     required = new[] { "microflow_name", "before_position", "activity" }
+                },
+                "list_pages" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Module to list pages from (optional, lists all modules if omitted)" },
+                        include_excluded = new { type = "boolean", description = "Include excluded pages (default: false)" }
+                    },
+                    required = new string[0]
+                },
+                "delete_document" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        document_name = new { type = "string", description = "Name of the document to delete" },
+                        module_name = new { type = "string", description = "Module containing the document" },
+                        document_type = new { type = "string", description = "Optional type filter: 'page' or 'microflow'. Prevents accidental deletion of wrong type." }
+                    },
+                    required = new[] { "document_name", "module_name" }
+                },
+                "sync_filesystem" => new
+                {
+                    type = "object",
+                    properties = new { },
+                    required = new string[0]
                 },
                 _ => new
                 {

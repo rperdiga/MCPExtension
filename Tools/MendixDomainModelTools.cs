@@ -1955,7 +1955,10 @@ namespace MCPExtension.Tools
                 "manage_navigation",
                 "check_variable_name",
                 "modify_microflow_activity",
-                "insert_before_activity"
+                "insert_before_activity",
+                "list_pages",
+                "delete_document",
+                "sync_filesystem"
             };
 
             return JsonSerializer.Serialize(new { tools = tools, status = "success" });
