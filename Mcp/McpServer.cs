@@ -619,7 +619,7 @@ namespace MCPExtension.MCP
                 "debug_info" => "Get comprehensive debug information about the domain model. Specify module_name to target a specific module.",
                 "read_microflow_details" => "Get details about a specific microflow including activities with their positions. Specify module_name to target a specific module.",
                 "create_microflow" => "Create a new microflow in the module with parameters and return type. Specify module_name to target a specific module.",
-                "create_microflow_activities" => "Create one or more microflow activities in sequence within an existing microflow. IMPORTANT: Mendix expressions use single quotes for string literals (e.g. 'Hello World'), not double quotes. Double quotes are auto-converted to single quotes as a convenience. Supported activity_type values: create_object (entity, variableName, commit, refresh_in_client, initial_values:[{attribute,value}]), change_attribute, change_association, commit, rollback, delete, retrieve_from_database, retrieve_by_association (association_name, output_variable, input_variable, module_name), microflow_call (microflow_name or Module.MicroflowName, return_variable, parameters:[{name,value}]), create_list (entity, output_variable), change_list (list_variable, operation:add/remove/clear/set, change_value), sort_list (list_variable, entity, sort_by:[{attribute,descending}], output_variable), filter_list (list_variable, entity, attribute, filter_expression, output_variable), find_in_list (list_variable, expression; optionally entity+attribute for find-by-attribute), aggregate_list (list_variable, function:count/sum/average/min/max/all/any; optionally entity+attribute for by-attribute, or expression for by-expression), show_message, log_message. Specify module_name to target a specific module.",
+                "create_microflow_activities" => "Create one or more microflow activities in sequence within an existing microflow. IMPORTANT: Mendix expressions use single quotes for string literals (e.g. 'Hello World'), not double quotes. Double quotes are auto-converted to single quotes as a convenience. Supported activity_type values: create_object (entity, variableName, commit, refresh_in_client, initial_values:[{attribute,value}]), change_attribute, change_association, commit, rollback, delete, retrieve_from_database, retrieve_by_association (association_name, output_variable, input_variable, module_name), microflow_call (microflow_name or Module.MicroflowName, return_variable, parameters:[{name,value}]), create_list (entity, output_variable), change_list (list_variable, operation:add/remove/clear/set, change_value), sort_list (list_variable, entity, sort_by:[{attribute,descending}], output_variable), filter_list (list_variable, entity, attribute, filter_expression, output_variable), find_in_list (list_variable, expression; optionally entity+attribute for find-by-attribute), aggregate_list (list_variable, function:count/sum/average/min/max/all/any; optionally entity+attribute for by-attribute, or expression for by-expression), show_message, log_message, union_lists (list_variable, second_list_variable, output_variable), subtract_lists, intersect_lists, contains_in_list, head_of_list (list_variable, output_variable), tail_of_list, reduce_list (list_variable, output_variable, initial_value, expression, return_type:integer/decimal/string/boolean). Specify module_name to target a specific module.",
                 "configure_system_attributes" => "Toggle system attributes on a root entity (no generalization): HasCreatedDate, HasChangedDate, HasOwner, HasChangedBy, Persistable. Only works on entities without a generalization (inheriting entities get system attrs from parent).",
                 "manage_folders" => "Create, list, or move documents between folders within a module. Actions: 'list' (show all folders and documents), 'create' (create a new folder), 'move_document' (move a document into a folder).",
                 "validate_name" => "Validate a candidate name for a Mendix model element. Returns whether the name is valid and optionally auto-fixes it to a valid name.",
@@ -630,6 +630,9 @@ namespace MCPExtension.MCP
                 "read_configurations" => "List run configurations with their application root URLs, custom settings, and constant value overrides.",
                 "set_configuration" => "Create or update a run configuration with application root URL and custom settings. Creates the configuration if it doesn't exist.",
                 "read_version_control" => "Read version control status: whether the project is under VC, current branch name, and head commit details (ID, author, date, message).",
+                "set_microflow_url" => "Read or set the URL of a microflow. When a URL is set, the microflow is exposed as a REST endpoint. Omit 'url' to read, provide it to set (empty string to clear).",
+                "list_rules" => "List validation rules (special server-side microflows) across modules or in a specific module.",
+                "exclude_document" => "Mark a document (microflow, page, etc.) as excluded from the project, or un-exclude it. Excluded documents are not compiled or deployed.",
                 _ => "Tool description not available"
             };
         }
@@ -1245,6 +1248,37 @@ namespace MCPExtension.MCP
                     type = "object",
                     properties = new { },
                     required = new string[0]
+                },
+                "set_microflow_url" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        microflow_name = new { type = "string", description = "Name of the microflow" },
+                        module_name = new { type = "string", description = "Module containing the microflow (searches all if omitted)" },
+                        url = new { type = "string", description = "URL to set (e.g. '/api/v1/myendpoint'). Omit to read current URL. Set empty string to clear." }
+                    },
+                    required = new[] { "microflow_name" }
+                },
+                "list_rules" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Module to list rules from. Lists all modules if omitted." }
+                    },
+                    required = new string[0]
+                },
+                "exclude_document" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        document_name = new { type = "string", description = "Name of the document to exclude/include" },
+                        module_name = new { type = "string", description = "Module containing the document (searches all if omitted)" },
+                        excluded = new { type = "boolean", description = "True to exclude, false to include (default: true)" }
+                    },
+                    required = new[] { "document_name" }
                 },
                 _ => new
                 {

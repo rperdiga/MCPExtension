@@ -1890,7 +1890,10 @@ namespace MCPExtension.Tools
                 "set_runtime_settings",
                 "read_configurations",
                 "set_configuration",
-                "read_version_control"
+                "read_version_control",
+                "set_microflow_url",
+                "list_rules",
+                "exclude_document"
             };
 
             return JsonSerializer.Serialize(new { tools = tools, status = "success" });

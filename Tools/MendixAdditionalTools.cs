@@ -14,6 +14,7 @@ using Mendix.StudioPro.ExtensionsAPI.Model.DomainModels;
 using Mendix.StudioPro.ExtensionsAPI.Model.JavaActions;
 using Mendix.StudioPro.ExtensionsAPI.Model.Settings;
 using Mendix.StudioPro.ExtensionsAPI.Model.Constants;
+using Mendix.StudioPro.ExtensionsAPI.Model.DataTypes;
 using Mendix.StudioPro.ExtensionsAPI.Services;
 using Mendix.StudioPro.ExtensionsAPI.UI.Services;
 using Microsoft.Extensions.Logging;
@@ -918,7 +919,10 @@ namespace MCPExtension.Tools
                     "set_runtime_settings",
                     "read_configurations",
                     "set_configuration",
-                    "read_version_control"
+                    "read_version_control",
+                    "set_microflow_url",
+                    "list_rules",
+                    "exclude_document"
                 };
 
                 return JsonSerializer.Serialize(new { available_tools = tools });
@@ -1503,13 +1507,51 @@ namespace MCPExtension.Tools
                             activity = CreateChangeAssociationActivity(activityData);
                             break;
 
+                        // Phase 11: Advanced list operations
+                        case "union_lists":
+                        case "union":
+                            activity = CreateBinaryListOperationActivity<IUnion>(activityData);
+                            break;
+
+                        case "subtract_lists":
+                        case "subtract":
+                            activity = CreateBinaryListOperationActivity<ISubtract>(activityData);
+                            break;
+
+                        case "intersect_lists":
+                        case "intersect":
+                            activity = CreateBinaryListOperationActivity<IIntersect>(activityData);
+                            break;
+
+                        case "contains_in_list":
+                        case "contains":
+                            activity = CreateBinaryListOperationActivity<IContains>(activityData);
+                            break;
+
+                        case "head_of_list":
+                        case "head":
+                            activity = CreateUnaryListOperationActivity<IHead>(activityData);
+                            break;
+
+                        case "tail_of_list":
+                        case "tail":
+                            activity = CreateUnaryListOperationActivity<ITail>(activityData);
+                            break;
+
+                        case "reduce_list":
+                        case "reduce":
+                            activity = CreateReduceListActivity(activityData);
+                            break;
+
                         default:
                             var supportedTypes = new[]
                             {
                                 "create_object/create_variable", "microflow_call/call_microflow", "change_variable/change_value",
-                                "retrieve_from_database", "retrieve_by_association", "commit_object/commit_objects/commit", "rollback_object/rollback", 
+                                "retrieve_from_database", "retrieve_by_association", "commit_object/commit_objects/commit", "rollback_object/rollback",
                                 "delete_object/delete", "create_list/new_list", "change_list/modify_list", "sort_list", "filter_list",
-                                "find_in_list", "aggregate_list", "java_action_call", "change_attribute", "change_association", "change_object"
+                                "find_in_list", "aggregate_list", "java_action_call", "change_attribute", "change_association", "change_object",
+                                "union_lists/union", "subtract_lists/subtract", "intersect_lists/intersect",
+                                "contains_in_list/contains", "head_of_list/head", "tail_of_list/tail", "reduce_list/reduce"
                             };
                             
                             var error = $"Unsupported activity type: '{activityType}'. " +
@@ -3048,8 +3090,131 @@ namespace MCPExtension.Tools
             }
         }
 
-        // Placeholder - not in Phase 4 scope
+        // Placeholder - java_action_call needs full parameter mapping support
         private IActionActivity? CreateJavaActionCallActivity(JsonObject? activityData) => null;
+
+        // Phase 11: Binary list operations (union, subtract, intersect, contains)
+        private IActionActivity? CreateBinaryListOperationActivity<T>(JsonObject? activityData) where T : class, IBinaryListOperation
+        {
+            try
+            {
+                var microflowActivitiesService = _serviceProvider?.GetService<IMicroflowActivitiesService>();
+                if (microflowActivitiesService == null)
+                {
+                    SetLastError("IMicroflowActivitiesService not available");
+                    return null;
+                }
+
+                string listVariable = activityData?["list_variable"]?.ToString() ??
+                                     activityData?["listVariable"]?.ToString() ??
+                                     throw new ArgumentException("list_variable is required");
+
+                string secondVariable = activityData?["second_list_variable"]?.ToString() ??
+                                       activityData?["secondListVariable"]?.ToString() ??
+                                       activityData?["second_variable"]?.ToString() ??
+                                       throw new ArgumentException("second_list_variable is required");
+
+                string outputVariable = activityData?["output_variable"]?.ToString() ??
+                                       activityData?["outputVariable"]?.ToString() ??
+                                       "ListOperationResult";
+
+                var operation = _model.Create<T>();
+                ((IBinaryListOperation)operation).SecondListOrObjectVariableName = secondVariable;
+
+                _logger.LogInformation($"Creating {typeof(T).Name} list operation: list='{listVariable}', second='{secondVariable}', output='{outputVariable}'");
+                return microflowActivitiesService.CreateListOperationActivity(
+                    _model, listVariable, outputVariable, (IListOperation)operation);
+            }
+            catch (Exception ex)
+            {
+                SetLastError($"Failed to create {typeof(T).Name} activity: {ex.Message}", ex);
+                return null;
+            }
+        }
+
+        // Phase 11: Unary list operations (head, tail)
+        private IActionActivity? CreateUnaryListOperationActivity<T>(JsonObject? activityData) where T : class, IListOperation
+        {
+            try
+            {
+                var microflowActivitiesService = _serviceProvider?.GetService<IMicroflowActivitiesService>();
+                if (microflowActivitiesService == null)
+                {
+                    SetLastError("IMicroflowActivitiesService not available");
+                    return null;
+                }
+
+                string listVariable = activityData?["list_variable"]?.ToString() ??
+                                     activityData?["listVariable"]?.ToString() ??
+                                     throw new ArgumentException("list_variable is required");
+
+                string outputVariable = activityData?["output_variable"]?.ToString() ??
+                                       activityData?["outputVariable"]?.ToString() ??
+                                       "ListOperationResult";
+
+                var operation = _model.Create<T>();
+
+                _logger.LogInformation($"Creating {typeof(T).Name} list operation: list='{listVariable}', output='{outputVariable}'");
+                return microflowActivitiesService.CreateListOperationActivity(
+                    _model, listVariable, outputVariable, (IListOperation)operation);
+            }
+            catch (Exception ex)
+            {
+                SetLastError($"Failed to create {typeof(T).Name} activity: {ex.Message}", ex);
+                return null;
+            }
+        }
+
+        // Phase 11: Reduce list activity
+        private IActionActivity? CreateReduceListActivity(JsonObject? activityData)
+        {
+            try
+            {
+                var microflowActivitiesService = _serviceProvider?.GetService<IMicroflowActivitiesService>();
+                var microflowExpressionService = _serviceProvider?.GetService<IMicroflowExpressionService>();
+                if (microflowActivitiesService == null || microflowExpressionService == null)
+                {
+                    SetLastError("IMicroflowActivitiesService or IMicroflowExpressionService not available");
+                    return null;
+                }
+
+                string listVariable = activityData?["list_variable"]?.ToString() ??
+                                     throw new ArgumentException("list_variable is required");
+
+                string outputVariable = activityData?["output_variable"]?.ToString() ?? "ReduceResult";
+
+                string initialValueExpr = activityData?["initial_value"]?.ToString() ??
+                                         throw new ArgumentException("initial_value expression is required");
+
+                string reduceExpr = activityData?["expression"]?.ToString() ??
+                                   throw new ArgumentException("expression is required for reduce");
+
+                string returnTypeStr = activityData?["return_type"]?.ToString()?.ToLowerInvariant() ?? "integer";
+
+                var initialExpression = microflowExpressionService.CreateFromString(NormalizeMendixExpression(initialValueExpr));
+                var expression = microflowExpressionService.CreateFromString(NormalizeMendixExpression(reduceExpr));
+
+                DataType dataType;
+                switch (returnTypeStr)
+                {
+                    case "integer": case "int": dataType = DataType.Integer; break;
+                    case "decimal": dataType = DataType.Decimal; break;
+                    case "boolean": case "bool": dataType = DataType.Boolean; break;
+                    case "string": dataType = DataType.String; break;
+                    case "float": dataType = DataType.Float; break;
+                    default: dataType = DataType.Integer; break;
+                }
+
+                _logger.LogInformation($"Creating reduce list activity: list='{listVariable}', output='{outputVariable}', returnType='{returnTypeStr}'");
+                return microflowActivitiesService.CreateReduceAggregateActivity(
+                    _model, listVariable, outputVariable, initialExpression, expression, dataType);
+            }
+            catch (Exception ex)
+            {
+                SetLastError($"Failed to create reduce list activity: {ex.Message}", ex);
+                return null;
+            }
+        }
 
         #endregion
 
@@ -3865,15 +4030,46 @@ namespace MCPExtension.Tools
                 case "change_object":
                     return CreateChangeObjectActivity(activityConfig);
 
+                // Phase 11: Advanced list operations
+                case "union_lists":
+                case "union":
+                    return CreateBinaryListOperationActivity<IUnion>(activityConfig);
+
+                case "subtract_lists":
+                case "subtract":
+                    return CreateBinaryListOperationActivity<ISubtract>(activityConfig);
+
+                case "intersect_lists":
+                case "intersect":
+                    return CreateBinaryListOperationActivity<IIntersect>(activityConfig);
+
+                case "contains_in_list":
+                case "contains":
+                    return CreateBinaryListOperationActivity<IContains>(activityConfig);
+
+                case "head_of_list":
+                case "head":
+                    return CreateUnaryListOperationActivity<IHead>(activityConfig);
+
+                case "tail_of_list":
+                case "tail":
+                    return CreateUnaryListOperationActivity<ITail>(activityConfig);
+
+                case "reduce_list":
+                case "reduce":
+                    return CreateReduceListActivity(activityConfig);
+
                 default:
                     var supportedTypes = new[]
                     {
-                        "log/log_message", "change_variable/change_value", "create_variable/create_object/create", 
+                        "log/log_message", "change_variable/change_value", "create_variable/create_object/create",
                         "microflow_call/call_microflow", "retrieve_from_database/retrieve_database/database_retrieve",
                         "retrieve_by_association/association_retrieve", "commit_object/commit", "rollback_object/rollback",
                         "delete_object/delete", "create_list/new_list", "change_list/modify_list", "sort_list", "filter_list",
                         "find_in_list/find_list_item", "aggregate_list/list_aggregate", "java_action_call/call_java_action",
-                        "change_attribute", "change_association", "change_object"
+                        "change_attribute", "change_association", "change_object",
+                        "union_lists/union", "subtract_lists/subtract", "intersect_lists/intersect",
+                        "contains_in_list/contains", "head_of_list/head", "tail_of_list/tail", "reduce_list/reduce"
                     };
                     
                     _logger.LogError($"Unsupported activity type: '{activityType}'. Supported types: {string.Join(", ", supportedTypes)}");
@@ -4487,6 +4683,159 @@ namespace MCPExtension.Tools
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error reading version control info");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        #endregion
+
+        #region Phase 11: Advanced Microflow Operations
+
+        public async Task<string> SetMicroflowUrl(JsonObject parameters)
+        {
+            try
+            {
+                var microflowName = parameters["microflow_name"]?.ToString();
+                if (string.IsNullOrEmpty(microflowName))
+                    return JsonSerializer.Serialize(new { error = "microflow_name is required" });
+
+                var moduleName = parameters?["module_name"]?.ToString();
+                IMicroflow? microflow = null;
+
+                var modules = string.IsNullOrEmpty(moduleName)
+                    ? Utils.Utils.GetAllNonAppStoreModules(_model).ToList()
+                    : new List<Mendix.StudioPro.ExtensionsAPI.Model.Projects.IModule> { Utils.Utils.ResolveModule(_model, moduleName) };
+
+                foreach (var module in modules.Where(m => m != null))
+                {
+                    microflow = module.GetDocuments().OfType<IMicroflow>()
+                        .FirstOrDefault(m => m.Name.Equals(microflowName, StringComparison.OrdinalIgnoreCase));
+                    if (microflow != null) break;
+                }
+
+                if (microflow == null)
+                    return JsonSerializer.Serialize(new { error = $"Microflow '{microflowName}' not found" });
+
+                if (parameters.ContainsKey("url"))
+                {
+                    var url = parameters["url"]?.ToString() ?? "";
+                    using var transaction = _model.StartTransaction($"Set microflow URL for '{microflowName}'");
+                    microflow.Url = url;
+                    transaction.Commit();
+
+                    return JsonSerializer.Serialize(new
+                    {
+                        success = true,
+                        microflow = microflowName,
+                        url = microflow.Url,
+                        message = string.IsNullOrEmpty(url) ? "URL cleared" : $"URL set to '{url}'"
+                    });
+                }
+                else
+                {
+                    return JsonSerializer.Serialize(new
+                    {
+                        success = true,
+                        microflow = microflowName,
+                        url = microflow.Url
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error setting microflow URL");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> ListRules(JsonObject parameters)
+        {
+            try
+            {
+                var moduleName = parameters?["module_name"]?.ToString();
+                var modules = string.IsNullOrEmpty(moduleName)
+                    ? Utils.Utils.GetAllNonAppStoreModules(_model).ToList()
+                    : new List<Mendix.StudioPro.ExtensionsAPI.Model.Projects.IModule> { Utils.Utils.ResolveModule(_model, moduleName) };
+
+                modules.RemoveAll(m => m == null);
+                if (!modules.Any())
+                    return JsonSerializer.Serialize(new { error = $"Module '{moduleName}' not found" });
+
+                var result = new List<object>();
+                foreach (var module in modules)
+                {
+                    var rules = _model.Root.GetModuleDocuments<IRule>(module);
+                    foreach (var rule in rules)
+                    {
+                        result.Add(new
+                        {
+                            name = rule.Name,
+                            qualifiedName = rule.QualifiedName?.ToString(),
+                            module = module.Name
+                        });
+                    }
+                }
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    totalRules = result.Count,
+                    rules = result
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error listing rules");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> ExcludeDocument(JsonObject parameters)
+        {
+            try
+            {
+                var documentName = parameters["document_name"]?.ToString();
+                if (string.IsNullOrEmpty(documentName))
+                    return JsonSerializer.Serialize(new { error = "document_name is required" });
+
+                var moduleName = parameters?["module_name"]?.ToString();
+                var excluded = parameters?["excluded"]?.GetValue<bool>() ?? true;
+
+                var modules = string.IsNullOrEmpty(moduleName)
+                    ? Utils.Utils.GetAllNonAppStoreModules(_model).ToList()
+                    : new List<Mendix.StudioPro.ExtensionsAPI.Model.Projects.IModule> { Utils.Utils.ResolveModule(_model, moduleName) };
+
+                Mendix.StudioPro.ExtensionsAPI.Model.Projects.IDocument? doc = null;
+                string? foundModule = null;
+                foreach (var module in modules.Where(m => m != null))
+                {
+                    doc = module.GetDocuments()
+                        .FirstOrDefault(d => d.Name.Equals(documentName, StringComparison.OrdinalIgnoreCase));
+                    if (doc != null)
+                    {
+                        foundModule = module.Name;
+                        break;
+                    }
+                }
+
+                if (doc == null)
+                    return JsonSerializer.Serialize(new { error = $"Document '{documentName}' not found" });
+
+                using var transaction = _model.StartTransaction($"Set excluded={excluded} for '{documentName}'");
+                doc.Excluded = excluded;
+                transaction.Commit();
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    document = documentName,
+                    module = foundModule,
+                    excluded = doc.Excluded
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error excluding document");
                 return JsonSerializer.Serialize(new { error = ex.Message });
             }
         }

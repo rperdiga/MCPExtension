@@ -314,6 +314,23 @@ namespace MCPExtension
                 return (object)result;
             });
 
+            // Phase 11: Advanced Microflow Operations
+            _mcpServer.RegisterTool("set_microflow_url", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.SetMicroflowUrl(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("list_rules", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ListRules(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("exclude_document", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ExcludeDocument(parameters);
+                return (object)result;
+            });
+
             _logger.LogInformation("MCP tools registered successfully");
         }
 
@@ -353,7 +370,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 42, // Phase 10: +5 project settings & runtime tools
+                registeredTools = 45, // Phase 11: +3 advanced microflow tools (+7 activity sub-types)
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",
