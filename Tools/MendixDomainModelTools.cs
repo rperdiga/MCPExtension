@@ -4146,8 +4146,8 @@ namespace MCPExtension.Tools
 
                     filtered = direction switch
                     {
-                        "parent" => filtered.Where(a => a.childEntity.Equals(entityName, StringComparison.OrdinalIgnoreCase)),
-                        "child" => filtered.Where(a => a.parentEntity.Equals(entityName, StringComparison.OrdinalIgnoreCase)),
+                        "parent" => filtered.Where(a => a.parentEntity.Equals(entityName, StringComparison.OrdinalIgnoreCase)),
+                        "child" => filtered.Where(a => a.childEntity.Equals(entityName, StringComparison.OrdinalIgnoreCase)),
                         _ => filtered.Where(a =>
                             a.parentEntity.Equals(entityName, StringComparison.OrdinalIgnoreCase) ||
                             a.childEntity.Equals(entityName, StringComparison.OrdinalIgnoreCase))

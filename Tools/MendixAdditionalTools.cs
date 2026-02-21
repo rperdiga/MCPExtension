@@ -5713,6 +5713,11 @@ namespace MCPExtension.Tools
                     var page = module.GetDocuments().OfType<Mendix.StudioPro.ExtensionsAPI.Model.Pages.IPage>()
                         .FirstOrDefault(p => p.Name.Equals(pageName, StringComparison.OrdinalIgnoreCase));
                     if (page == null)
+                    {
+                        // Search recursively in subfolders
+                        page = FindPageRecursive(module, pageName);
+                    }
+                    if (page == null)
                         return JsonSerializer.Serialize(new { error = $"Page '{pageName}' not found in module '{moduleName}'" });
 
                     resolvedPages.Add((caption, page));
@@ -5733,6 +5738,19 @@ namespace MCPExtension.Tools
                 _logger.LogError(ex, "Error managing navigation");
                 return JsonSerializer.Serialize(new { error = ex.Message });
             }
+        }
+
+        private Mendix.StudioPro.ExtensionsAPI.Model.Pages.IPage? FindPageRecursive(IFolderBase parent, string pageName)
+        {
+            foreach (var folder in parent.GetFolders())
+            {
+                var page = folder.GetDocuments().OfType<Mendix.StudioPro.ExtensionsAPI.Model.Pages.IPage>()
+                    .FirstOrDefault(p => p.Name.Equals(pageName, StringComparison.OrdinalIgnoreCase));
+                if (page != null) return page;
+                var found = FindPageRecursive(folder, pageName);
+                if (found != null) return found;
+            }
+            return null;
         }
 
         #endregion
