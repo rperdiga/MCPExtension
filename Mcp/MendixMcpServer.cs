@@ -430,6 +430,25 @@ namespace MCPExtension
                 return (object)result;
             });
 
+            // Phase 16: Microflow Manipulation
+            _mcpServer.RegisterTool("check_variable_name", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.CheckVariableName(parameters);
+                return (object)result;
+            });
+
+            _mcpServer.RegisterTool("modify_microflow_activity", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ModifyMicroflowActivity(parameters);
+                return (object)result;
+            });
+
+            _mcpServer.RegisterTool("insert_before_activity", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.InsertBeforeActivity(parameters);
+                return (object)result;
+            });
+
             _logger.LogInformation("MCP tools registered successfully");
         }
 
@@ -469,7 +488,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 63, // Phase 15: +2 association queries & navigation tools
+                registeredTools = 66, // Phase 16: +3 microflow manipulation tools
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",

@@ -1952,7 +1952,10 @@ namespace MCPExtension.Tools
                 "update_enumeration",
                 "set_documentation",
                 "query_associations",
-                "manage_navigation"
+                "manage_navigation",
+                "check_variable_name",
+                "modify_microflow_activity",
+                "insert_before_activity"
             };
 
             return JsonSerializer.Serialize(new { tools = tools, status = "success" });

@@ -1264,7 +1264,10 @@ namespace MCPExtension.Tools
                     "update_enumeration",
                     "set_documentation",
                     "query_associations",
-                    "manage_navigation"
+                    "manage_navigation",
+                    "check_variable_name",
+                    "modify_microflow_activity",
+                    "insert_before_activity"
                 };
 
                 return JsonSerializer.Serialize(new { available_tools = tools });
@@ -5751,6 +5754,492 @@ namespace MCPExtension.Tools
                 if (found != null) return found;
             }
             return null;
+        }
+
+        #endregion
+
+        #region Phase 16: Microflow Manipulation
+
+        public async Task<string> CheckVariableName(JsonObject parameters)
+        {
+            try
+            {
+                var microflowName = parameters["microflow_name"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+                var variableName = parameters["variable_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(microflowName))
+                    return JsonSerializer.Serialize(new { error = "microflow_name is required" });
+                if (string.IsNullOrEmpty(variableName))
+                    return JsonSerializer.Serialize(new { error = "variable_name is required" });
+
+                // Support qualified names
+                if (microflowName.Contains('.') && string.IsNullOrEmpty(moduleName))
+                {
+                    var parts = microflowName.Split('.', 2);
+                    moduleName = parts[0];
+                    microflowName = parts[1];
+                }
+
+                var module = Utils.Utils.ResolveModule(_model, moduleName);
+                if (module == null)
+                    return JsonSerializer.Serialize(new { error = $"Module '{moduleName ?? "(default)"}' not found" });
+
+                var microflow = module.GetDocuments().OfType<IMicroflow>()
+                    .FirstOrDefault(mf => mf.Name.Equals(microflowName, StringComparison.OrdinalIgnoreCase));
+                if (microflow == null)
+                    return JsonSerializer.Serialize(new { error = $"Microflow '{microflowName}' not found in module '{module.Name}'" });
+
+                var microflowService = _serviceProvider?.GetService<IMicroflowService>();
+                if (microflowService == null)
+                    return JsonSerializer.Serialize(new { error = "IMicroflowService is not available" });
+
+                var inUse = microflowService.IsVariableNameInUse(microflow, variableName);
+
+                // Collect existing variable names for context
+                var existingVars = new List<string>();
+                try
+                {
+                    var activities = microflowService.GetAllMicroflowActivities(microflow);
+                    foreach (var activity in activities)
+                    {
+                        if (activity is IActionActivity actionActivity)
+                        {
+                            switch (actionActivity.Action)
+                            {
+                                case ICreateObjectAction coa:
+                                    if (!string.IsNullOrEmpty(coa.OutputVariableName))
+                                        existingVars.Add(coa.OutputVariableName);
+                                    break;
+                                case IRetrieveAction ra:
+                                    if (!string.IsNullOrEmpty(ra.OutputVariableName))
+                                        existingVars.Add(ra.OutputVariableName);
+                                    break;
+                                case ICreateListAction cla:
+                                    if (!string.IsNullOrEmpty(cla.OutputVariableName))
+                                        existingVars.Add(cla.OutputVariableName);
+                                    break;
+                                case IListOperationAction loa:
+                                    if (!string.IsNullOrEmpty(loa.OutputVariableName))
+                                        existingVars.Add(loa.OutputVariableName);
+                                    break;
+                                case IMicroflowCallAction mca:
+                                    if (mca.UseReturnVariable && !string.IsNullOrEmpty(mca.OutputVariableName))
+                                        existingVars.Add(mca.OutputVariableName);
+                                    break;
+                            }
+                        }
+                    }
+
+                    // Also add parameter names
+                    var paramObjs = microflowService.GetParameters(microflow);
+                    foreach (var p in paramObjs)
+                        existingVars.Add(p.Name);
+                }
+                catch { /* best effort */ }
+
+                string? suggestedName = null;
+                if (inUse)
+                {
+                    // Suggest an alternative
+                    for (int i = 2; i <= 20; i++)
+                    {
+                        var candidate = $"{variableName}{i}";
+                        if (!microflowService.IsVariableNameInUse(microflow, candidate))
+                        {
+                            suggestedName = candidate;
+                            break;
+                        }
+                    }
+                }
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    microflow = $"{module.Name}.{microflow.Name}",
+                    variableName,
+                    inUse,
+                    suggestedAlternative = suggestedName,
+                    existingVariables = existingVars.Distinct().ToList()
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error checking variable name");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> ModifyMicroflowActivity(JsonObject parameters)
+        {
+            try
+            {
+                var microflowName = parameters["microflow_name"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+                var positionNode = parameters["position"];
+
+                if (string.IsNullOrEmpty(microflowName))
+                    return JsonSerializer.Serialize(new { error = "microflow_name is required" });
+                if (positionNode == null)
+                    return JsonSerializer.Serialize(new { error = "position is required (1-based index)" });
+
+                int position = positionNode.GetValue<int>();
+
+                // Support qualified names
+                if (microflowName.Contains('.') && string.IsNullOrEmpty(moduleName))
+                {
+                    var parts = microflowName.Split('.', 2);
+                    moduleName = parts[0];
+                    microflowName = parts[1];
+                }
+
+                var module = Utils.Utils.ResolveModule(_model, moduleName);
+                if (module == null)
+                    return JsonSerializer.Serialize(new { error = $"Module '{moduleName ?? "(default)"}' not found" });
+
+                var microflow = module.GetDocuments().OfType<IMicroflow>()
+                    .FirstOrDefault(mf => mf.Name.Equals(microflowName, StringComparison.OrdinalIgnoreCase));
+                if (microflow == null)
+                    return JsonSerializer.Serialize(new { error = $"Microflow '{microflowName}' not found in module '{module.Name}'" });
+
+                var microflowService = _serviceProvider?.GetService<IMicroflowService>();
+                if (microflowService == null)
+                    return JsonSerializer.Serialize(new { error = "IMicroflowService is not available" });
+
+                var activities = microflowService.GetAllMicroflowActivities(microflow);
+
+                // Filter to action activities only (skip start/end events)
+                var actionActivities = activities
+                    .Where(a => a is IActionActivity)
+                    .Cast<IActionActivity>()
+                    .ToList();
+
+                if (position < 1 || position > actionActivities.Count)
+                    return JsonSerializer.Serialize(new { error = $"Invalid position {position}. Microflow has {actionActivities.Count} action activities (1-{actionActivities.Count})" });
+
+                var targetActivity = actionActivities[position - 1];
+                var changes = new List<string>();
+
+                using var transaction = _model.StartTransaction($"Modify activity at position {position}");
+
+                // Common properties
+                var newCaption = parameters["caption"]?.ToString();
+                if (newCaption != null)
+                {
+                    targetActivity.Caption = newCaption;
+                    changes.Add($"caption = '{newCaption}'");
+                }
+
+                var disabledNode = parameters["disabled"];
+                if (disabledNode != null)
+                {
+                    targetActivity.Disabled = disabledNode.GetValue<bool>();
+                    changes.Add($"disabled = {targetActivity.Disabled}");
+                }
+
+                // Action-specific modifications
+                switch (targetActivity.Action)
+                {
+                    case ICreateObjectAction createObj:
+                    {
+                        var newOutputVar = parameters["output_variable"]?.ToString();
+                        if (newOutputVar != null)
+                        {
+                            createObj.OutputVariableName = newOutputVar;
+                            changes.Add($"outputVariable = '{newOutputVar}'");
+                        }
+                        var newCommit = parameters["commit"]?.ToString();
+                        if (newCommit != null && Enum.TryParse<CommitEnum>(newCommit, true, out var commitVal))
+                        {
+                            createObj.Commit = commitVal;
+                            changes.Add($"commit = {commitVal}");
+                        }
+                        var newRefresh = parameters["refresh_in_client"];
+                        if (newRefresh != null)
+                        {
+                            createObj.RefreshInClient = newRefresh.GetValue<bool>();
+                            changes.Add($"refreshInClient = {createObj.RefreshInClient}");
+                        }
+                        break;
+                    }
+
+                    case IChangeObjectAction changeObj:
+                    {
+                        var newChangeVar = parameters["change_variable"]?.ToString();
+                        if (newChangeVar != null)
+                        {
+                            changeObj.ChangeVariableName = newChangeVar;
+                            changes.Add($"changeVariable = '{newChangeVar}'");
+                        }
+                        var newCommit = parameters["commit"]?.ToString();
+                        if (newCommit != null && Enum.TryParse<CommitEnum>(newCommit, true, out var commitVal))
+                        {
+                            changeObj.Commit = commitVal;
+                            changes.Add($"commit = {commitVal}");
+                        }
+                        var newRefresh = parameters["refresh_in_client"];
+                        if (newRefresh != null)
+                        {
+                            changeObj.RefreshInClient = newRefresh.GetValue<bool>();
+                            changes.Add($"refreshInClient = {changeObj.RefreshInClient}");
+                        }
+                        break;
+                    }
+
+                    case IRetrieveAction retrieve:
+                    {
+                        var newOutputVar = parameters["output_variable"]?.ToString();
+                        if (newOutputVar != null)
+                        {
+                            retrieve.OutputVariableName = newOutputVar;
+                            changes.Add($"outputVariable = '{newOutputVar}'");
+                        }
+                        break;
+                    }
+
+                    case ICommitAction commit:
+                    {
+                        var newCommitVar = parameters["commit_variable"]?.ToString();
+                        if (newCommitVar != null)
+                        {
+                            commit.CommitVariableName = newCommitVar;
+                            changes.Add($"commitVariable = '{newCommitVar}'");
+                        }
+                        var newWithEvents = parameters["with_events"];
+                        if (newWithEvents != null)
+                        {
+                            commit.WithEvents = newWithEvents.GetValue<bool>();
+                            changes.Add($"withEvents = {commit.WithEvents}");
+                        }
+                        var newRefresh = parameters["refresh_in_client"];
+                        if (newRefresh != null)
+                        {
+                            commit.RefreshInClient = newRefresh.GetValue<bool>();
+                            changes.Add($"refreshInClient = {commit.RefreshInClient}");
+                        }
+                        break;
+                    }
+
+                    case IRollbackAction rollback:
+                    {
+                        var newRollbackVar = parameters["rollback_variable"]?.ToString();
+                        if (newRollbackVar != null)
+                        {
+                            rollback.RollbackVariableName = newRollbackVar;
+                            changes.Add($"rollbackVariable = '{newRollbackVar}'");
+                        }
+                        var newRefresh = parameters["refresh_in_client"];
+                        if (newRefresh != null)
+                        {
+                            rollback.RefreshInClient = newRefresh.GetValue<bool>();
+                            changes.Add($"refreshInClient = {rollback.RefreshInClient}");
+                        }
+                        break;
+                    }
+
+                    case IDeleteAction delete:
+                    {
+                        var newDeleteVar = parameters["delete_variable"]?.ToString();
+                        if (newDeleteVar != null)
+                        {
+                            delete.DeleteVariableName = newDeleteVar;
+                            changes.Add($"deleteVariable = '{newDeleteVar}'");
+                        }
+                        break;
+                    }
+
+                    case ICreateListAction createList:
+                    {
+                        var newOutputVar = parameters["output_variable"]?.ToString();
+                        if (newOutputVar != null)
+                        {
+                            createList.OutputVariableName = newOutputVar;
+                            changes.Add($"outputVariable = '{newOutputVar}'");
+                        }
+                        break;
+                    }
+
+                    case IMicroflowCallAction mfCall:
+                    {
+                        var newOutputVar = parameters["output_variable"]?.ToString();
+                        if (newOutputVar != null)
+                        {
+                            mfCall.OutputVariableName = newOutputVar;
+                            changes.Add($"outputVariable = '{newOutputVar}'");
+                        }
+                        var newUseReturn = parameters["use_return_variable"];
+                        if (newUseReturn != null)
+                        {
+                            mfCall.UseReturnVariable = newUseReturn.GetValue<bool>();
+                            changes.Add($"useReturnVariable = {mfCall.UseReturnVariable}");
+                        }
+                        break;
+                    }
+                }
+
+                if (changes.Count == 0)
+                {
+                    transaction.Rollback();
+                    return JsonSerializer.Serialize(new { error = "No modifiable properties were supplied. Provide at least one property to change (e.g. caption, disabled, output_variable, commit, refresh_in_client)." });
+                }
+
+                transaction.Commit();
+
+                var actionType = targetActivity.Action switch
+                {
+                    ICreateObjectAction => "create_object",
+                    IChangeObjectAction => "change_object",
+                    IRetrieveAction => "retrieve",
+                    ICommitAction => "commit",
+                    IRollbackAction => "rollback",
+                    IDeleteAction => "delete",
+                    ICreateListAction => "create_list",
+                    IMicroflowCallAction => "microflow_call",
+                    IListOperationAction => "list_operation",
+                    IChangeListAction => "change_list",
+                    _ => targetActivity.Action?.GetType().Name ?? "unknown"
+                };
+
+                _logger.LogInformation($"Modified activity at position {position} in {module.Name}.{microflow.Name}: {string.Join(", ", changes)}");
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    microflow = $"{module.Name}.{microflow.Name}",
+                    position,
+                    actionType,
+                    changes = changes
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error modifying microflow activity");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> InsertBeforeActivity(JsonObject parameters)
+        {
+            try
+            {
+                var microflowName = parameters["microflow_name"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+                var positionNode = parameters["before_position"];
+                var activityData = parameters["activity"] as JsonObject;
+
+                if (string.IsNullOrEmpty(microflowName))
+                    return JsonSerializer.Serialize(new { error = "microflow_name is required" });
+                if (positionNode == null)
+                    return JsonSerializer.Serialize(new { error = "before_position is required (1-based index of the activity to insert before)" });
+                if (activityData == null)
+                    return JsonSerializer.Serialize(new { error = "activity is required (same format as add_microflow_activity)" });
+
+                int beforePosition = positionNode.GetValue<int>();
+
+                // Support qualified names
+                if (microflowName.Contains('.') && string.IsNullOrEmpty(moduleName))
+                {
+                    var parts = microflowName.Split('.', 2);
+                    moduleName = parts[0];
+                    microflowName = parts[1];
+                }
+
+                var module = Utils.Utils.ResolveModule(_model, moduleName);
+                if (module == null)
+                    return JsonSerializer.Serialize(new { error = $"Module '{moduleName ?? "(default)"}' not found" });
+
+                var microflow = module.GetDocuments().OfType<IMicroflow>()
+                    .FirstOrDefault(mf => mf.Name.Equals(microflowName, StringComparison.OrdinalIgnoreCase));
+                if (microflow == null)
+                    return JsonSerializer.Serialize(new { error = $"Microflow '{microflowName}' not found in module '{module.Name}'" });
+
+                var microflowService = _serviceProvider?.GetService<IMicroflowService>();
+                if (microflowService == null)
+                    return JsonSerializer.Serialize(new { error = "IMicroflowService is not available" });
+
+                var activities = microflowService.GetAllMicroflowActivities(microflow);
+
+                // Filter to action activities only
+                var actionActivities = activities
+                    .Where(a => a is IActionActivity)
+                    .Cast<IActionActivity>()
+                    .ToList();
+
+                if (beforePosition < 1 || beforePosition > actionActivities.Count)
+                    return JsonSerializer.Serialize(new { error = $"Invalid before_position {beforePosition}. Microflow has {actionActivities.Count} action activities (1-{actionActivities.Count})" });
+
+                var insertBeforeActivity = actionActivities[beforePosition - 1];
+
+                // Create the activity using the same logic as add_microflow_activity
+                var activityType = activityData["type"]?.ToString()?.ToLowerInvariant();
+                if (string.IsNullOrEmpty(activityType))
+                    return JsonSerializer.Serialize(new { error = "activity.type is required (create_object, change_object, retrieve, commit, rollback, delete, create_list, etc.)" });
+
+                // Start transaction before activity creation (some factory methods require it)
+                using var transaction = _model.StartTransaction($"Insert activity before position {beforePosition}");
+
+                IActionActivity? newActivity = null;
+                bool isKnownType = true;
+                try
+                {
+                    newActivity = activityType switch
+                    {
+                        "create_object" or "create_variable" or "create" => CreateCreateVariableActivity(activityData),
+                        "change_object" => CreateChangeObjectActivity(activityData),
+                        "retrieve" or "retrieve_from_database" or "database_retrieve" => CreateDatabaseRetrieveActivity(activityData),
+                        "retrieve_by_association" or "association_retrieve" => CreateAssociationRetrieveActivity(activityData),
+                        "commit" or "commit_object" => CreateCommitActivity(activityData),
+                        "rollback" or "rollback_object" => CreateRollbackActivity(activityData),
+                        "delete" or "delete_object" => CreateDeleteActivity(activityData),
+                        "create_list" or "new_list" => CreateListActivity(activityData),
+                        "change_list" or "modify_list" => CreateChangeListActivity(activityData),
+                        "microflow_call" or "call_microflow" => CreateMicroflowCallActivity(activityData),
+                        "change_variable" or "change_value" => CreateChangeVariableActivity(activityData),
+                        _ => (isKnownType = false) ? null : null
+                    };
+                }
+                catch (Exception ex)
+                {
+                    transaction.Rollback();
+                    return JsonSerializer.Serialize(new { error = $"Failed to create activity: {ex.Message}" });
+                }
+
+                if (!isKnownType)
+                {
+                    transaction.Rollback();
+                    return JsonSerializer.Serialize(new { error = $"Unsupported activity type '{activityType}'. Supported: create_object, change_object, retrieve, retrieve_by_association, commit, rollback, delete, create_list, change_list, microflow_call, change_variable" });
+                }
+
+                if (newActivity == null)
+                {
+                    transaction.Rollback();
+                    return JsonSerializer.Serialize(new { error = $"Failed to create {activityType} activity. {(string.IsNullOrEmpty(_lastError) ? "Check activity parameters." : _lastError)}" });
+                }
+
+                var result = microflowService.TryInsertBeforeActivity(insertBeforeActivity, newActivity);
+
+                if (!result)
+                {
+                    transaction.Rollback();
+                    return JsonSerializer.Serialize(new { error = $"Failed to insert activity before position {beforePosition}. The microflow service rejected the insertion." });
+                }
+
+                transaction.Commit();
+
+                _logger.LogInformation($"Inserted {activityType} activity before position {beforePosition} in {module.Name}.{microflow.Name}");
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    microflow = $"{module.Name}.{microflow.Name}",
+                    insertedBefore = beforePosition,
+                    activityType,
+                    message = $"Inserted {activityType} activity before position {beforePosition}"
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error inserting activity before position");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
         }
 
         #endregion

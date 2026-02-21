@@ -652,6 +652,9 @@ namespace MCPExtension.MCP
                 "set_documentation" => "Set documentation on an entity, attribute, association, or domain_model. Use empty string to clear documentation.",
                 "query_associations" => "Query associations using the Domain Model Service. Find all associations in a module, between two specific entities, or for a single entity with direction filter (parent/child/both). Returns rich details including parent/child entities, modules, type, owner, and delete behaviors.",
                 "manage_navigation" => "Add pages to the responsive web navigation profile. Provide an array of pages with caption, page_name, and module_name. Pages are added as navigation items visible in the app's menu.",
+                "check_variable_name" => "Check if a variable name is already in use in a microflow. Returns whether the name is available, lists existing variables, and suggests an alternative if the name is taken.",
+                "modify_microflow_activity" => "Modify properties of an existing microflow activity by position. Supports changing caption, disabled state, output_variable, commit mode, refresh_in_client, and other action-specific properties. Use read_microflow_details first to see activity positions.",
+                "insert_before_activity" => "Insert a new activity before a specific position in a microflow. Uses the same activity format as add_microflow_activity. Use read_microflow_details to find the target position.",
                 _ => "Tool description not available"
             };
         }
@@ -1517,6 +1520,59 @@ namespace MCPExtension.MCP
                         }
                     },
                     required = new[] { "pages" }
+                },
+                "check_variable_name" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        microflow_name = new { type = "string", description = "Name of the microflow (or Module.MicroflowName)" },
+                        module_name = new { type = "string", description = "Module name (optional if using qualified name)" },
+                        variable_name = new { type = "string", description = "Variable name to check" }
+                    },
+                    required = new[] { "microflow_name", "variable_name" }
+                },
+                "modify_microflow_activity" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        microflow_name = new { type = "string", description = "Name of the microflow (or Module.MicroflowName)" },
+                        module_name = new { type = "string", description = "Module name (optional if using qualified name)" },
+                        position = new { type = "integer", description = "1-based position of the activity to modify (from read_microflow_details)" },
+                        caption = new { type = "string", description = "New caption for the activity" },
+                        disabled = new { type = "boolean", description = "Set activity disabled state" },
+                        output_variable = new { type = "string", description = "New output variable name (create_object, retrieve, create_list, microflow_call)" },
+                        commit = new { type = "string", description = "Commit mode: Yes, YesWithoutEvents, No (create_object, change_object)" },
+                        refresh_in_client = new { type = "boolean", description = "Refresh in client (create_object, change_object, commit, rollback)" },
+                        change_variable = new { type = "string", description = "Variable name for change_object action" },
+                        commit_variable = new { type = "string", description = "Variable name for commit action" },
+                        rollback_variable = new { type = "string", description = "Variable name for rollback action" },
+                        delete_variable = new { type = "string", description = "Variable name for delete action" },
+                        with_events = new { type = "boolean", description = "With events flag for commit action" },
+                        use_return_variable = new { type = "boolean", description = "Use return variable for microflow_call action" }
+                    },
+                    required = new[] { "microflow_name", "position" }
+                },
+                "insert_before_activity" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        microflow_name = new { type = "string", description = "Name of the microflow (or Module.MicroflowName)" },
+                        module_name = new { type = "string", description = "Module name (optional if using qualified name)" },
+                        before_position = new { type = "integer", description = "1-based position of the activity to insert before" },
+                        activity = new
+                        {
+                            type = "object",
+                            description = "Activity definition (same format as add_microflow_activity). Must include 'type' field.",
+                            properties = new
+                            {
+                                type = new { type = "string", description = "Activity type: create_object, change_object, retrieve, retrieve_by_association, commit, rollback, delete, create_list, change_list, microflow_call, change_variable" }
+                            }
+                        }
+                    },
+                    required = new[] { "microflow_name", "before_position", "activity" }
                 },
                 _ => new
                 {
