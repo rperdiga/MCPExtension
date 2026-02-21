@@ -363,6 +363,33 @@ namespace MCPExtension
                 return (object)result;
             });
 
+            // Phase 14: Modify Existing Elements
+            _mcpServer.RegisterTool("update_attribute", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.UpdateAttribute(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("update_association", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.UpdateAssociation(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("update_constant", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.UpdateConstant(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("update_enumeration", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.UpdateEnumeration(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("set_documentation", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.SetDocumentation(parameters);
+                return (object)result;
+            });
+
             // Phase 12: Untyped Model Introspection
             _mcpServer.RegisterTool("read_security_info", async (JsonObject parameters) =>
             {
@@ -429,7 +456,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 56, // Phase 13: +6 rename & refactor tools
+                registeredTools = 61, // Phase 14: +5 modify existing elements tools
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",

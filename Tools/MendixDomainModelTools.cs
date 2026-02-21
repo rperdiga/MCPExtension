@@ -1945,7 +1945,12 @@ namespace MCPExtension.Tools
                 "rename_association",
                 "rename_document",
                 "rename_module",
-                "rename_enumeration_value"
+                "rename_enumeration_value",
+                "update_attribute",
+                "update_association",
+                "update_constant",
+                "update_enumeration",
+                "set_documentation"
             };
 
             return JsonSerializer.Serialize(new { tools = tools, status = "success" });
@@ -3510,6 +3515,558 @@ namespace MCPExtension.Tools
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error renaming enumeration value");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        #endregion
+
+        #region Phase 14: Modify Existing Elements
+
+        public async Task<string> UpdateAttribute(JsonObject parameters)
+        {
+            try
+            {
+                var entityName = parameters["entity_name"]?.ToString();
+                var attributeName = parameters["attribute_name"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(entityName))
+                    return JsonSerializer.Serialize(new { error = "entity_name is required" });
+                if (string.IsNullOrEmpty(attributeName))
+                    return JsonSerializer.Serialize(new { error = "attribute_name is required" });
+
+                var (entity, module) = Utils.Utils.FindEntityAcrossModules(_model, entityName, moduleName);
+                if (entity == null)
+                    return JsonSerializer.Serialize(new { error = $"Entity '{entityName}' not found{(moduleName != null ? $" in module '{moduleName}'" : "")}" });
+
+                var attribute = entity.GetAttributes()
+                    .FirstOrDefault(a => a.Name.Equals(attributeName, StringComparison.OrdinalIgnoreCase));
+                if (attribute == null)
+                    return JsonSerializer.Serialize(new { error = $"Attribute '{attributeName}' not found on entity '{entity.Name}'" });
+
+                var changes = new List<string>();
+                using var transaction = _model.StartTransaction($"Update attribute '{attributeName}' on '{entity.Name}'");
+
+                // Change type if specified
+                var newType = parameters["type"]?.ToString();
+                if (!string.IsNullOrEmpty(newType))
+                {
+                    var typeLower = newType.ToLowerInvariant();
+                    if (typeLower.StartsWith("enumeration:"))
+                    {
+                        // Reference existing enumeration
+                        var enumName = newType.Substring("enumeration:".Length);
+                        var enumDoc = FindEnumerationByName(enumName, moduleName);
+                        if (enumDoc == null)
+                            return JsonSerializer.Serialize(new { error = $"Enumeration '{enumName}' not found" });
+                        var enumAttrType = _model.Create<IEnumerationAttributeType>();
+                        enumAttrType.Enumeration = enumDoc.QualifiedName;
+                        attribute.Type = enumAttrType;
+                        changes.Add($"type → Enumeration:{enumName}");
+                    }
+                    else
+                    {
+                        var attrType = CreateAttributeType(_model, typeLower);
+                        attribute.Type = attrType;
+                        changes.Add($"type → {newType}");
+                    }
+                }
+
+                // Set string length if specified (only applicable to String type)
+                var maxLengthNode = parameters["max_length"];
+                if (maxLengthNode != null)
+                {
+                    var maxLength = maxLengthNode.GetValue<int>();
+                    if (attribute.Type is IStringAttributeType stringType)
+                    {
+                        stringType.Length = maxLength;
+                        changes.Add($"max_length → {maxLength}");
+                    }
+                    else
+                    {
+                        return JsonSerializer.Serialize(new { error = "max_length can only be set on String attributes" });
+                    }
+                }
+
+                // Set localize_date if specified (only applicable to DateTime type)
+                var localizeDateNode = parameters["localize_date"];
+                if (localizeDateNode != null)
+                {
+                    var localizeDate = localizeDateNode.GetValue<bool>();
+                    if (attribute.Type is IDateTimeAttributeType dateType)
+                    {
+                        dateType.LocalizeDate = localizeDate;
+                        changes.Add($"localize_date → {localizeDate}");
+                    }
+                    else
+                    {
+                        return JsonSerializer.Serialize(new { error = "localize_date can only be set on DateTime attributes" });
+                    }
+                }
+
+                // Set default value if specified
+                var defaultValue = parameters["default_value"]?.ToString();
+                if (defaultValue != null)
+                {
+                    if (attribute.Value is IStoredValue storedValue)
+                    {
+                        storedValue.DefaultValue = defaultValue;
+                        changes.Add($"default_value → '{defaultValue}'");
+                    }
+                    else
+                    {
+                        // Convert to stored value first
+                        var newStored = _model.Create<IStoredValue>();
+                        newStored.DefaultValue = defaultValue;
+                        attribute.Value = newStored;
+                        changes.Add($"default_value → '{defaultValue}' (converted to stored)");
+                    }
+                }
+
+                if (changes.Count == 0)
+                    return JsonSerializer.Serialize(new { error = "No changes specified. Provide at least one of: type, max_length, localize_date, default_value" });
+
+                transaction.Commit();
+
+                _logger.LogInformation($"Updated attribute '{attributeName}' on '{entity.Name}': {string.Join(", ", changes)}");
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = $"Attribute '{attributeName}' updated on entity '{entity.Name}'",
+                    entity = entity.Name,
+                    attribute = attributeName,
+                    module = module!.Name,
+                    changes
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error updating attribute");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        private IEnumeration? FindEnumerationByName(string enumName, string? moduleName = null)
+        {
+            // Handle qualified name
+            if (enumName.Contains('.'))
+            {
+                var parts = enumName.Split('.', 2);
+                moduleName = parts[0];
+                enumName = parts[1];
+            }
+
+            var modules = moduleName != null
+                ? new[] { Utils.Utils.ResolveModule(_model, moduleName) }.Where(m => m != null)
+                : _model.Root.GetModules().Where(m => !m.FromAppStore);
+
+            foreach (var mod in modules)
+            {
+                var en = _model.Root.GetModuleDocuments<IEnumeration>(mod!)
+                    .FirstOrDefault(e => e.Name.Equals(enumName, StringComparison.OrdinalIgnoreCase));
+                if (en != null) return en;
+            }
+            return null;
+        }
+
+        public async Task<string> UpdateAssociation(JsonObject parameters)
+        {
+            try
+            {
+                var associationName = parameters["association_name"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(associationName))
+                    return JsonSerializer.Serialize(new { error = "association_name is required" });
+
+                // Find association
+                IAssociation? foundAssociation = null;
+                IModule? foundModule = null;
+
+                var modules = moduleName != null
+                    ? new[] { Utils.Utils.ResolveModule(_model, moduleName) }.Where(m => m != null)
+                    : _model.Root.GetModules().Where(m => !m.FromAppStore);
+
+                foreach (var mod in modules)
+                {
+                    foreach (var entity in mod!.DomainModel.GetEntities())
+                    {
+                        var assoc = entity.GetAssociations(AssociationDirection.Both, null)
+                            .FirstOrDefault(a => a.Association.Name.Equals(associationName, StringComparison.OrdinalIgnoreCase));
+                        if (assoc != null)
+                        {
+                            foundAssociation = assoc.Association;
+                            foundModule = mod;
+                            break;
+                        }
+                    }
+                    if (foundAssociation != null) break;
+                }
+
+                if (foundAssociation == null)
+                    return JsonSerializer.Serialize(new { error = $"Association '{associationName}' not found{(moduleName != null ? $" in module '{moduleName}'" : "")}" });
+
+                var changes = new List<string>();
+                using var transaction = _model.StartTransaction($"Update association '{associationName}'");
+
+                // Change owner
+                var ownerStr = parameters["owner"]?.ToString()?.ToLowerInvariant();
+                if (!string.IsNullOrEmpty(ownerStr))
+                {
+                    var owner = ownerStr switch
+                    {
+                        "default" or "parent" or "one" => AssociationOwner.Default,
+                        "both" => AssociationOwner.Both,
+                        _ => (AssociationOwner?)null
+                    };
+                    if (owner == null)
+                        return JsonSerializer.Serialize(new { error = $"Invalid owner '{ownerStr}'. Use 'default' (one owner) or 'both'." });
+                    foundAssociation.Owner = owner.Value;
+                    changes.Add($"owner → {ownerStr}");
+                }
+
+                // Change type
+                var typeStr = parameters["type"]?.ToString()?.ToLowerInvariant();
+                if (!string.IsNullOrEmpty(typeStr))
+                {
+                    var assocType = typeStr switch
+                    {
+                        "reference" or "one-to-many" or "1:n" => AssociationType.Reference,
+                        "referenceset" or "reference_set" or "many-to-many" or "n:m" => AssociationType.ReferenceSet,
+                        _ => (AssociationType?)null
+                    };
+                    if (assocType == null)
+                        return JsonSerializer.Serialize(new { error = $"Invalid type '{typeStr}'. Use 'reference' or 'referenceset'." });
+                    foundAssociation.Type = assocType.Value;
+                    changes.Add($"type → {typeStr}");
+                }
+
+                // Change delete behaviors
+                var parentDeleteBehavior = parameters["parent_delete_behavior"]?.ToString();
+                if (!string.IsNullOrEmpty(parentDeleteBehavior))
+                {
+                    foundAssociation.ParentDeleteBehavior = MapDeletingBehavior(parentDeleteBehavior);
+                    changes.Add($"parent_delete_behavior → {parentDeleteBehavior}");
+                }
+
+                var childDeleteBehavior = parameters["child_delete_behavior"]?.ToString();
+                if (!string.IsNullOrEmpty(childDeleteBehavior))
+                {
+                    foundAssociation.ChildDeleteBehavior = MapDeletingBehavior(childDeleteBehavior);
+                    changes.Add($"child_delete_behavior → {childDeleteBehavior}");
+                }
+
+                if (changes.Count == 0)
+                    return JsonSerializer.Serialize(new { error = "No changes specified. Provide at least one of: owner, type, parent_delete_behavior, child_delete_behavior" });
+
+                transaction.Commit();
+
+                _logger.LogInformation($"Updated association '{associationName}': {string.Join(", ", changes)}");
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = $"Association '{associationName}' updated",
+                    association = associationName,
+                    module = foundModule!.Name,
+                    changes
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error updating association");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> UpdateConstant(JsonObject parameters)
+        {
+            try
+            {
+                var constantName = parameters["constant_name"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(constantName))
+                    return JsonSerializer.Serialize(new { error = "constant_name is required" });
+
+                // Handle qualified name
+                if (constantName.Contains('.') && moduleName == null)
+                {
+                    var parts = constantName.Split('.', 2);
+                    moduleName = parts[0];
+                    constantName = parts[1];
+                }
+
+                IConstant? foundConstant = null;
+                IModule? foundModule = null;
+
+                var modules = moduleName != null
+                    ? new[] { Utils.Utils.ResolveModule(_model, moduleName) }.Where(m => m != null)
+                    : _model.Root.GetModules().Where(m => !m.FromAppStore);
+
+                foreach (var mod in modules)
+                {
+                    var c = _model.Root.GetModuleDocuments<IConstant>(mod!)
+                        .FirstOrDefault(c => c.Name.Equals(constantName, StringComparison.OrdinalIgnoreCase));
+                    if (c != null)
+                    {
+                        foundConstant = c;
+                        foundModule = mod;
+                        break;
+                    }
+                }
+
+                if (foundConstant == null)
+                    return JsonSerializer.Serialize(new { error = $"Constant '{constantName}' not found{(moduleName != null ? $" in module '{moduleName}'" : "")}" });
+
+                var changes = new List<string>();
+                using var transaction = _model.StartTransaction($"Update constant '{constantName}'");
+
+                // Change default value
+                var defaultValue = parameters["default_value"]?.ToString();
+                if (defaultValue != null)
+                {
+                    foundConstant.DefaultValue = defaultValue;
+                    changes.Add($"default_value → '{defaultValue}'");
+                }
+
+                // Change exposed to client
+                var exposedNode = parameters["exposed_to_client"];
+                if (exposedNode != null)
+                {
+                    var exposed = exposedNode.GetValue<bool>();
+                    foundConstant.ExposedToClient = exposed;
+                    changes.Add($"exposed_to_client → {exposed}");
+                }
+
+                if (changes.Count == 0)
+                    return JsonSerializer.Serialize(new { error = "No changes specified. Provide at least one of: default_value, exposed_to_client" });
+
+                transaction.Commit();
+
+                _logger.LogInformation($"Updated constant '{constantName}': {string.Join(", ", changes)}");
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = $"Constant '{constantName}' updated",
+                    constant = constantName,
+                    module = foundModule!.Name,
+                    qualifiedName = $"{foundModule.Name}.{constantName}",
+                    changes
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error updating constant");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> UpdateEnumeration(JsonObject parameters)
+        {
+            try
+            {
+                var enumerationName = parameters["enumeration_name"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(enumerationName))
+                    return JsonSerializer.Serialize(new { error = "enumeration_name is required" });
+
+                // Handle qualified name
+                if (enumerationName.Contains('.') && moduleName == null)
+                {
+                    var parts = enumerationName.Split('.', 2);
+                    moduleName = parts[0];
+                    enumerationName = parts[1];
+                }
+
+                var foundEnum = FindEnumerationByName(enumerationName, moduleName);
+                if (foundEnum == null)
+                    return JsonSerializer.Serialize(new { error = $"Enumeration '{enumerationName}' not found{(moduleName != null ? $" in module '{moduleName}'" : "")}" });
+
+                var changes = new List<string>();
+                using var transaction = _model.StartTransaction($"Update enumeration '{enumerationName}'");
+
+                // Add values
+                var addValuesNode = parameters["add_values"];
+                if (addValuesNode is JsonArray addArray && addArray.Count > 0)
+                {
+                    foreach (var item in addArray)
+                    {
+                        var valName = item?.ToString();
+                        if (string.IsNullOrEmpty(valName)) continue;
+
+                        // Check for duplicates
+                        if (foundEnum.GetValues().Any(v => v.Name.Equals(valName, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            changes.Add($"skipped '{valName}' (already exists)");
+                            continue;
+                        }
+
+                        if (_nameValidationService != null)
+                        {
+                            var validation = _nameValidationService.IsNameValid(valName);
+                            if (!validation.IsValid)
+                                return JsonSerializer.Serialize(new { error = $"Invalid value name '{valName}': {validation.ErrorMessage}" });
+                        }
+
+                        var enumValue = _model.Create<IEnumerationValue>();
+                        enumValue.Name = valName;
+                        var captionText = _model.Create<IText>();
+                        captionText.AddOrUpdateTranslation("en_US", valName);
+                        enumValue.Caption = captionText;
+                        foundEnum.AddValue(enumValue);
+                        changes.Add($"added '{valName}'");
+                    }
+                }
+
+                // Remove values
+                var removeValuesNode = parameters["remove_values"];
+                if (removeValuesNode is JsonArray removeArray && removeArray.Count > 0)
+                {
+                    foreach (var item in removeArray)
+                    {
+                        var valName = item?.ToString();
+                        if (string.IsNullOrEmpty(valName)) continue;
+
+                        var existingValue = foundEnum.GetValues()
+                            .FirstOrDefault(v => v.Name.Equals(valName, StringComparison.OrdinalIgnoreCase));
+                        if (existingValue == null)
+                        {
+                            changes.Add($"skipped removing '{valName}' (not found)");
+                            continue;
+                        }
+
+                        foundEnum.RemoveValue(existingValue);
+                        changes.Add($"removed '{valName}'");
+                    }
+                }
+
+                if (changes.Count == 0)
+                    return JsonSerializer.Serialize(new { error = "No changes specified. Provide at least one of: add_values (array), remove_values (array)" });
+
+                transaction.Commit();
+
+                var remainingValues = foundEnum.GetValues().Select(v => v.Name).ToList();
+                _logger.LogInformation($"Updated enumeration '{enumerationName}': {string.Join(", ", changes)}");
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    message = $"Enumeration '{enumerationName}' updated",
+                    enumeration = enumerationName,
+                    changes,
+                    currentValues = remainingValues,
+                    valueCount = remainingValues.Count
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error updating enumeration");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> SetDocumentation(JsonObject parameters)
+        {
+            try
+            {
+                var elementType = parameters["element_type"]?.ToString()?.ToLowerInvariant();
+                var elementName = parameters["element_name"]?.ToString();
+                var documentation = parameters["documentation"]?.ToString();
+                var moduleName = parameters["module_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(elementType))
+                    return JsonSerializer.Serialize(new { error = "element_type is required: 'entity', 'attribute', 'association', 'domain_model'" });
+                if (string.IsNullOrEmpty(elementName) && elementType != "domain_model")
+                    return JsonSerializer.Serialize(new { error = "element_name is required" });
+                if (documentation == null)
+                    return JsonSerializer.Serialize(new { error = "documentation is required (use empty string to clear)" });
+
+                using var transaction = _model.StartTransaction($"Set documentation on {elementType} '{elementName}'");
+
+                switch (elementType)
+                {
+                    case "entity":
+                    {
+                        var (entity, module) = Utils.Utils.FindEntityAcrossModules(_model, elementName!, moduleName);
+                        if (entity == null)
+                            return JsonSerializer.Serialize(new { error = $"Entity '{elementName}' not found" });
+                        entity.Documentation = documentation;
+                        transaction.Commit();
+                        return JsonSerializer.Serialize(new { success = true, message = $"Documentation set on entity '{entity.Name}'", elementType, elementName = entity.Name, module = module!.Name });
+                    }
+                    case "attribute":
+                    {
+                        var entityName = parameters["entity_name"]?.ToString() ?? elementName!;
+                        var attrName = parameters["attribute_name"]?.ToString();
+                        if (string.IsNullOrEmpty(attrName))
+                        {
+                            // If element_name contains ".", treat as "Entity.Attribute"
+                            if (elementName!.Contains('.'))
+                            {
+                                var parts = elementName.Split('.', 2);
+                                entityName = parts[0];
+                                attrName = parts[1];
+                            }
+                            else
+                            {
+                                return JsonSerializer.Serialize(new { error = "attribute_name is required for attribute documentation (or use element_name as 'Entity.Attribute')" });
+                            }
+                        }
+                        var (entity, module) = Utils.Utils.FindEntityAcrossModules(_model, entityName, moduleName);
+                        if (entity == null)
+                            return JsonSerializer.Serialize(new { error = $"Entity '{entityName}' not found" });
+                        var attr = entity.GetAttributes().FirstOrDefault(a => a.Name.Equals(attrName, StringComparison.OrdinalIgnoreCase));
+                        if (attr == null)
+                            return JsonSerializer.Serialize(new { error = $"Attribute '{attrName}' not found on entity '{entity.Name}'" });
+                        attr.Documentation = documentation;
+                        transaction.Commit();
+                        return JsonSerializer.Serialize(new { success = true, message = $"Documentation set on attribute '{attrName}' of entity '{entity.Name}'", elementType, entity = entity.Name, attribute = attrName, module = module!.Name });
+                    }
+                    case "association":
+                    {
+                        IAssociation? foundAssociation = null;
+                        IModule? foundModule = null;
+                        var modules = moduleName != null
+                            ? new[] { Utils.Utils.ResolveModule(_model, moduleName) }.Where(m => m != null)
+                            : _model.Root.GetModules().Where(m => !m.FromAppStore);
+                        foreach (var mod in modules)
+                        {
+                            foreach (var entity in mod!.DomainModel.GetEntities())
+                            {
+                                var assoc = entity.GetAssociations(AssociationDirection.Both, null)
+                                    .FirstOrDefault(a => a.Association.Name.Equals(elementName, StringComparison.OrdinalIgnoreCase));
+                                if (assoc != null)
+                                {
+                                    foundAssociation = assoc.Association;
+                                    foundModule = mod;
+                                    break;
+                                }
+                            }
+                            if (foundAssociation != null) break;
+                        }
+                        if (foundAssociation == null)
+                            return JsonSerializer.Serialize(new { error = $"Association '{elementName}' not found" });
+                        foundAssociation.Documentation = documentation;
+                        transaction.Commit();
+                        return JsonSerializer.Serialize(new { success = true, message = $"Documentation set on association '{elementName}'", elementType, association = elementName, module = foundModule!.Name });
+                    }
+                    case "domain_model":
+                    {
+                        var module = Utils.Utils.ResolveModule(_model, moduleName);
+                        if (module == null)
+                            return JsonSerializer.Serialize(new { error = $"Module '{moduleName ?? "(default)"}' not found" });
+                        module.DomainModel.Documentation = documentation;
+                        transaction.Commit();
+                        return JsonSerializer.Serialize(new { success = true, message = $"Documentation set on domain model of module '{module.Name}'", elementType, module = module.Name });
+                    }
+                    default:
+                        return JsonSerializer.Serialize(new { error = $"Unknown element_type '{elementType}'. Supported: entity, attribute, association, domain_model" });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error setting documentation");
                 return JsonSerializer.Serialize(new { error = ex.Message });
             }
         }

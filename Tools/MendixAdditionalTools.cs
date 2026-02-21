@@ -1257,7 +1257,12 @@ namespace MCPExtension.Tools
                     "rename_association",
                     "rename_document",
                     "rename_module",
-                    "rename_enumeration_value"
+                    "rename_enumeration_value",
+                    "update_attribute",
+                    "update_association",
+                    "update_constant",
+                    "update_enumeration",
+                    "set_documentation"
                 };
 
                 return JsonSerializer.Serialize(new { available_tools = tools });

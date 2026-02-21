@@ -644,6 +644,11 @@ namespace MCPExtension.MCP
                 "rename_document" => "Rename a document (microflow, page, constant, enumeration, or any document type). All by-name references are automatically updated. Supports qualified names like 'Module.DocumentName'.",
                 "rename_module" => "Rename a module. All qualified references to the module and its documents are automatically updated.",
                 "rename_enumeration_value" => "Rename a value within an enumeration. Supports qualified enumeration names like 'Module.EnumName'.",
+                "update_attribute" => "Modify properties of an existing attribute: change type (String/Integer/Decimal/Boolean/DateTime/Long/AutoNumber/Binary/HashedString/Enumeration:EnumName), set default_value, set max_length (String only), set localize_date (DateTime only). Only supplied parameters are changed.",
+                "update_association" => "Modify properties of an existing association: change owner (default/both), type (reference/referenceset), parent_delete_behavior, child_delete_behavior. Only supplied parameters are changed.",
+                "update_constant" => "Modify an existing constant: change default_value and/or exposed_to_client. Supports qualified names like 'Module.ConstantName'.",
+                "update_enumeration" => "Add or remove values from an existing enumeration. Provide add_values (array of new value names) and/or remove_values (array of value names to remove). Supports qualified names like 'Module.EnumName'.",
+                "set_documentation" => "Set documentation on an entity, attribute, association, or domain_model. Use empty string to clear documentation.",
                 _ => "Tool description not available"
             };
         }
@@ -1406,6 +1411,73 @@ namespace MCPExtension.MCP
                         module_name = new { type = "string", description = "Module containing the enumeration. Searches all modules if omitted." }
                     },
                     required = new[] { "enumeration_name", "value_name", "new_name" }
+                },
+                "update_attribute" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        entity_name = new { type = "string", description = "Name of the entity containing the attribute" },
+                        attribute_name = new { type = "string", description = "Name of the attribute to update" },
+                        type = new { type = "string", description = "New attribute type: String, Integer, Long, Decimal, Boolean, DateTime, AutoNumber, Binary, HashedString, or Enumeration:EnumName" },
+                        default_value = new { type = "string", description = "New default value for the attribute" },
+                        max_length = new { type = "integer", description = "Maximum string length (String attributes only)" },
+                        localize_date = new { type = "boolean", description = "Whether to localize date/time (DateTime attributes only)" },
+                        module_name = new { type = "string", description = "Module containing the entity. Searches all modules if omitted." }
+                    },
+                    required = new[] { "entity_name", "attribute_name" }
+                },
+                "update_association" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        association_name = new { type = "string", description = "Name of the association to update" },
+                        owner = new { type = "string", description = "New owner: 'default' (one owner at start of arrow) or 'both' (both entities own)" },
+                        type = new { type = "string", description = "New type: 'reference' (one-to-many) or 'referenceset' (many-to-many)" },
+                        parent_delete_behavior = new { type = "string", description = "Delete behavior: 'delete_me_and_references' (cascade), 'delete_me_if_no_references' (prevent), 'delete_me_but_keep_references' (default)" },
+                        child_delete_behavior = new { type = "string", description = "Delete behavior: same options as parent_delete_behavior" },
+                        module_name = new { type = "string", description = "Module containing the association. Searches all modules if omitted." }
+                    },
+                    required = new[] { "association_name" }
+                },
+                "update_constant" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        constant_name = new { type = "string", description = "Name of the constant (or qualified name like 'Module.ConstantName')" },
+                        default_value = new { type = "string", description = "New default value" },
+                        exposed_to_client = new { type = "boolean", description = "Whether to expose the constant to client-side code" },
+                        module_name = new { type = "string", description = "Module containing the constant. Searches all modules if omitted." }
+                    },
+                    required = new[] { "constant_name" }
+                },
+                "update_enumeration" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        enumeration_name = new { type = "string", description = "Name of the enumeration (or qualified name like 'Module.EnumName')" },
+                        add_values = new { type = "array", items = new { type = "string" }, description = "Array of new value names to add" },
+                        remove_values = new { type = "array", items = new { type = "string" }, description = "Array of value names to remove" },
+                        module_name = new { type = "string", description = "Module containing the enumeration. Searches all modules if omitted." }
+                    },
+                    required = new[] { "enumeration_name" }
+                },
+                "set_documentation" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        element_type = new { type = "string", description = "Type of element: 'entity', 'attribute', 'association', 'domain_model'" },
+                        element_name = new { type = "string", description = "Name of the element (for attribute: 'Entity.Attribute' or use entity_name + attribute_name)" },
+                        documentation = new { type = "string", description = "Documentation text to set (empty string to clear)" },
+                        entity_name = new { type = "string", description = "Entity name (for attribute documentation)" },
+                        attribute_name = new { type = "string", description = "Attribute name (for attribute documentation)" },
+                        module_name = new { type = "string", description = "Module containing the element. Searches all modules if omitted." }
+                    },
+                    required = new[] { "element_type", "documentation" }
                 },
                 _ => new
                 {
