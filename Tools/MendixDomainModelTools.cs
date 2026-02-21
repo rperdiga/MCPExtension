@@ -1893,7 +1893,12 @@ namespace MCPExtension.Tools
                 "read_version_control",
                 "set_microflow_url",
                 "list_rules",
-                "exclude_document"
+                "exclude_document",
+                "read_security_info",
+                "list_nanoflows",
+                "list_scheduled_events",
+                "list_rest_services",
+                "query_model_elements"
             };
 
             return JsonSerializer.Serialize(new { tools = tools, status = "success" });

@@ -15,6 +15,7 @@ using Mendix.StudioPro.ExtensionsAPI.Model.JavaActions;
 using Mendix.StudioPro.ExtensionsAPI.Model.Settings;
 using Mendix.StudioPro.ExtensionsAPI.Model.Constants;
 using Mendix.StudioPro.ExtensionsAPI.Model.DataTypes;
+using Mendix.StudioPro.ExtensionsAPI.Model.UntypedModel;
 using Mendix.StudioPro.ExtensionsAPI.Services;
 using Mendix.StudioPro.ExtensionsAPI.UI.Services;
 using Microsoft.Extensions.Logging;
@@ -32,6 +33,7 @@ namespace MCPExtension.Tools
         private readonly IServiceProvider _serviceProvider;
         private readonly string? _projectDirectory;
         private readonly IVersionControlService? _versionControlService;
+        private readonly IUntypedModelAccessService? _untypedModelService;
         private static string? _lastError;
         private static Exception? _lastException;
 
@@ -50,6 +52,7 @@ namespace MCPExtension.Tools
             _serviceProvider = serviceProvider;
             _projectDirectory = projectDirectory;
             _versionControlService = serviceProvider.GetService<IVersionControlService>();
+            _untypedModelService = serviceProvider.GetService<IUntypedModelAccessService>();
         }
 
         private string GetDebugLogPath()
@@ -922,7 +925,12 @@ namespace MCPExtension.Tools
                     "read_version_control",
                     "set_microflow_url",
                     "list_rules",
-                    "exclude_document"
+                    "exclude_document",
+                    "read_security_info",
+                    "list_nanoflows",
+                    "list_scheduled_events",
+                    "list_rest_services",
+                    "query_model_elements"
                 };
 
                 return JsonSerializer.Serialize(new { available_tools = tools });
@@ -4836,6 +4844,305 @@ namespace MCPExtension.Tools
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error excluding document");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        #endregion
+
+        #region Phase 12: Untyped Model Introspection
+
+        private IModelRoot? GetUntypedModelRoot()
+        {
+            return _untypedModelService?.GetUntypedModel(_model);
+        }
+
+        private List<IModelUnit> GetUnitsWithFallback(IModelRoot root, string typeString)
+        {
+            // Try with $ separator first, then . separator
+            var units = root.GetUnitsOfType(typeString)?.ToList() ?? new List<IModelUnit>();
+            if (units.Count == 0 && typeString.Contains("$"))
+            {
+                units = root.GetUnitsOfType(typeString.Replace("$", "."))?.ToList() ?? new List<IModelUnit>();
+            }
+            return units;
+        }
+
+        private object SerializeModelUnit(IModelUnit unit, bool includeProperties = false, int maxProperties = 20)
+        {
+            var result = new Dictionary<string, object?>();
+            result["name"] = unit.Name;
+            result["qualifiedName"] = unit.QualifiedName;
+            result["type"] = unit.Type;
+
+            if (includeProperties)
+            {
+                var props = unit.GetProperties().Take(maxProperties).Select(p =>
+                {
+                    object? val = null;
+                    try
+                    {
+                        if (p.IsList)
+                        {
+                            var values = p.GetValues();
+                            val = values?.Take(5).Select(v => v?.ToString()).ToList();
+                        }
+                        else
+                        {
+                            val = p.Value?.ToString();
+                        }
+                    }
+                    catch { val = "<error reading value>"; }
+
+                    return new { name = p.Name, type = p.Type.ToString(), isList = p.IsList, value = val };
+                }).ToList();
+
+                result["properties"] = props;
+            }
+
+            return result;
+        }
+
+        public async Task<string> ReadSecurityInfo(JsonObject parameters)
+        {
+            try
+            {
+                var root = GetUntypedModelRoot();
+                if (root == null)
+                    return JsonSerializer.Serialize(new { error = "IUntypedModelAccessService is not available" });
+
+                var moduleName = parameters?["module_name"]?.ToString();
+
+                var securityUnits = GetUnitsWithFallback(root, "Security$ModuleSecurity");
+                if (!securityUnits.Any())
+                    securityUnits = GetUnitsWithFallback(root, "Security$ProjectSecurity");
+
+                var result = new List<object>();
+                foreach (var unit in securityUnits)
+                {
+                    if (!string.IsNullOrEmpty(moduleName))
+                    {
+                        var unitName = unit.Name ?? unit.QualifiedName;
+                        if (unitName != null && !unitName.Contains(moduleName, StringComparison.OrdinalIgnoreCase))
+                            continue;
+                    }
+
+                    var roles = unit.GetElementsOfType("Security$ModuleRole")
+                        .Select(r => new { name = r.Name, id = r.ID })
+                        .ToList();
+
+                    var accessRules = unit.GetElementsOfType("Security$AccessRule")
+                        .Select(r => new
+                        {
+                            name = r.Name,
+                            type = r.Type,
+                            propertyCount = r.GetProperties().Count
+                        })
+                        .Take(50)
+                        .ToList();
+
+                    result.Add(new
+                    {
+                        name = unit.Name,
+                        qualifiedName = unit.QualifiedName,
+                        type = unit.Type,
+                        moduleRoles = roles,
+                        accessRuleCount = accessRules.Count,
+                        accessRules
+                    });
+                }
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    totalSecurityUnits = result.Count,
+                    security = result
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error reading security info");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> ListNanoflows(JsonObject parameters)
+        {
+            try
+            {
+                var root = GetUntypedModelRoot();
+                if (root == null)
+                    return JsonSerializer.Serialize(new { error = "IUntypedModelAccessService is not available" });
+
+                var moduleName = parameters?["module_name"]?.ToString();
+                var nanoflows = GetUnitsWithFallback(root, "Microflows$Nanoflow");
+
+                var result = nanoflows
+                    .Where(nf => string.IsNullOrEmpty(moduleName) ||
+                                 (nf.QualifiedName?.Contains(moduleName, StringComparison.OrdinalIgnoreCase) ?? false))
+                    .Select(nf => new
+                    {
+                        name = nf.Name,
+                        qualifiedName = nf.QualifiedName,
+                        module = nf.QualifiedName?.Split('.').FirstOrDefault()
+                    })
+                    .ToList();
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    totalNanoflows = result.Count,
+                    nanoflows = result
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error listing nanoflows");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> ListScheduledEvents(JsonObject parameters)
+        {
+            try
+            {
+                var root = GetUntypedModelRoot();
+                if (root == null)
+                    return JsonSerializer.Serialize(new { error = "IUntypedModelAccessService is not available" });
+
+                var moduleName = parameters?["module_name"]?.ToString();
+                var events = GetUnitsWithFallback(root, "ScheduledEvents$ScheduledEvent");
+
+                var result = events
+                    .Where(e => string.IsNullOrEmpty(moduleName) ||
+                                (e.QualifiedName?.Contains(moduleName, StringComparison.OrdinalIgnoreCase) ?? false))
+                    .Select(e =>
+                    {
+                        var enabled = e.GetProperty("Enabled")?.Value?.ToString();
+                        var interval = e.GetProperty("Interval")?.Value?.ToString();
+                        var intervalType = e.GetProperty("IntervalType")?.Value?.ToString();
+                        var startOffset = e.GetProperty("StartOffset")?.Value?.ToString();
+
+                        return new
+                        {
+                            name = e.Name,
+                            qualifiedName = e.QualifiedName,
+                            module = e.QualifiedName?.Split('.').FirstOrDefault(),
+                            enabled,
+                            interval,
+                            intervalType,
+                            startOffset
+                        };
+                    })
+                    .ToList();
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    totalScheduledEvents = result.Count,
+                    scheduledEvents = result
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error listing scheduled events");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> ListRestServices(JsonObject parameters)
+        {
+            try
+            {
+                var root = GetUntypedModelRoot();
+                if (root == null)
+                    return JsonSerializer.Serialize(new { error = "IUntypedModelAccessService is not available" });
+
+                var moduleName = parameters?["module_name"]?.ToString();
+                var services = GetUnitsWithFallback(root, "Rest$PublishedRestService");
+
+                var result = services
+                    .Where(s => string.IsNullOrEmpty(moduleName) ||
+                                (s.QualifiedName?.Contains(moduleName, StringComparison.OrdinalIgnoreCase) ?? false))
+                    .Select(s =>
+                    {
+                        var path = s.GetProperty("Path")?.Value?.ToString();
+                        var version = s.GetProperty("Version")?.Value?.ToString();
+                        var authentication = s.GetProperty("AuthenticationType")?.Value?.ToString();
+
+                        var resources = s.GetElementsOfType("Rest$PublishedRestServiceResource")
+                            .Select(r => new
+                            {
+                                name = r.Name,
+                                type = r.Type
+                            })
+                            .ToList();
+
+                        return new
+                        {
+                            name = s.Name,
+                            qualifiedName = s.QualifiedName,
+                            module = s.QualifiedName?.Split('.').FirstOrDefault(),
+                            path,
+                            version,
+                            authentication,
+                            resourceCount = resources.Count,
+                            resources
+                        };
+                    })
+                    .ToList();
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    totalRestServices = result.Count,
+                    restServices = result
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error listing REST services");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> QueryModelElements(JsonObject parameters)
+        {
+            try
+            {
+                var root = GetUntypedModelRoot();
+                if (root == null)
+                    return JsonSerializer.Serialize(new { error = "IUntypedModelAccessService is not available" });
+
+                var typeName = parameters["type_name"]?.ToString();
+                if (string.IsNullOrEmpty(typeName))
+                    return JsonSerializer.Serialize(new { error = "type_name is required (e.g. 'Navigation$NavigationProfile', 'Microflows$Nanoflow')" });
+
+                var moduleName = parameters?["module_name"]?.ToString();
+                var includeProperties = parameters?["include_properties"]?.GetValue<bool>() ?? false;
+                var maxResults = parameters?["max_results"]?.GetValue<int>() ?? 50;
+
+                var units = GetUnitsWithFallback(root, typeName);
+
+                var filtered = units
+                    .Where(u => string.IsNullOrEmpty(moduleName) ||
+                                (u.QualifiedName?.Contains(moduleName, StringComparison.OrdinalIgnoreCase) ?? false))
+                    .Take(maxResults)
+                    .Select(u => SerializeModelUnit(u, includeProperties))
+                    .ToList();
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    typeName,
+                    totalFound = units.Count,
+                    returned = filtered.Count,
+                    elements = filtered
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error querying model elements");
                 return JsonSerializer.Serialize(new { error = ex.Message });
             }
         }

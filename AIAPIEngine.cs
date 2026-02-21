@@ -33,6 +33,7 @@ namespace MCPExtension
         private readonly IMicroflowActivitiesService _microflowActivitiesService;
         private readonly INameValidationService _nameValidationService;
         private readonly IVersionControlService? _versionControlService;
+        private readonly IUntypedModelAccessService? _untypedModelAccessService;
 
         // Public property for the ViewModel to check server status
         public MendixMcpServer McpServer => _mcpServer;
@@ -48,7 +49,8 @@ namespace MCPExtension
             IMicroflowExpressionService microflowExpressionService,
             IMicroflowActivitiesService microflowActivitiesService,
             INameValidationService nameValidationService,
-            IVersionControlService versionControlService = null)
+            IVersionControlService versionControlService = null,
+            IUntypedModelAccessService untypedModelAccessService = null)
         {
             _pageGenerationService = pageGenerationService;
             _navigationManagerService = navigationManagerService;
@@ -57,6 +59,7 @@ namespace MCPExtension
             _microflowActivitiesService = microflowActivitiesService;
             _nameValidationService = nameValidationService;
             _versionControlService = versionControlService;
+            _untypedModelAccessService = untypedModelAccessService;
             
             _jsonOptions = new JsonSerializerOptions
             {
@@ -142,6 +145,8 @@ namespace MCPExtension
             services.AddSingleton(_nameValidationService);
             if (_versionControlService != null)
                 services.AddSingleton(_versionControlService);
+            if (_untypedModelAccessService != null)
+                services.AddSingleton(_untypedModelAccessService);
 
             // Register our tools
             services.AddSingleton<MendixDomainModelTools>();

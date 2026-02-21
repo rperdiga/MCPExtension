@@ -331,6 +331,33 @@ namespace MCPExtension
                 return (object)result;
             });
 
+            // Phase 12: Untyped Model Introspection
+            _mcpServer.RegisterTool("read_security_info", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ReadSecurityInfo(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("list_nanoflows", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ListNanoflows(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("list_scheduled_events", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ListScheduledEvents(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("list_rest_services", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ListRestServices(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("query_model_elements", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.QueryModelElements(parameters);
+                return (object)result;
+            });
+
             _logger.LogInformation("MCP tools registered successfully");
         }
 
@@ -370,7 +397,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 45, // Phase 11: +3 advanced microflow tools (+7 activity sub-types)
+                registeredTools = 50, // Phase 12: +5 untyped model introspection tools
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",

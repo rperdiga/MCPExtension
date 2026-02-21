@@ -633,6 +633,11 @@ namespace MCPExtension.MCP
                 "set_microflow_url" => "Read or set the URL of a microflow. When a URL is set, the microflow is exposed as a REST endpoint. Omit 'url' to read, provide it to set (empty string to clear).",
                 "list_rules" => "List validation rules (special server-side microflows) across modules or in a specific module.",
                 "exclude_document" => "Mark a document (microflow, page, etc.) as excluded from the project, or un-exclude it. Excluded documents are not compiled or deployed.",
+                "read_security_info" => "Read module security configuration including module roles and entity access rules. Uses the untyped model API for deep introspection.",
+                "list_nanoflows" => "List all nanoflows (client-side flows) in the project or a specific module.",
+                "list_scheduled_events" => "List all scheduled events with their interval, type, and enabled status.",
+                "list_rest_services" => "List all published REST services with their paths, versions, authentication, and resources.",
+                "query_model_elements" => "Generic escape-hatch tool: query any metamodel type by name (e.g. 'Navigation$NavigationProfile', 'Microflows$Nanoflow', 'Pages$Page'). Returns names, qualified names, and optionally all properties. Future-proofs the extension for any model element type.",
                 _ => "Tool description not available"
             };
         }
@@ -1279,6 +1284,54 @@ namespace MCPExtension.MCP
                         excluded = new { type = "boolean", description = "True to exclude, false to include (default: true)" }
                     },
                     required = new[] { "document_name" }
+                },
+                "read_security_info" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Module to read security from. Reads all if omitted." }
+                    },
+                    required = new string[0]
+                },
+                "list_nanoflows" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Module to list nanoflows from. Lists all if omitted." }
+                    },
+                    required = new string[0]
+                },
+                "list_scheduled_events" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Module to list events from. Lists all if omitted." }
+                    },
+                    required = new string[0]
+                },
+                "list_rest_services" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Module to list REST services from. Lists all if omitted." }
+                    },
+                    required = new string[0]
+                },
+                "query_model_elements" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        type_name = new { type = "string", description = "Metamodel type name (e.g. 'Navigation$NavigationProfile', 'Microflows$Nanoflow', 'Pages$Page', 'Rest$PublishedRestService')" },
+                        module_name = new { type = "string", description = "Filter by module name (optional)" },
+                        include_properties = new { type = "boolean", description = "Include property details for each element (default: false)" },
+                        max_results = new { type = "integer", description = "Maximum number of results to return (default: 50)" }
+                    },
+                    required = new[] { "type_name" }
                 },
                 _ => new
                 {
