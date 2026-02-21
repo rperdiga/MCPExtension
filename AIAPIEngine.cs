@@ -30,10 +30,11 @@ namespace MCPExtension
         private readonly IMicroflowService _microflowService;
         private readonly IMicroflowExpressionService _microflowExpressionService;
         private readonly IMicroflowActivitiesService _microflowActivitiesService;
+        private readonly INameValidationService _nameValidationService;
 
         // Public property for the ViewModel to check server status
         public MendixMcpServer McpServer => _mcpServer;
-        
+
         // Public property for the ViewModel to access the current app
         public IModel CurrentAppModel => CurrentApp;
 
@@ -43,13 +44,15 @@ namespace MCPExtension
             INavigationManagerService navigationManagerService,
             IMicroflowService microflowService,
             IMicroflowExpressionService microflowExpressionService,
-            IMicroflowActivitiesService microflowActivitiesService)
+            IMicroflowActivitiesService microflowActivitiesService,
+            INameValidationService nameValidationService)
         {
             _pageGenerationService = pageGenerationService;
             _navigationManagerService = navigationManagerService;
             _microflowService = microflowService;
             _microflowExpressionService = microflowExpressionService;
             _microflowActivitiesService = microflowActivitiesService;
+            _nameValidationService = nameValidationService;
             
             _jsonOptions = new JsonSerializerOptions
             {
@@ -132,9 +135,7 @@ namespace MCPExtension
             services.AddSingleton(_microflowService);
             services.AddSingleton(_microflowExpressionService);
             services.AddSingleton(_microflowActivitiesService);
-            
-            // Note: IMicroflowActivitiesService may not be available through standard DI
-            // It might need to be accessed differently - this will be handled in the tool implementation
+            services.AddSingleton(_nameValidationService);
 
             // Register our tools
             services.AddSingleton<MendixDomainModelTools>();

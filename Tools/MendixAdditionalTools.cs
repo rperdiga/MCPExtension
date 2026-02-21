@@ -11,6 +11,7 @@ using Mendix.StudioPro.ExtensionsAPI.Model.Projects;
 using Mendix.StudioPro.ExtensionsAPI.Model.Microflows;
 using Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions;
 using Mendix.StudioPro.ExtensionsAPI.Model.DomainModels;
+using Mendix.StudioPro.ExtensionsAPI.Model.JavaActions;
 using Mendix.StudioPro.ExtensionsAPI.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.DependencyInjection;
@@ -902,7 +903,12 @@ namespace MCPExtension.Tools
                     "get_studio_pro_logs",
                     "get_last_error",
                     "list_available_tools",
-                    "debug_info"
+                    "debug_info",
+                    "configure_system_attributes",
+                    "manage_folders",
+                    "validate_name",
+                    "copy_model_element",
+                    "list_java_actions"
                 };
 
                 return JsonSerializer.Serialize(new { available_tools = tools });
@@ -4133,6 +4139,63 @@ namespace MCPExtension.Tools
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, $"Error tracking variable names for activity type '{activityType}'");
+            }
+        }
+
+        #endregion
+
+        #region Phase 9: Java Actions
+
+        public async Task<string> ListJavaActions(JsonObject parameters)
+        {
+            try
+            {
+                var moduleName = parameters?["module_name"]?.ToString();
+                var modules = string.IsNullOrEmpty(moduleName)
+                    ? Utils.Utils.GetAllNonAppStoreModules(_model).ToList()
+                    : new List<Mendix.StudioPro.ExtensionsAPI.Model.Projects.IModule> { Utils.Utils.ResolveModule(_model, moduleName) };
+
+                modules.RemoveAll(m => m == null);
+                if (!modules.Any())
+                    return JsonSerializer.Serialize(new { error = $"Module '{moduleName}' not found" });
+
+                var result = new List<object>();
+                foreach (var module in modules)
+                {
+                    var javaActions = _model.Root.GetModuleDocuments<IJavaAction>(module);
+                    foreach (var ja in javaActions)
+                    {
+                        var actionParams = ja.GetActionParameters()
+                            .Select(p => new
+                            {
+                                name = p.Name,
+                                description = p.Description,
+                                category = p.Category
+                            })
+                            .ToList();
+
+                        result.Add(new
+                        {
+                            name = ja.Name,
+                            qualifiedName = ja.QualifiedName?.ToString(),
+                            module = module.Name,
+                            parameterCount = actionParams.Count,
+                            parameters = actionParams
+                        });
+                    }
+                }
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    totalJavaActions = result.Count,
+                    javaActions = result
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error listing Java actions");
+                return JsonSerializer.Serialize(new { error = ex.Message });
             }
         }
 

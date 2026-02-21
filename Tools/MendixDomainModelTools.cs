@@ -21,11 +21,13 @@ namespace MCPExtension.Tools
     {
         private readonly IModel _model;
         private readonly ILogger<MendixDomainModelTools> _logger;
+        private readonly Mendix.StudioPro.ExtensionsAPI.Services.INameValidationService? _nameValidationService;
 
-        public MendixDomainModelTools(IModel model, ILogger<MendixDomainModelTools> logger)
+        public MendixDomainModelTools(IModel model, ILogger<MendixDomainModelTools> logger, Mendix.StudioPro.ExtensionsAPI.Services.INameValidationService? nameValidationService = null)
         {
             _model = model;
             _logger = logger;
+            _nameValidationService = nameValidationService;
         }
 
         public async Task<string> ListModules(JsonObject parameters)
@@ -1878,7 +1880,12 @@ namespace MCPExtension.Tools
                 "get_studio_pro_logs",
                 "get_last_error",
                 "list_available_tools",
-                "debug_info"
+                "debug_info",
+                "configure_system_attributes",
+                "manage_folders",
+                "validate_name",
+                "copy_model_element",
+                "list_java_actions"
             };
 
             return JsonSerializer.Serialize(new { tools = tools, status = "success" });
@@ -2719,6 +2726,341 @@ namespace MCPExtension.Tools
                 "storechangeby" => "StoreChangeBy",
                 _ => "Unknown"
             };
+        }
+
+        #endregion
+
+        #region Phase 9: Entity Configuration & Module Organization
+
+        public async Task<string> ConfigureSystemAttributes(JsonObject parameters)
+        {
+            try
+            {
+                var entityName = parameters["entity_name"]?.ToString();
+                if (string.IsNullOrEmpty(entityName))
+                    return JsonSerializer.Serialize(new { error = "entity_name is required" });
+
+                var moduleName = parameters["module_name"]?.ToString();
+                var (entity, _) = Utils.Utils.FindEntityAcrossModules(_model, entityName, moduleName);
+                if (entity == null)
+                    return JsonSerializer.Serialize(new { error = $"Entity '{entityName}' not found" });
+
+                if (entity.Generalization is not INoGeneralization noGen)
+                    return JsonSerializer.Serialize(new { error = $"Entity '{entityName}' has a generalization (inherits from another entity). System attributes can only be configured on root entities." });
+
+                using var transaction = _model.StartTransaction("Configure system attributes");
+
+                bool changed = false;
+                if (parameters.ContainsKey("has_created_date"))
+                {
+                    noGen.HasCreatedDate = parameters["has_created_date"]?.GetValue<bool>() ?? false;
+                    changed = true;
+                }
+                if (parameters.ContainsKey("has_changed_date"))
+                {
+                    noGen.HasChangedDate = parameters["has_changed_date"]?.GetValue<bool>() ?? false;
+                    changed = true;
+                }
+                if (parameters.ContainsKey("has_owner"))
+                {
+                    noGen.HasOwner = parameters["has_owner"]?.GetValue<bool>() ?? false;
+                    changed = true;
+                }
+                if (parameters.ContainsKey("has_changed_by"))
+                {
+                    noGen.HasChangedBy = parameters["has_changed_by"]?.GetValue<bool>() ?? false;
+                    changed = true;
+                }
+                if (parameters.ContainsKey("persistable"))
+                {
+                    noGen.Persistable = parameters["persistable"]?.GetValue<bool>() ?? true;
+                    changed = true;
+                }
+
+                if (!changed)
+                    return JsonSerializer.Serialize(new { error = "No system attribute parameters provided. Use has_created_date, has_changed_date, has_owner, has_changed_by, or persistable." });
+
+                transaction.Commit();
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    entity = entityName,
+                    hasCreatedDate = noGen.HasCreatedDate,
+                    hasChangedDate = noGen.HasChangedDate,
+                    hasOwner = noGen.HasOwner,
+                    hasChangedBy = noGen.HasChangedBy,
+                    persistable = noGen.Persistable
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error configuring system attributes");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> ManageFolders(JsonObject parameters)
+        {
+            try
+            {
+                var action = parameters["action"]?.ToString()?.ToLowerInvariant();
+                var moduleName = parameters["module_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(action))
+                    return JsonSerializer.Serialize(new { error = "action is required: 'list', 'create', or 'move_document'" });
+
+                var module = Utils.Utils.ResolveModule(_model, moduleName);
+                if (module == null)
+                    return JsonSerializer.Serialize(new { error = $"Module '{moduleName ?? "(default)"}' not found" });
+
+                switch (action)
+                {
+                    case "list":
+                        return ListFoldersRecursive(module);
+
+                    case "create":
+                    {
+                        var folderName = parameters["folder_name"]?.ToString();
+                        if (string.IsNullOrEmpty(folderName))
+                            return JsonSerializer.Serialize(new { error = "folder_name is required for 'create' action" });
+
+                        var parentFolderName = parameters["parent_folder"]?.ToString();
+
+                        using var transaction = _model.StartTransaction("Create folder");
+                        var newFolder = _model.Create<IFolder>();
+                        newFolder.Name = folderName;
+
+                        if (!string.IsNullOrEmpty(parentFolderName))
+                        {
+                            var parentFolder = FindFolderRecursive(module, parentFolderName);
+                            if (parentFolder == null)
+                                return JsonSerializer.Serialize(new { error = $"Parent folder '{parentFolderName}' not found in module '{module.Name}'" });
+                            parentFolder.AddFolder(newFolder);
+                        }
+                        else
+                        {
+                            module.AddFolder(newFolder);
+                        }
+
+                        transaction.Commit();
+                        return JsonSerializer.Serialize(new { success = true, folder = folderName, module = module.Name, parent = parentFolderName ?? "(root)" });
+                    }
+
+                    case "move_document":
+                    {
+                        var documentName = parameters["document_name"]?.ToString();
+                        var targetFolderName = parameters["target_folder"]?.ToString();
+                        if (string.IsNullOrEmpty(documentName))
+                            return JsonSerializer.Serialize(new { error = "document_name is required for 'move_document' action" });
+                        if (string.IsNullOrEmpty(targetFolderName))
+                            return JsonSerializer.Serialize(new { error = "target_folder is required for 'move_document' action" });
+
+                        var doc = module.GetDocuments().FirstOrDefault(d => d.Name.Equals(documentName, StringComparison.OrdinalIgnoreCase));
+                        if (doc == null)
+                        {
+                            // Also search in subfolders
+                            doc = FindDocumentRecursive(module, documentName);
+                        }
+                        if (doc == null)
+                            return JsonSerializer.Serialize(new { error = $"Document '{documentName}' not found in module '{module.Name}'" });
+
+                        var targetFolder = FindFolderRecursive(module, targetFolderName);
+                        if (targetFolder == null)
+                            return JsonSerializer.Serialize(new { error = $"Target folder '{targetFolderName}' not found in module '{module.Name}'" });
+
+                        using var transaction = _model.StartTransaction("Move document to folder");
+                        targetFolder.AddDocument(doc);
+                        transaction.Commit();
+
+                        return JsonSerializer.Serialize(new { success = true, document = documentName, movedTo = targetFolderName });
+                    }
+
+                    default:
+                        return JsonSerializer.Serialize(new { error = $"Unknown action '{action}'. Use 'list', 'create', or 'move_document'." });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error managing folders");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        private string ListFoldersRecursive(IModule module)
+        {
+            var result = new List<object>();
+            CollectFolders(module, "", result);
+            return JsonSerializer.Serialize(new { success = true, module = module.Name, folders = result, rootDocuments = module.GetDocuments().Select(d => d.Name).ToList() });
+        }
+
+        private void CollectFolders(IFolderBase parent, string path, List<object> result)
+        {
+            foreach (var folder in parent.GetFolders())
+            {
+                var folderPath = string.IsNullOrEmpty(path) ? folder.Name : $"{path}/{folder.Name}";
+                result.Add(new
+                {
+                    name = folder.Name,
+                    path = folderPath,
+                    documentCount = folder.GetDocuments().Count,
+                    documents = folder.GetDocuments().Select(d => d.Name).ToList(),
+                    subfolderCount = folder.GetFolders().Count
+                });
+                CollectFolders(folder, folderPath, result);
+            }
+        }
+
+        private IFolder? FindFolderRecursive(IFolderBase parent, string folderName)
+        {
+            foreach (var folder in parent.GetFolders())
+            {
+                if (folder.Name.Equals(folderName, StringComparison.OrdinalIgnoreCase))
+                    return folder;
+                var found = FindFolderRecursive(folder, folderName);
+                if (found != null)
+                    return found;
+            }
+            return null;
+        }
+
+        private IDocument? FindDocumentRecursive(IFolderBase parent, string documentName)
+        {
+            foreach (var folder in parent.GetFolders())
+            {
+                var doc = folder.GetDocuments().FirstOrDefault(d => d.Name.Equals(documentName, StringComparison.OrdinalIgnoreCase));
+                if (doc != null) return doc;
+                var found = FindDocumentRecursive(folder, documentName);
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        public async Task<string> ValidateName(JsonObject parameters)
+        {
+            try
+            {
+                var name = parameters["name"]?.ToString();
+                if (string.IsNullOrEmpty(name))
+                    return JsonSerializer.Serialize(new { error = "name is required" });
+
+                if (_nameValidationService == null)
+                    return JsonSerializer.Serialize(new { error = "INameValidationService is not available" });
+
+                var validationResult = _nameValidationService.IsNameValid(name);
+                var autoFix = parameters["auto_fix"]?.GetValue<bool>() ?? false;
+
+                string? fixedName = null;
+                if (!validationResult.IsValid && autoFix)
+                {
+                    fixedName = _nameValidationService.GetValidName(name);
+                }
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    name,
+                    isValid = validationResult.IsValid,
+                    errorMessage = validationResult.IsValid ? null : validationResult.ErrorMessage,
+                    fixedName
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error validating name");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> CopyModelElement(JsonObject parameters)
+        {
+            try
+            {
+                var elementType = parameters["element_type"]?.ToString()?.ToLowerInvariant();
+                var sourceName = parameters["source_name"]?.ToString();
+                var newName = parameters["new_name"]?.ToString();
+                var sourceModuleName = parameters["source_module"]?.ToString();
+                var targetModuleName = parameters["target_module"]?.ToString();
+
+                if (string.IsNullOrEmpty(elementType))
+                    return JsonSerializer.Serialize(new { error = "element_type is required: 'entity', 'microflow', 'constant', 'enumeration'" });
+                if (string.IsNullOrEmpty(sourceName))
+                    return JsonSerializer.Serialize(new { error = "source_name is required" });
+                if (string.IsNullOrEmpty(newName))
+                    return JsonSerializer.Serialize(new { error = "new_name is required" });
+
+                var sourceModule = Utils.Utils.ResolveModule(_model, sourceModuleName);
+                var targetModule = Utils.Utils.ResolveModule(_model, targetModuleName) ?? sourceModule;
+                if (sourceModule == null)
+                    return JsonSerializer.Serialize(new { error = $"Source module '{sourceModuleName ?? "(default)"}' not found" });
+                if (targetModule == null)
+                    return JsonSerializer.Serialize(new { error = $"Target module '{targetModuleName ?? "(default)"}' not found" });
+
+                using var transaction = _model.StartTransaction($"Copy {elementType} '{sourceName}' as '{newName}'");
+
+                switch (elementType)
+                {
+                    case "entity":
+                    {
+                        var sourceEntity = sourceModule.DomainModel.GetEntities()
+                            .FirstOrDefault(e => e.Name.Equals(sourceName, StringComparison.OrdinalIgnoreCase));
+                        if (sourceEntity == null)
+                            return JsonSerializer.Serialize(new { error = $"Entity '{sourceName}' not found in module '{sourceModule.Name}'" });
+
+                        var copy = _model.Copy(sourceEntity);
+                        copy.Name = newName;
+                        targetModule.DomainModel.AddEntity(copy);
+                        transaction.Commit();
+                        return JsonSerializer.Serialize(new { success = true, elementType, source = sourceName, copy = newName, targetModule = targetModule.Name });
+                    }
+                    case "microflow":
+                    {
+                        var sourceMf = sourceModule.GetDocuments().OfType<IMicroflow>()
+                            .FirstOrDefault(m => m.Name.Equals(sourceName, StringComparison.OrdinalIgnoreCase));
+                        if (sourceMf == null)
+                            return JsonSerializer.Serialize(new { error = $"Microflow '{sourceName}' not found in module '{sourceModule.Name}'" });
+
+                        var copy = _model.Copy(sourceMf);
+                        copy.Name = newName;
+                        targetModule.AddDocument(copy);
+                        transaction.Commit();
+                        return JsonSerializer.Serialize(new { success = true, elementType, source = sourceName, copy = newName, targetModule = targetModule.Name });
+                    }
+                    case "constant":
+                    {
+                        var sourceConst = _model.Root.GetModuleDocuments<IConstant>(sourceModule)
+                            .FirstOrDefault(c => c.Name.Equals(sourceName, StringComparison.OrdinalIgnoreCase));
+                        if (sourceConst == null)
+                            return JsonSerializer.Serialize(new { error = $"Constant '{sourceName}' not found in module '{sourceModule.Name}'" });
+
+                        var copy = _model.Copy(sourceConst);
+                        copy.Name = newName;
+                        targetModule.AddDocument(copy);
+                        transaction.Commit();
+                        return JsonSerializer.Serialize(new { success = true, elementType, source = sourceName, copy = newName, targetModule = targetModule.Name });
+                    }
+                    case "enumeration":
+                    {
+                        var sourceEnum = _model.Root.GetModuleDocuments<IEnumeration>(sourceModule)
+                            .FirstOrDefault(e => e.Name.Equals(sourceName, StringComparison.OrdinalIgnoreCase));
+                        if (sourceEnum == null)
+                            return JsonSerializer.Serialize(new { error = $"Enumeration '{sourceName}' not found in module '{sourceModule.Name}'" });
+
+                        var copy = _model.Copy(sourceEnum);
+                        copy.Name = newName;
+                        targetModule.AddDocument(copy);
+                        transaction.Commit();
+                        return JsonSerializer.Serialize(new { success = true, elementType, source = sourceName, copy = newName, targetModule = targetModule.Name });
+                    }
+                    default:
+                        return JsonSerializer.Serialize(new { error = $"Unknown element_type '{elementType}'. Supported: entity, microflow, constant, enumeration." });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error copying model element");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
         }
 
         #endregion

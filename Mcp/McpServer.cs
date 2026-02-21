@@ -620,6 +620,11 @@ namespace MCPExtension.MCP
                 "read_microflow_details" => "Get details about a specific microflow including activities with their positions. Specify module_name to target a specific module.",
                 "create_microflow" => "Create a new microflow in the module with parameters and return type. Specify module_name to target a specific module.",
                 "create_microflow_activities" => "Create one or more microflow activities in sequence within an existing microflow. IMPORTANT: Mendix expressions use single quotes for string literals (e.g. 'Hello World'), not double quotes. Double quotes are auto-converted to single quotes as a convenience. Supported activity_type values: create_object (entity, variableName, commit, refresh_in_client, initial_values:[{attribute,value}]), change_attribute, change_association, commit, rollback, delete, retrieve_from_database, retrieve_by_association (association_name, output_variable, input_variable, module_name), microflow_call (microflow_name or Module.MicroflowName, return_variable, parameters:[{name,value}]), create_list (entity, output_variable), change_list (list_variable, operation:add/remove/clear/set, change_value), sort_list (list_variable, entity, sort_by:[{attribute,descending}], output_variable), filter_list (list_variable, entity, attribute, filter_expression, output_variable), find_in_list (list_variable, expression; optionally entity+attribute for find-by-attribute), aggregate_list (list_variable, function:count/sum/average/min/max/all/any; optionally entity+attribute for by-attribute, or expression for by-expression), show_message, log_message. Specify module_name to target a specific module.",
+                "configure_system_attributes" => "Toggle system attributes on a root entity (no generalization): HasCreatedDate, HasChangedDate, HasOwner, HasChangedBy, Persistable. Only works on entities without a generalization (inheriting entities get system attrs from parent).",
+                "manage_folders" => "Create, list, or move documents between folders within a module. Actions: 'list' (show all folders and documents), 'create' (create a new folder), 'move_document' (move a document into a folder).",
+                "validate_name" => "Validate a candidate name for a Mendix model element. Returns whether the name is valid and optionally auto-fixes it to a valid name.",
+                "copy_model_element" => "Deep-copy an entity, microflow, constant, or enumeration within the same module or to a different module. The copy gets a new name.",
+                "list_java_actions" => "List all Java actions in a module or across the project, including their parameter names and descriptions.",
                 _ => "Tool description not available"
             };
         }
@@ -1126,6 +1131,67 @@ namespace MCPExtension.MCP
                 {
                     type = "object",
                     properties = new { },
+                    required = new string[0]
+                },
+                "configure_system_attributes" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        entity_name = new { type = "string", description = "Name of the entity to configure." },
+                        module_name = new { type = "string", description = "Module containing the entity. Searches all modules if omitted." },
+                        has_created_date = new { type = "boolean", description = "Store the date and time of when the object is created." },
+                        has_changed_date = new { type = "boolean", description = "Store the date and time of the last change." },
+                        has_owner = new { type = "boolean", description = "Store the owner (creator) of the object." },
+                        has_changed_by = new { type = "boolean", description = "Store the user who last changed the object." },
+                        persistable = new { type = "boolean", description = "Whether the entity is persistable (stored in database) or non-persistable (in-memory only)." }
+                    },
+                    required = new[] { "entity_name" }
+                },
+                "manage_folders" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        action = new { type = "string", description = "Action: 'list', 'create', or 'move_document'." },
+                        module_name = new { type = "string", description = "Target module." },
+                        folder_name = new { type = "string", description = "Name for the new folder (for 'create' action)." },
+                        parent_folder = new { type = "string", description = "Parent folder name for nested creation (for 'create' action)." },
+                        document_name = new { type = "string", description = "Name of the document to move (for 'move_document' action)." },
+                        target_folder = new { type = "string", description = "Target folder to move document to (for 'move_document' action)." }
+                    },
+                    required = new[] { "action", "module_name" }
+                },
+                "validate_name" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        name = new { type = "string", description = "The candidate name to validate." },
+                        auto_fix = new { type = "boolean", description = "If true and name is invalid, returns a corrected valid name. Default: false." }
+                    },
+                    required = new[] { "name" }
+                },
+                "copy_model_element" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        element_type = new { type = "string", description = "Type of element: 'entity', 'microflow', 'constant', or 'enumeration'." },
+                        source_name = new { type = "string", description = "Name of the element to copy." },
+                        new_name = new { type = "string", description = "Name for the copy." },
+                        source_module = new { type = "string", description = "Module containing the source element. Searches all modules if omitted." },
+                        target_module = new { type = "string", description = "Module to place the copy in. Same as source if omitted." }
+                    },
+                    required = new[] { "element_type", "source_name", "new_name" }
+                },
+                "list_java_actions" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Module to list Java actions from. Lists all modules if omitted." }
+                    },
                     required = new string[0]
                 },
                 _ => new

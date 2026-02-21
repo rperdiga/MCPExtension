@@ -76,7 +76,8 @@ namespace MCPExtension
             var currentApp = _serviceProvider.GetRequiredService<IModel>();
             
             // Create tool instances with dependencies
-            var domainModelTools = new MendixDomainModelTools(currentApp, _serviceProvider.GetRequiredService<ILogger<MendixDomainModelTools>>());
+            var nameValidationService = _serviceProvider.GetService<Mendix.StudioPro.ExtensionsAPI.Services.INameValidationService>();
+            var domainModelTools = new MendixDomainModelTools(currentApp, _serviceProvider.GetRequiredService<ILogger<MendixDomainModelTools>>(), nameValidationService);
             var additionalTools = new MendixAdditionalTools(
                 currentApp,
                 _serviceProvider.GetRequiredService<ILogger<MendixAdditionalTools>>(),
@@ -259,6 +260,33 @@ namespace MCPExtension
                 return (object)result;
             });
 
+            // Phase 9: Entity Configuration & Module Organization
+            _mcpServer.RegisterTool("configure_system_attributes", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.ConfigureSystemAttributes(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("manage_folders", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.ManageFolders(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("validate_name", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.ValidateName(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("copy_model_element", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.CopyModelElement(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("list_java_actions", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ListJavaActions(parameters);
+                return (object)result;
+            });
+
             _logger.LogInformation("MCP tools registered successfully");
         }
 
@@ -298,7 +326,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 32, // Phase 7: +read_project_info
+                registeredTools = 37, // Phase 9: +5 entity config & organization tools
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",
