@@ -327,11 +327,24 @@ namespace MCPExtension.Tools
                     overviewPages
                 );
 
-                return JsonSerializer.Serialize(new { 
+                // BUG-009 note: The Mendix IPageGenerationService may generate broken widget bindings
+                // for enumeration-typed attributes and association references (CE1613 errors).
+                // Warn the user so they know to check and fix in Studio Pro.
+                var hasEnumAttrs = entitiesToGenerate.Any(e =>
+                    e.GetAttributes().Any(a => a.Type?.GetType().Name?.Contains("Enumeration") == true));
+                var hasAssocs = entitiesToGenerate.Any(e => e.GetAssociations(AssociationDirection.Both, null).Any());
+                var warnings = new List<string>();
+                if (hasEnumAttrs)
+                    warnings.Add("Some entities have enumeration-typed attributes which may generate broken widget bindings (CE1613). Please verify in Studio Pro.");
+                if (hasAssocs)
+                    warnings.Add("Some entities have associations which may generate broken reference widget bindings. Please verify in Studio Pro.");
+
+                return JsonSerializer.Serialize(new {
                     success = true,
                     message = $"Successfully generated {overviewPages.Length} overview pages",
                     generated_pages = overviewPages.Select(p => p.Name).ToArray(),
-                    entities_processed = entitiesToGenerate.Select(e => e.Name).ToArray()
+                    entities_processed = entitiesToGenerate.Select(e => e.Name).ToArray(),
+                    warnings = warnings.Any() ? warnings.ToArray() : null
                 });
             }
             catch (Exception ex)
@@ -386,6 +399,278 @@ namespace MCPExtension.Tools
             }
         }
 
+    private string FormatDataType(DataType? dt)
+    {
+        if (dt == null) return "Void";
+        return dt switch
+        {
+            ListType lt => $"List of {lt.EntityName?.FullName ?? "Unknown"}",
+            ObjectType ot => $"Object of {ot.EntityName?.FullName ?? "Unknown"}",
+            EnumerationType et => $"Enumeration {et.EnumerationName?.FullName ?? "Unknown"}",
+            _ => dt.ToString()
+        };
+    }
+
+    private List<object> SerializeMemberChanges(IChangeMembersAction changeMembersAction)
+    {
+        var changes = new List<object>();
+        try
+        {
+            foreach (var item in changeMembersAction.GetItems())
+            {
+                string memberName = "unknown";
+                string memberKind = "unknown";
+                try
+                {
+                    if (item.MemberType is AttributeMemberChangeType attrChange)
+                    {
+                        memberName = attrChange.Attribute?.Name ?? "unknown";
+                        memberKind = "attribute";
+                    }
+                    else if (item.MemberType is AssociationMemberChangeType assocChange)
+                    {
+                        memberName = assocChange.Association?.Name ?? "unknown";
+                        memberKind = "association";
+                    }
+                }
+                catch { /* resilient to API quirks */ }
+
+                changes.Add(new
+                {
+                    type = item.Type.ToString(),
+                    member = memberName,
+                    memberKind = memberKind,
+                    value = item.Value?.Text
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not read member changes");
+        }
+        return changes;
+    }
+
+    private Dictionary<string, object?> SerializeActivityAction(IActionActivity activity)
+    {
+        var result = new Dictionary<string, object?>();
+        result["caption"] = activity.Caption;
+        result["disabled"] = activity.Disabled;
+
+        try
+        {
+            switch (activity.Action)
+            {
+                case ICreateObjectAction createObj:
+                    result["actionType"] = "create_object";
+                    result["entity"] = createObj.Entity?.FullName;
+                    result["outputVariable"] = createObj.OutputVariableName;
+                    result["commit"] = createObj.Commit.ToString();
+                    result["refreshInClient"] = createObj.RefreshInClient;
+                    result["memberChanges"] = SerializeMemberChanges(createObj);
+                    break;
+
+                case IChangeObjectAction changeObj:
+                    result["actionType"] = "change_object";
+                    result["changeVariable"] = changeObj.ChangeVariableName;
+                    result["commit"] = changeObj.Commit.ToString();
+                    result["refreshInClient"] = changeObj.RefreshInClient;
+                    result["memberChanges"] = SerializeMemberChanges(changeObj);
+                    break;
+
+                case IRetrieveAction retrieve:
+                    result["actionType"] = "retrieve";
+                    result["outputVariable"] = retrieve.OutputVariableName;
+                    if (retrieve.RetrieveSource is IDatabaseRetrieveSource dbSource)
+                    {
+                        result["source"] = "database";
+                        result["entity"] = dbSource.Entity?.FullName;
+                        result["xpathConstraint"] = dbSource.XPathConstraint;
+                        result["firstOnly"] = dbSource.RetrieveJustFirstItem;
+                        if (dbSource.Range != null)
+                        {
+                            result["rangeOffset"] = dbSource.Range.OffsetExpression?.Text;
+                            result["rangeAmount"] = dbSource.Range.AmountExpression?.Text;
+                        }
+                        try
+                        {
+                            var sorting = dbSource.AttributesToSortBy;
+                            if (sorting != null && sorting.Length > 0)
+                            {
+                                result["sortBy"] = sorting.Select(s => new
+                                {
+                                    attribute = s.Attribute?.Name,
+                                    descending = s.SortByDescending
+                                }).ToList();
+                            }
+                        }
+                        catch { /* sorting may not be available */ }
+                    }
+                    else if (retrieve.RetrieveSource is IAssociationRetrieveSource assocSource)
+                    {
+                        result["source"] = "association";
+                        result["association"] = assocSource.Association?.Name;
+                        result["startVariable"] = assocSource.StartVariableName;
+                    }
+                    break;
+
+                case ICreateListAction createList:
+                    result["actionType"] = "create_list";
+                    result["entity"] = createList.Entity?.FullName;
+                    result["outputVariable"] = createList.OutputVariableName;
+                    break;
+
+                case ICommitAction commit:
+                    result["actionType"] = "commit";
+                    result["commitVariable"] = commit.CommitVariableName;
+                    result["withEvents"] = commit.WithEvents;
+                    result["refreshInClient"] = commit.RefreshInClient;
+                    break;
+
+                case IRollbackAction rollback:
+                    result["actionType"] = "rollback";
+                    result["rollbackVariable"] = rollback.RollbackVariableName;
+                    result["refreshInClient"] = rollback.RefreshInClient;
+                    break;
+
+                case IDeleteAction delete:
+                    result["actionType"] = "delete";
+                    result["deleteVariable"] = delete.DeleteVariableName;
+                    break;
+
+                case IChangeListAction changeList:
+                    result["actionType"] = "change_list";
+                    result["changeVariable"] = changeList.ChangeVariableName;
+                    result["operation"] = changeList.Type.ToString();
+                    try { result["value"] = changeList.Value?.Text; } catch { }
+                    break;
+
+                case IListOperationAction listOp:
+                    result["actionType"] = "list_operation";
+                    result["outputVariable"] = listOp.OutputVariableName;
+                    var op = listOp.Operation;
+                    result["listVariable"] = op?.ListVariableName;
+                    if (op is ISort sort)
+                    {
+                        result["operationType"] = "sort";
+                        try
+                        {
+                            var sortAttrs = sort.AttributesToSortBy;
+                            if (sortAttrs != null && sortAttrs.Length > 0)
+                            {
+                                result["sortBy"] = sortAttrs.Select(s => new
+                                {
+                                    attribute = s.Attribute?.Name,
+                                    descending = s.SortByDescending
+                                }).ToList();
+                            }
+                        }
+                        catch { }
+                    }
+                    else if (op is IFilter filter)
+                    {
+                        result["operationType"] = "filter";
+                        result["expression"] = filter.Expression?.Text;
+                    }
+                    else if (op is IFindByExpression findByExpr)
+                    {
+                        result["operationType"] = "find_by_expression";
+                        result["expression"] = findByExpr.Expression?.Text;
+                    }
+                    else if (op is IFind find)
+                    {
+                        result["operationType"] = "find";
+                        result["expression"] = find.Expression?.Text;
+                    }
+                    else if (op is IBinaryListOperation binaryOp)
+                    {
+                        var rawName = op.GetType().Name.ToLowerInvariant().Replace("proxy", "");
+                        result["operationType"] = rawName;
+                        result["secondListVariable"] = binaryOp.SecondListOrObjectVariableName;
+                    }
+                    else
+                    {
+                        var rawName = op?.GetType().Name ?? "unknown";
+                        result["operationType"] = rawName.ToLowerInvariant().Replace("proxy", "");
+                    }
+                    break;
+
+                case IAggregateListAction aggregate:
+                    result["actionType"] = "aggregate_list";
+                    result["inputListVariable"] = aggregate.InputListVariableName;
+                    result["outputVariable"] = aggregate.OutputVariableName;
+                    result["function"] = aggregate.AggregateFunction.ToString();
+                    try
+                    {
+                        var aggFunc = aggregate.AggregateListFunction;
+                        if (aggFunc?.Expression != null)
+                            result["expression"] = aggFunc.Expression.Text;
+                        if (aggFunc?.Attribute != null)
+                            result["attribute"] = aggFunc.Attribute.Name;
+                        if (aggFunc?.ReduceListFunction != null)
+                        {
+                            result["reduceInitialValue"] = aggFunc.ReduceListFunction.InitialValueExpression?.Text;
+                            result["reduceDataType"] = FormatDataType(aggFunc.ReduceListFunction.DataType);
+                        }
+                    }
+                    catch { }
+                    break;
+
+                case IMicroflowCallAction mfCall:
+                    result["actionType"] = "microflow_call";
+                    result["calledMicroflow"] = mfCall.MicroflowCall?.Microflow?.FullName;
+                    result["outputVariable"] = mfCall.OutputVariableName;
+                    result["useReturnVariable"] = mfCall.UseReturnVariable;
+                    try
+                    {
+                        var mappings = mfCall.MicroflowCall?.GetParameterMappings();
+                        if (mappings != null && mappings.Count > 0)
+                        {
+                            result["parameterMappings"] = mappings.Select(m => new
+                            {
+                                parameter = m.Parameter?.FullName,
+                                argument = m.Argument?.Text
+                            }).ToList();
+                        }
+                    }
+                    catch { }
+                    break;
+
+                case IJavaActionCallAction javaCall:
+                    result["actionType"] = "java_action_call";
+                    result["javaAction"] = javaCall.JavaAction?.FullName;
+                    result["outputVariable"] = javaCall.OutputVariableName;
+                    result["useReturnVariable"] = javaCall.UseReturnVariable;
+                    try
+                    {
+                        var mappings = javaCall.GetParameterMappings();
+                        if (mappings != null && mappings.Count > 0)
+                        {
+                            result["parameterMappings"] = mappings.Select(m => new
+                            {
+                                parameter = m.ToString()
+                            }).ToList();
+                        }
+                    }
+                    catch { }
+                    break;
+
+                default:
+                    result["actionType"] = "unknown";
+                    result["typeName"] = activity.Action?.GetType().Name ?? "null";
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            result["actionType"] = "error";
+            result["error"] = ex.Message;
+            result["typeName"] = activity.Action?.GetType().Name ?? "null";
+        }
+
+        return result;
+    }
+
     public async Task<object> ReadMicroflowDetails(JsonObject arguments)
     {
         try
@@ -399,92 +684,128 @@ namespace MCPExtension.Tools
             }
 
             var microflowName = arguments["microflow_name"]?.ToString();
-            
             if (string.IsNullOrEmpty(microflowName))
             {
                 var error = "Microflow name is required";
                 SetLastError(error);
-                return JsonSerializer.Serialize(new { error = error });
+                return JsonSerializer.Serialize(new { error });
             }
 
+            // Handle qualified names like "Module.MicroflowName"
             var moduleName = arguments["module_name"]?.ToString();
+            if (microflowName.Contains('.') && string.IsNullOrWhiteSpace(moduleName))
+            {
+                var parts = microflowName.Split('.', 2);
+                moduleName = parts[0];
+                microflowName = parts[1];
+            }
+
             var module = Utils.Utils.ResolveModule(_model, moduleName);
             if (module == null)
             {
-                var error = string.IsNullOrWhiteSpace(moduleName) ? "No module found in ReadMicroflowDetails." : $"Module '{moduleName}' not found.";
+                var error = string.IsNullOrWhiteSpace(moduleName)
+                    ? "No module found in ReadMicroflowDetails."
+                    : $"Module '{moduleName}' not found.";
                 _logger.LogError(error);
                 SetLastError(error);
                 return JsonSerializer.Serialize(new { error });
             }
 
-            // Find the microflow
-                var microflow = module.GetDocuments()
-                    .OfType<IMicroflow>()
-                    .FirstOrDefault(mf => mf.Name.Equals(microflowName, StringComparison.OrdinalIgnoreCase));
+            var microflow = module.GetDocuments()
+                .OfType<IMicroflow>()
+                .FirstOrDefault(mf => mf.Name.Equals(microflowName, StringComparison.OrdinalIgnoreCase));
 
-                if (microflow == null)
-                {
-                    var error = $"Microflow '{microflowName}' not found in module '{module.Name}'";
-                    SetLastError(error);
-                    return JsonSerializer.Serialize(new { error = error });
-                }
+            if (microflow == null)
+            {
+                var error = $"Microflow '{microflowName}' not found in module '{module.Name}'";
+                SetLastError(error);
+                return JsonSerializer.Serialize(new { error });
+            }
 
-                // Get microflow service to analyze activities
-                var microflowService = _serviceProvider?.GetService<IMicroflowService>();
-                var activitiesInfo = new List<object>();
-                
-                if (microflowService != null)
+            var microflowService = _serviceProvider?.GetService<IMicroflowService>();
+
+            // --- Parameters ---
+            var parametersInfo = new List<object>();
+            if (microflowService != null)
+            {
+                try
                 {
-                    try
+                    var parameters = microflowService.GetParameters(microflow);
+                    foreach (var param in parameters)
                     {
-                        var activities = microflowService.GetAllMicroflowActivities(microflow);
-                        for (int i = 0; i < activities.Count; i++)
+                        parametersInfo.Add(new
                         {
-                            var activity = activities[i];
+                            name = param.Name,
+                            type = FormatDataType(param.Type),
+                            documentation = string.IsNullOrEmpty(param.Documentation) ? null : param.Documentation
+                        });
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Could not retrieve parameters for microflow '{MicroflowName}'", microflowName);
+                }
+            }
+
+            // --- Activities ---
+            var activitiesInfo = new List<object>();
+            if (microflowService != null)
+            {
+                try
+                {
+                    var activities = microflowService.GetAllMicroflowActivities(microflow);
+                    for (int i = 0; i < activities.Count; i++)
+                    {
+                        var activity = activities[i];
+                        if (activity is IActionActivity actionActivity)
+                        {
+                            var details = SerializeActivityAction(actionActivity);
+                            details["position"] = i + 1;
+                            activitiesInfo.Add(details);
+                        }
+                        else
+                        {
                             activitiesInfo.Add(new
                             {
-                                position = i + 1, // 1-based position
-                                index = i, // 0-based index
-                                type = activity.GetType().Name,
-                                activityId = activity.GetHashCode()
+                                position = i + 1,
+                                actionType = "non_action",
+                                typeName = activity.GetType().Name
                             });
                         }
                     }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Could not retrieve activity details for microflow analysis");
-                    }
                 }
-
-                // Extract basic microflow information
-                var microflowInfo = new
+                catch (Exception ex)
                 {
-                    name = microflow.Name,
-                    qualifiedName = microflow.QualifiedName?.FullName ?? "Unknown",
-                    module = module.Name,
-                    returnType = microflow.ReturnType?.GetType().Name ?? "Void",
-                    returnTypeFullName = microflow.ReturnType?.GetType().FullName ?? "Void",
-                    activityCount = activitiesInfo.Count,
-                    activities = activitiesInfo,
-                    // Note: Advanced activity analysis requires IMicroflowService which is not available
-                    limitations = activitiesInfo.Any() 
-                        ? "Basic activity information available. Use read_microflow_activities API for detailed analysis."
-                        : "Detailed activity analysis requires additional Mendix services not currently available in this MCP implementation"
-                };
+                    _logger.LogWarning(ex, "Could not retrieve activities for microflow '{MicroflowName}'", microflowName);
+                }
+            }
 
-                return JsonSerializer.Serialize(new 
-                { 
-                    success = true,
-                    microflow = microflowInfo
-                });
-            }
-            catch (Exception ex)
+            // --- Return type ---
+            var returnType = FormatDataType(microflow.ReturnType);
+
+            var microflowInfo = new
             {
-                _logger.LogError(ex, "Error reading microflow details");
-                SetLastError("Error reading microflow details", ex);
-                return JsonSerializer.Serialize(new { error = ex.Message });
-            }
+                name = microflow.Name,
+                qualifiedName = microflow.QualifiedName?.FullName ?? "Unknown",
+                module = module.Name,
+                returnType = returnType,
+                returnVariableName = microflow.ReturnVariableName,
+                url = string.IsNullOrEmpty(microflow.Url) ? null : microflow.Url,
+                parameterCount = parametersInfo.Count,
+                parameters = parametersInfo,
+                activityCount = activitiesInfo.Count,
+                activities = activitiesInfo
+            };
+
+            return JsonSerializer.Serialize(new { success = true, microflow = microflowInfo });
         }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error reading microflow details");
+            SetLastError("Error reading microflow details", ex);
+            return JsonSerializer.Serialize(new { error = ex.Message });
+        }
+    }
 
         public async Task<object> GetLastError(JsonObject arguments)
         {
@@ -1207,29 +1528,74 @@ namespace MCPExtension.Tools
                         }
                         var paramName = paramObj["name"]?.ToString();
                         var paramTypeStr = paramObj["type"]?.ToString();
+                        var paramEntityStr = paramObj["entity"]?.ToString();
                         if (string.IsNullOrWhiteSpace(paramName) || string.IsNullOrWhiteSpace(paramTypeStr))
                         {
                             _logger.LogError($"[create_microflow] Parameter missing name or type: {paramObj}");
                             continue;
                         }
-                        var dataType = Utils.Utils.DataTypeFromString(paramTypeStr);
+
+                        // Handle Object and List parameter types with entity reference
+                        Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType dataType;
+                        var normalizedParamType = paramTypeStr.Trim().ToLowerInvariant();
+                        if ((normalizedParamType == "object" || normalizedParamType == "list") && !string.IsNullOrWhiteSpace(paramEntityStr))
+                        {
+                            var (paramEntity, _) = Utils.Utils.FindEntityAcrossModules(_model, paramEntityStr);
+                            if (paramEntity != null)
+                            {
+                                dataType = normalizedParamType == "object"
+                                    ? Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.Object(paramEntity.QualifiedName)
+                                    : Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.List(paramEntity.QualifiedName);
+                            }
+                            else
+                            {
+                                _logger.LogWarning($"[create_microflow] Entity '{paramEntityStr}' not found for param '{paramName}', defaulting to String");
+                                dataType = Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.String;
+                            }
+                        }
+                        else
+                        {
+                            dataType = Utils.Utils.DataTypeFromString(paramTypeStr);
+                        }
                         paramList.Add((paramName, dataType));
                     }
                 }
 
                 // Prepare return value with proper expressions
                 var returnTypeStr = arguments["returnType"]?.ToString();
+                var returnEntityStr = arguments["returnEntity"]?.ToString();
                 Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType returnType = Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.Void;
-                
+
                 // Only set a non-void return type if explicitly specified and meaningful
                 if (!string.IsNullOrWhiteSpace(returnTypeStr) &&
                     !returnTypeStr.Trim().Equals("void", StringComparison.OrdinalIgnoreCase) &&
                     !returnTypeStr.Trim().Equals("", StringComparison.OrdinalIgnoreCase))
                 {
-                    returnType = Utils.Utils.DataTypeFromString(returnTypeStr);
+                    // BUG-002 fix: Handle List and Object return types that require entity reference
+                    var normalizedReturnType = returnTypeStr.Trim().ToLowerInvariant();
+                    if ((normalizedReturnType == "list" || normalizedReturnType == "object") && !string.IsNullOrWhiteSpace(returnEntityStr))
+                    {
+                        var (returnEntity, _) = Utils.Utils.FindEntityAcrossModules(_model, returnEntityStr);
+                        if (returnEntity != null)
+                        {
+                            returnType = normalizedReturnType == "list"
+                                ? Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.List(returnEntity.QualifiedName)
+                                : Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.Object(returnEntity.QualifiedName);
+                            _logger.LogInformation($"[create_microflow] Created {normalizedReturnType} return type for entity '{returnEntityStr}'");
+                        }
+                        else
+                        {
+                            _logger.LogWarning($"[create_microflow] Entity '{returnEntityStr}' not found for {normalizedReturnType} return type, falling back to String");
+                            returnType = Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.String;
+                        }
+                    }
+                    else
+                    {
+                        returnType = Utils.Utils.DataTypeFromString(returnTypeStr);
+                    }
                 }
 
-                _logger.LogInformation($"[create_microflow] Return type string: '{returnTypeStr ?? "null"}', resolved to: {returnType}");
+                _logger.LogInformation($"[create_microflow] Return type string: '{returnTypeStr ?? "null"}', entity: '{returnEntityStr ?? "null"}', resolved to: {returnType}");
 
                 Mendix.StudioPro.ExtensionsAPI.Model.Microflows.MicroflowReturnValue? returnValue = null;
                 
@@ -1246,10 +1612,22 @@ namespace MCPExtension.Tools
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, $"[create_microflow] Failed to create return value for {returnType}");
-                        var error = $"Failed to create return value for type {returnType}: {ex.Message}";
-                        SetLastError(error, ex);
-                        return JsonSerializer.Serialize(new { error });
+                        // BUG-002 fix: For List/Object types, try without expression (use empty)
+                        _logger.LogWarning(ex, $"[create_microflow] Failed to create return value with expression, trying with 'empty': {ex.Message}");
+                        try
+                        {
+                            var microflowExpressionService = serviceProvider.GetRequiredService<IMicroflowExpressionService>();
+                            var expression = microflowExpressionService.CreateFromString("empty");
+                            returnValue = new Mendix.StudioPro.ExtensionsAPI.Model.Microflows.MicroflowReturnValue(returnType, expression);
+                            _logger.LogInformation($"[create_microflow] Created return value for {returnType} with 'empty' expression");
+                        }
+                        catch (Exception ex2)
+                        {
+                            _logger.LogError(ex2, $"[create_microflow] Failed to create return value for {returnType}");
+                            var error = $"Failed to create return value for type {returnType}: {ex2.Message}";
+                            SetLastError(error, ex2);
+                            return JsonSerializer.Serialize(new { error });
+                        }
                     }
                 }
 
@@ -1356,7 +1734,22 @@ namespace MCPExtension.Tools
                 var microflowName = arguments["microflow_name"]?.ToString();
                 var activityType = arguments["activity_type"]?.ToString();
                 var activityData = arguments["activity_config"]?.AsObject();
-                
+
+                // BUG-005 fix: If no nested activity_config, use arguments itself as config (flat format)
+                if (activityData == null && activityType != null)
+                {
+                    activityData = new JsonObject();
+                    foreach (var prop in arguments)
+                    {
+                        if (prop.Key != "activity_type" && prop.Key != "microflow_name" &&
+                            prop.Key != "module_name" && prop.Key != "insert_position" &&
+                            prop.Key != "insert_after_activity_index")
+                        {
+                            activityData[prop.Key] = prop.Value?.DeepClone();
+                        }
+                    }
+                }
+
                 // Parse positioning parameters
                 int? insertPosition = null;
                 if (arguments.TryGetPropertyValue("insert_position", out var positionValue))
@@ -1391,7 +1784,11 @@ namespace MCPExtension.Tools
 
                 if (string.IsNullOrWhiteSpace(activityType))
                 {
-                    var error = "Activity type is required.";
+                    // BUG-004 fix: Check if user used 'type' instead of 'activity_type'
+                    var possibleType = arguments["type"]?.ToString();
+                    var error = !string.IsNullOrWhiteSpace(possibleType)
+                        ? $"Activity type is required. Did you mean 'activity_type' instead of 'type'? Found type='{possibleType}'. Use 'activity_type' as the field name."
+                        : "Activity type is required. Use the 'activity_type' field to specify the type (e.g., 'create_object', 'retrieve_from_database', 'microflow_call').";
                     _logger.LogError($"ERROR: {error} - activityType was null/empty/whitespace");
                     SetLastError(error);
                     return JsonSerializer.Serialize(new { error });
@@ -1572,21 +1969,31 @@ namespace MCPExtension.Tools
 
                     if (activity == null)
                     {
+                        // BUG-008 fix: Preserve specific error from the activity handler
+                        var specificError = _lastError;
                         var availableParams = activityData?.AsObject()?.Select(kv => $"{kv.Key}={kv.Value}") ?? new string[0];
                         var paramsString = availableParams.Any() ? $" Available parameters: {string.Join(", ", availableParams)}" : " No parameters provided.";
-                        
-                        var error = $"Failed to create activity of type '{activityType}'.{paramsString}";
-                        if (activityType == "log")
+
+                        var error = $"Failed to create activity of type '{activityType}'.";
+                        if (!string.IsNullOrEmpty(specificError))
                         {
-                            error += " Log activities are not supported by the current Mendix Extensions API. Consider using change_variable or create_variable instead.";
-                        }
-                        else if (activityType == "delete" || activityType == "delete_object")
-                        {
-                            error += " For delete activities, ensure you specify the object variable using one of: variable_name, variableName, variable, objectVariable, object_variable, or object.";
+                            error += $" Detail: {specificError}";
                         }
                         else
                         {
-                            error += " Please check the activity configuration and try again.";
+                            error += paramsString;
+                            if (activityType == "log" || activityType == "log_message")
+                            {
+                                error += " Log activities are not supported by the current Mendix Extensions API. Consider using change_variable or create_variable instead.";
+                            }
+                            else if (activityType == "delete" || activityType == "delete_object")
+                            {
+                                error += " For delete activities, ensure you specify the object variable using one of: variable_name, variableName, variable, objectVariable, object_variable, or object.";
+                            }
+                            else
+                            {
+                                error += " Please check the activity configuration and try again.";
+                            }
                         }
                         SetLastError(error);
                         return JsonSerializer.Serialize(new { error });
@@ -1734,16 +2141,17 @@ namespace MCPExtension.Tools
         {
             try
             {
-                // Log activities are not supported by the current Mendix Extensions API
-                // Instead, we'll create a simple comment activity or recommend using a different approach
-                
-                var message = activityData?["message"]?.ToString() ?? "Log message not available in Extensions API";
-                var level = activityData?["level"]?.ToString() ?? "info";
-                
-                _logger.LogWarning($"Log activities are not supported by the Extensions API. Requested log: [{level}] {message}");
-                
-                // Return null to indicate this activity type is not supported
-                // This will cause the method to return an error message
+                var message = activityData?["message"]?.ToString() ?? "'Log message'";
+                var level = activityData?["level"]?.ToString() ?? "Info";
+
+                // The Mendix Extensions API does not expose a CreateLogMessageActivity method.
+                // As a workaround, create a change_variable activity that stores the log message,
+                // or inform the caller that log_message is not supported.
+                _logger.LogWarning($"Log activities are not directly supported by the Extensions API. Requested log: [{level}] {message}");
+                SetLastError($"log_message activity is not supported by the Mendix Studio Pro Extensions API. " +
+                    $"The API does not expose LogMessageAction creation. " +
+                    $"Workaround: Use a Java action call to write logs, or add log messages manually in Studio Pro. " +
+                    $"Requested: [{level}] {message}");
                 return null;
             }
             catch (Exception ex)
@@ -2734,11 +3142,17 @@ namespace MCPExtension.Tools
                     return null;
                 }
 
-                _logger.LogInformation($"Creating create list activity: entity='{entityName}', output='{outputVariable}'");
-                return microflowActivitiesService.CreateCreateListActivity(_model, entity, outputVariable);
+                _logger.LogInformation($"Creating create list activity: entity='{entityName}', output='{outputVariable}', entityQN='{entity.QualifiedName}'");
+                var activity = microflowActivitiesService.CreateCreateListActivity(_model, entity, outputVariable);
+                if (activity == null)
+                {
+                    SetLastError($"CreateCreateListActivity returned null for entity '{entityName}', output '{outputVariable}'");
+                }
+                return activity;
             }
             catch (Exception ex)
             {
+                _logger.LogError(ex, $"Failed to create list activity: entity='{activityData?["entity"]?.ToString()}', error={ex.Message}");
                 SetLastError($"Failed to create list activity: {ex.Message}", ex);
                 return null;
             }
@@ -3853,14 +4267,40 @@ namespace MCPExtension.Tools
                             var activityType = activityDef["activity_type"]?.ToString();
                             var activityConfig = activityDef["activity_config"]?.AsObject();
 
+                            // BUG-005 fix: If no nested activity_config, use the activity definition itself as config
+                            // (support flat format where properties are at the same level as activity_type)
+                            if (activityConfig == null && activityType != null)
+                            {
+                                // Clone the definition and remove the activity_type key to use as config
+                                activityConfig = new JsonObject();
+                                foreach (var prop in activityDef)
+                                {
+                                    if (prop.Key != "activity_type")
+                                    {
+                                        activityConfig[prop.Key] = prop.Value?.DeepClone();
+                                    }
+                                }
+                            }
+
                             _logger.LogInformation($"Processing activity {i + 1}: type='{activityType}'");
                             await File.AppendAllTextAsync(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] VARIABLE TRACKING: Processing activity {i + 1}: type='{activityType}'\n");
                             await File.AppendAllTextAsync(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] VARIABLE TRACKING: Original config: {activityConfig?.ToJsonString()}\n");
 
                             if (string.IsNullOrWhiteSpace(activityType))
                             {
-                                _logger.LogWarning($"Skipping activity at index {i} - no activity type specified");
-                                continue;
+                                // BUG-004 fix: Check for common misname 'type' instead of 'activity_type'
+                                var possibleType = activityDef["type"]?.ToString();
+                                if (!string.IsNullOrWhiteSpace(possibleType))
+                                {
+                                    _logger.LogWarning($"Activity at index {i} uses 'type' instead of 'activity_type'. Auto-correcting to '{possibleType}'.");
+                                    activityType = possibleType;
+                                }
+                                else
+                                {
+                                    _logger.LogWarning($"Skipping activity at index {i} - no activity type specified. Use 'activity_type' field.");
+                                    activityResults.Add(new { index = i + 1, type = (string?)null, status = "skipped", error = "No 'activity_type' field found. Use 'activity_type' (not 'type') to specify the activity." });
+                                    continue;
+                                }
                             }
 
                             // Apply variable name substitutions to activity config
@@ -3904,8 +4344,14 @@ namespace MCPExtension.Tools
 
                         if (createdActivities.Count == 0)
                         {
-                            var error = "No activities were successfully created.";
-                            SetLastError(error);
+                            // BUG-008 fix: Don't overwrite specific error from individual activity handlers
+                            var specificError = _lastError;
+                            var error = !string.IsNullOrEmpty(specificError)
+                                ? $"No activities were successfully created. Last error: {specificError}"
+                                : "No activities were successfully created.";
+                            // Only set if no specific error already exists
+                            if (string.IsNullOrEmpty(specificError))
+                                SetLastError(error);
                             return JsonSerializer.Serialize(new { error, activityResults });
                         }
 
@@ -5123,6 +5569,76 @@ namespace MCPExtension.Tools
                 var maxResults = parameters?["max_results"]?.GetValue<int>() ?? 50;
 
                 var units = GetUnitsWithFallback(root, typeName);
+
+                // BUG-014 fix: For embedded types (Entity, Association, Attribute), use the typed API
+                // since GetUnitsOfType only works for top-level document units
+                var normalizedType = typeName.ToLowerInvariant();
+                if (units.Count == 0 && (normalizedType.Contains("entity") || normalizedType.Contains("association") || normalizedType.Contains("attribute")))
+                {
+                    var embeddedResults = new List<object>();
+                    var modules = string.IsNullOrEmpty(moduleName)
+                        ? Utils.Utils.GetAllNonAppStoreModules(_model).ToList()
+                        : new List<IModule> { Utils.Utils.GetModuleByName(_model, moduleName)! }.Where(m => m != null).ToList();
+
+                    foreach (var mod in modules)
+                    {
+                        if (mod?.DomainModel == null) continue;
+
+                        if (normalizedType.Contains("entity") && !normalizedType.Contains("association"))
+                        {
+                            foreach (var entity in mod.DomainModel.GetEntities().Take(maxResults - embeddedResults.Count))
+                            {
+                                var entityInfo = new Dictionary<string, object?>
+                                {
+                                    ["name"] = entity.Name,
+                                    ["qualifiedName"] = entity.QualifiedName?.ToString(),
+                                    ["module"] = mod.Name,
+                                    ["type"] = "DomainModels$Entity"
+                                };
+                                if (includeProperties)
+                                {
+                                    entityInfo["attributes"] = entity.GetAttributes().Select(a => new { name = a.Name, type = a.Type?.GetType().Name }).ToList();
+                                    entityInfo["attributeCount"] = entity.GetAttributes().Count();
+                                    entityInfo["associationCount"] = entity.GetAssociations(AssociationDirection.Both, null).Count();
+                                }
+                                embeddedResults.Add(entityInfo);
+                                if (embeddedResults.Count >= maxResults) break;
+                            }
+                        }
+                        else if (normalizedType.Contains("association"))
+                        {
+                            foreach (var entity in mod.DomainModel.GetEntities())
+                            {
+                                foreach (var assoc in entity.GetAssociations(AssociationDirection.Both, null).Take(maxResults - embeddedResults.Count))
+                                {
+                                    var assocInfo = new Dictionary<string, object?>
+                                    {
+                                        ["name"] = assoc.Association?.Name,
+                                        ["qualifiedName"] = assoc.Association?.Name != null ? $"{mod.Name}.{assoc.Association.Name}" : null,
+                                        ["module"] = mod.Name,
+                                        ["type"] = "DomainModels$Association",
+                                        ["parent"] = assoc.Parent?.Name,
+                                        ["child"] = assoc.Child?.Name
+                                    };
+                                    embeddedResults.Add(assocInfo);
+                                    if (embeddedResults.Count >= maxResults) break;
+                                }
+                                if (embeddedResults.Count >= maxResults) break;
+                            }
+                        }
+                        if (embeddedResults.Count >= maxResults) break;
+                    }
+
+                    return JsonSerializer.Serialize(new
+                    {
+                        success = true,
+                        typeName,
+                        totalFound = embeddedResults.Count,
+                        returned = embeddedResults.Count,
+                        elements = embeddedResults,
+                        note = "Results obtained via typed domain model API (embedded elements are not accessible via GetUnitsOfType)"
+                    });
+                }
 
                 var filtered = units
                     .Where(u => string.IsNullOrEmpty(moduleName) ||

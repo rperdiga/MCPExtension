@@ -68,6 +68,14 @@ public class Utils
         if (model == null || string.IsNullOrWhiteSpace(entityName))
             return (null, null);
 
+        // Handle qualified names like "ModuleName.EntityName"
+        if (entityName.Contains('.') && string.IsNullOrWhiteSpace(moduleName))
+        {
+            var parts = entityName.Split('.', 2);
+            moduleName = parts[0];
+            entityName = parts[1];
+        }
+
         if (!string.IsNullOrWhiteSpace(moduleName))
         {
             var module = GetModuleByName(model, moduleName);

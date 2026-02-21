@@ -122,6 +122,14 @@ namespace MCPExtension.Tools
                     return JsonSerializer.Serialize(new { error = "entity_name and parent_entity are required" });
                 }
 
+                // BUG-015 fix: Prevent self-referencing generalization
+                if (entityName.Equals(parentEntityName, StringComparison.OrdinalIgnoreCase) &&
+                    (string.IsNullOrEmpty(moduleName) && string.IsNullOrEmpty(parentModuleName) ||
+                     (!string.IsNullOrEmpty(moduleName) && moduleName.Equals(parentModuleName, StringComparison.OrdinalIgnoreCase))))
+                {
+                    return JsonSerializer.Serialize(new { error = $"Entity '{entityName}' cannot inherit from itself (self-referencing generalization)" });
+                }
+
                 var (entity, entityModule) = Utils.Utils.FindEntityAcrossModules(_model, entityName, moduleName);
                 if (entity == null)
                 {
@@ -132,6 +140,12 @@ namespace MCPExtension.Tools
                 if (parentEntity == null)
                 {
                     return JsonSerializer.Serialize(new { error = $"Parent entity '{parentEntityName}' not found" + (parentModuleName != null ? $" in module '{parentModuleName}'" : "") });
+                }
+
+                // BUG-015 fix: Also check resolved entity identity
+                if (ReferenceEquals(entity, parentEntity))
+                {
+                    return JsonSerializer.Serialize(new { error = $"Entity '{entityName}' cannot inherit from itself (self-referencing generalization)" });
                 }
 
                 using (var transaction = _model.StartTransaction("set entity generalization"))
@@ -225,13 +239,38 @@ namespace MCPExtension.Tools
                     return JsonSerializer.Serialize(new { error = $"Entity '{entityName}' not found" });
                 }
 
+                // BUG-011 fix: Accept both qualified ("Module.MicroflowName") and unqualified names
+                var mfSearchName = microflowName;
+                string? mfModuleHint = null;
+                if (microflowName.Contains('.'))
+                {
+                    var parts = microflowName.Split('.', 2);
+                    mfModuleHint = parts[0];
+                    mfSearchName = parts[1];
+                }
+
                 // Find the microflow across all non-AppStore modules
                 IMicroflow? microflow = null;
                 foreach (var mod in Utils.Utils.GetAllNonAppStoreModules(_model))
                 {
+                    // If module hint provided, prefer matching module first
+                    if (mfModuleHint != null && !mod.Name.Equals(mfModuleHint, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
                     microflow = mod.GetDocuments().OfType<IMicroflow>()
-                        .FirstOrDefault(mf => mf.Name.Equals(microflowName, StringComparison.OrdinalIgnoreCase));
+                        .FirstOrDefault(mf => mf.Name.Equals(mfSearchName, StringComparison.OrdinalIgnoreCase));
                     if (microflow != null) break;
+                }
+
+                // If not found with module hint, try without
+                if (microflow == null && mfModuleHint != null)
+                {
+                    foreach (var mod in Utils.Utils.GetAllNonAppStoreModules(_model))
+                    {
+                        microflow = mod.GetDocuments().OfType<IMicroflow>()
+                            .FirstOrDefault(mf => mf.Name.Equals(mfSearchName, StringComparison.OrdinalIgnoreCase));
+                        if (microflow != null) break;
+                    }
                 }
 
                 if (microflow == null)
@@ -1287,7 +1326,8 @@ namespace MCPExtension.Tools
                         var entityObj = entityNode?.AsObject();
                         if (entityObj == null) continue;
 
-                        var entityName = entityObj["entity_name"]?.ToString();
+                        // BUG-010 fix: Accept both 'entity_name' and 'name' fields
+                        var entityName = entityObj["entity_name"]?.ToString() ?? entityObj["name"]?.ToString();
                         var attributesArray = entityObj["attributes"]?.AsArray();
 
                         if (string.IsNullOrEmpty(entityName)) continue;
@@ -1583,7 +1623,8 @@ namespace MCPExtension.Tools
                             var entityObj = entityNode?.AsObject();
                             if (entityObj == null) continue;
 
-                            var entityName = entityObj["entity_name"]?.ToString();
+                            // BUG-012 fix: Accept both 'entity_name' and 'name' fields
+                            var entityName = entityObj["entity_name"]?.ToString() ?? entityObj["name"]?.ToString();
                             var attributesArray = entityObj["attributes"]?.AsArray();
 
                             if (string.IsNullOrEmpty(entityName)) continue;
@@ -2224,10 +2265,12 @@ namespace MCPExtension.Tools
             if (string.IsNullOrEmpty(behavior))
                 return DeletingBehavior.DeleteMeButKeepReferences;
 
+            // BUG-001 fix: Support all common aliases for delete behaviors
             return behavior.ToLowerInvariant().Trim() switch
             {
-                "delete_me_and_references" or "cascade" => DeletingBehavior.DeleteMeAndReferences,
-                "delete_me_if_no_references" or "prevent" => DeletingBehavior.DeleteMeIfNoReferences,
+                "delete_me_and_references" or "cascade" or "delete_me_too" or "delete_referencing" => DeletingBehavior.DeleteMeAndReferences,
+                "delete_me_if_no_references" or "prevent" or "keep_if_referenced" => DeletingBehavior.DeleteMeIfNoReferences,
+                "delete_me_but_keep_references" or "default" or "keep_references" => DeletingBehavior.DeleteMeButKeepReferences,
                 _ => DeletingBehavior.DeleteMeButKeepReferences
             };
         }
@@ -3003,7 +3046,10 @@ namespace MCPExtension.Tools
                     return JsonSerializer.Serialize(new { error = "new_name is required" });
 
                 var sourceModule = Utils.Utils.ResolveModule(_model, sourceModuleName);
-                var targetModule = Utils.Utils.ResolveModule(_model, targetModuleName) ?? sourceModule;
+                // BUG-013 fix: If no explicit target_module, default to source module (not MyFirstModule)
+                var targetModule = !string.IsNullOrWhiteSpace(targetModuleName)
+                    ? Utils.Utils.ResolveModule(_model, targetModuleName)
+                    : sourceModule;
                 if (sourceModule == null)
                     return JsonSerializer.Serialize(new { error = $"Source module '{sourceModuleName ?? "(default)"}' not found" });
                 if (targetModule == null)
