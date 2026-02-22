@@ -500,6 +500,13 @@ namespace MCPExtension
                 return (object)result;
             });
 
+            _mcpServer.RegisterTool("setup_data_import", async (JsonObject parameters) =>
+            {
+                var microflowService = _serviceProvider.GetRequiredService<IMicroflowService>();
+                var result = await additionalTools.SetupDataImport(parameters, microflowService, _serviceProvider);
+                return (object)result;
+            });
+
             _logger.LogInformation("MCP tools registered successfully");
         }
 
@@ -539,7 +546,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 74, // Phase 19: +2 sample data generation tools
+                registeredTools = 75, // Phase 19b: +1 setup_data_import (auto-bootstrap)
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",

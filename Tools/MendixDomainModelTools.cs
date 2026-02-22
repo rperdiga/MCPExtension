@@ -1965,7 +1965,8 @@ namespace MCPExtension.Tools
                 "read_attribute_details",
                 "configure_constant_values",
                 "generate_sample_data",
-                "read_sample_data"
+                "read_sample_data",
+                "setup_data_import"
             };
 
             return JsonSerializer.Serialize(new { tools = tools, status = "success" });

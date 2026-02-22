@@ -661,8 +661,9 @@ namespace MCPExtension.MCP
                 "update_microflow" => "Update microflow properties: return type (void, boolean, string, integer, decimal, float, datetime, object:Module.Entity, list:Module.Entity), return variable name, and URL.",
                 "read_attribute_details" => "Read detailed information about a single attribute: type details (string length, datetime localization, enumeration), default value, calculated microflow, and documentation.",
                 "configure_constant_values" => "Set a constant value override for a specific run configuration (e.g. Development, Production). Creates or updates the constant value in the specified configuration.",
-                "generate_sample_data" => "Auto-generate realistic sample data (v2 format) from domain model schema. Produces self-describing JSON with _metadata section (enum types, association definitions) for reliable import. Supports multi-module: use module_names array for cross-module data generation with cross-module association support. Reads entity attributes and types to produce contextual data (product names, emails, etc.). Saves to SampleData.json for automatic import on app startup via InsertDataFromJSON.",
+                "generate_sample_data" => "Auto-generate realistic sample data (v2 format) from domain model schema. Produces self-describing JSON with _metadata section (enum types, association definitions) for reliable import. Supports multi-module: use module_names array for cross-module data generation with cross-module association support. Automatically wires up the import pipeline (After Startup microflow + InsertDataFromJSON Java action call) unless auto_setup=false. Requires the AIExtension marketplace module for auto-setup.",
                 "read_sample_data" => "Read previously saved sample data from SampleData.json (or a custom file path). Returns the JSON content and file size.",
+                "setup_data_import" => "Wire up the sample data import pipeline: checks for AIExtension.InsertDataFromJSON Java action, creates an After Startup microflow that calls it, and configures the After Startup project setting. Idempotent — safe to call multiple times. Run after generate_sample_data or after manually placing a SampleData.json in resources/.",
                 _ => "Tool description not available"
             };
         }
@@ -1668,7 +1669,8 @@ namespace MCPExtension.MCP
                             items = new { type = "string" },
                             description = "Optional filter: only generate data for these entity names."
                         },
-                        seed = new { type = "integer", description = "Random seed for reproducible generation. Omit for random results." }
+                        seed = new { type = "integer", description = "Random seed for reproducible generation. Omit for random results." },
+                        auto_setup = new { type = "boolean", description = "Automatically wire up the import pipeline (microflow + After Startup). Default: true. Set false to only generate JSON without configuring import." }
                     },
                     required = new string[0]
                 },
@@ -1678,6 +1680,17 @@ namespace MCPExtension.MCP
                     properties = new
                     {
                         file_path = new { type = "string", description = "Path to sample data file. Defaults to {project}/resources/SampleData.json if omitted." }
+                    },
+                    required = new string[0]
+                },
+                "setup_data_import" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Module to create the After Startup microflow in. Defaults to first non-AppStore module." },
+                        microflow_name = new { type = "string", description = "Name for the startup microflow (default: 'ASu_LoadSampleData')." },
+                        force_after_startup = new { type = "boolean", description = "If true, overwrite existing After Startup setting even if it points to a different microflow. Default: false." }
                     },
                     required = new string[0]
                 },

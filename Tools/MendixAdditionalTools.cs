@@ -356,6 +356,27 @@ namespace MCPExtension.Tools
             var saveResult = await SaveRootJsonToFile(rootObject);
             var filePath = saveResult.Success ? saveResult.FilePath : null;
 
+            // Auto-setup: wire import pipeline unless auto_setup=false
+            object? importSetup = null;
+            var autoSetup = true;
+            if (arguments.ContainsKey("auto_setup") && arguments["auto_setup"]?.GetValue<bool>() == false)
+                autoSetup = false;
+
+            if (autoSetup)
+            {
+                try
+                {
+                    var microflowService = _serviceProvider.GetRequiredService<IMicroflowService>();
+                    var targetModuleName = modules.First().Name;
+                    importSetup = SetupDataImportInternal(targetModuleName, "ASu_LoadSampleData", false, microflowService, _serviceProvider);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[generate_sample_data] Auto-setup failed (data was still generated successfully)");
+                    importSetup = new { success = false, error = $"Auto-setup failed: {ex.Message}" };
+                }
+            }
+
             return JsonSerializer.Serialize(new
             {
                 success = true,
@@ -363,7 +384,8 @@ namespace MCPExtension.Tools
                 file_path = filePath,
                 format_version = 2,
                 data = JsonSerializer.Deserialize<object>(rootObject.ToJsonString()),
-                stats = new { entities = sortedPairs.Count, total_records = totalRecords, modules = modules.Select(m => m.Name).ToList() }
+                stats = new { entities = sortedPairs.Count, total_records = totalRecords, modules = modules.Select(m => m.Name).ToList() },
+                import_setup = importSetup
             });
         }
         catch (Exception ex)
@@ -1446,7 +1468,8 @@ namespace MCPExtension.Tools
                     "read_attribute_details",
                     "configure_constant_values",
                     "generate_sample_data",
-                    "read_sample_data"
+                    "read_sample_data",
+                    "setup_data_import"
                 };
 
                 return JsonSerializer.Serialize(new { available_tools = tools });
@@ -2959,6 +2982,303 @@ namespace MCPExtension.Tools
             {
                 return (false, $"Error saving data to file: {ex.Message}", null);
             }
+        }
+
+        /// <summary>
+        /// Standalone tool: wire up the sample data import pipeline (microflow + After Startup).
+        /// </summary>
+        public async Task<string> SetupDataImport(JsonObject arguments, IMicroflowService microflowService, IServiceProvider serviceProvider)
+        {
+            try
+            {
+                var moduleName = arguments["module_name"]?.ToString();
+                var microflowName = arguments["microflow_name"]?.ToString() ?? "ASu_LoadSampleData";
+                var forceAfterStartup = arguments.ContainsKey("force_after_startup") && arguments["force_after_startup"]?.GetValue<bool>() == true;
+
+                var result = SetupDataImportInternal(moduleName, microflowName, forceAfterStartup, microflowService, serviceProvider);
+                return JsonSerializer.Serialize(result);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[setup_data_import] Unhandled exception");
+                return JsonSerializer.Serialize(new { success = false, error = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Core bootstrap logic: checks for Java action, creates microflow, wires After Startup.
+        /// Used by both setup_data_import (standalone) and generate_sample_data (auto-setup).
+        /// Returns a structured object (not serialized) so callers can embed it.
+        /// </summary>
+        private object SetupDataImportInternal(string? moduleName, string microflowName, bool forceAfterStartup, IMicroflowService microflowService, IServiceProvider serviceProvider)
+        {
+            var stepsCompleted = new List<string>();
+
+            // --- STEP 1: Resolve target module ---
+            var module = Utils.Utils.ResolveModule(_model, moduleName);
+            if (module == null)
+            {
+                return new { success = false, error = "No module found. Specify module_name.", steps_completed = stepsCompleted };
+            }
+            var qualifiedMfName = $"{module.Name}.{microflowName}";
+
+            // --- STEP 2: Check Java action existence ---
+            // Must search ALL modules including marketplace (AIExtension is a marketplace module)
+            string? javaActionQualifiedName = null;
+            try
+            {
+                var allModules = (_model.Root as IProject)?.GetModules();
+                if (allModules != null)
+                {
+                    foreach (var mod in allModules)
+                    {
+                        try
+                        {
+                            var javaActions = _model.Root.GetModuleDocuments<IJavaAction>(mod);
+                            foreach (var ja in javaActions)
+                            {
+                                if (ja.Name == "InsertDataFromJSON")
+                                {
+                                    javaActionQualifiedName = ja.QualifiedName?.ToString();
+                                    break;
+                                }
+                            }
+                            if (javaActionQualifiedName != null) break;
+                        }
+                        catch (Exception)
+                        {
+                            // Some marketplace modules may throw — skip them
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[setup_data_import] Error searching for Java action via typed API");
+            }
+
+            // Fallback: try untyped model query
+            if (javaActionQualifiedName == null)
+            {
+                try
+                {
+                    var untypedRoot = GetUntypedModelRoot();
+                    if (untypedRoot != null)
+                    {
+                        var elements = GetUnitsWithFallback(untypedRoot, "JavaActions$JavaAction");
+                        foreach (var elem in elements)
+                        {
+                            try
+                            {
+                                if (elem.Name == "InsertDataFromJSON")
+                                {
+                                    javaActionQualifiedName = elem.QualifiedName ?? "AIExtension.InsertDataFromJSON";
+                                    break;
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[setup_data_import] Untyped model fallback also failed");
+                }
+            }
+
+            if (javaActionQualifiedName == null)
+            {
+                return new
+                {
+                    success = false,
+                    error = "Java action 'InsertDataFromJSON' not found in model. The AIExtension marketplace module must be installed.",
+                    hint = "Add the AIExtension module to your project, which provides the InsertDataFromJSON Java action for loading sample data at startup.",
+                    steps_completed = stepsCompleted
+                };
+            }
+            stepsCompleted.Add($"Found Java action: {javaActionQualifiedName}");
+
+            // --- STEP 3: Check/create the After Startup microflow ---
+            bool microflowCreated = false;
+            IMicroflow? existingMf = null;
+            try
+            {
+                var docs = module.GetDocuments();
+                existingMf = docs.OfType<IMicroflow>().FirstOrDefault(mf => mf.Name == microflowName);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[setup_data_import] Error checking for existing microflow");
+            }
+
+            if (existingMf == null)
+            {
+                try
+                {
+                    var microflowExpressionService = serviceProvider.GetRequiredService<IMicroflowExpressionService>();
+                    var expression = microflowExpressionService.CreateFromString("true");
+                    var returnValue = new Mendix.StudioPro.ExtensionsAPI.Model.Microflows.MicroflowReturnValue(
+                        Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.Boolean, expression);
+
+                    using (var transaction = _model.StartTransaction("Create data import microflow"))
+                    {
+                        var folderBase = (Mendix.StudioPro.ExtensionsAPI.Model.Projects.IFolderBase)module;
+                        existingMf = microflowService.CreateMicroflow(_model, folderBase, microflowName, returnValue);
+                        if (existingMf == null)
+                        {
+                            return new { success = false, error = "Failed to create microflow — CreateMicroflow returned null", steps_completed = stepsCompleted };
+                        }
+                        transaction.Commit();
+                    }
+                    microflowCreated = true;
+                    stepsCompleted.Add($"Created microflow: {qualifiedMfName} (Boolean, returns true)");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "[setup_data_import] Failed to create microflow");
+                    return new { success = false, error = $"Failed to create microflow: {ex.Message}", steps_completed = stepsCompleted };
+                }
+            }
+            else
+            {
+                stepsCompleted.Add($"Microflow already exists: {qualifiedMfName}");
+            }
+
+            // --- STEP 4: Check if microflow already has InsertDataFromJSON call ---
+            bool activityAlreadyExists = false;
+            bool activityCreated = false;
+            try
+            {
+                var activities = microflowService.GetAllMicroflowActivities(existingMf);
+                for (int i = 0; i < activities.Count; i++)
+                {
+                    if (activities[i] is IActionActivity actionActivity && actionActivity.Action is IJavaActionCallAction javaCall)
+                    {
+                        var jaName = javaCall.JavaAction?.FullName ?? "";
+                        if (jaName.Contains("InsertDataFromJSON", StringComparison.OrdinalIgnoreCase))
+                        {
+                            activityAlreadyExists = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[setup_data_import] Error checking microflow activities");
+            }
+
+            if (!activityAlreadyExists)
+            {
+                try
+                {
+                    using (var transaction = _model.StartTransaction("Add InsertDataFromJSON call"))
+                    {
+                        var javaActionCall = _model.Create<IJavaActionCallAction>();
+                        javaActionCall.JavaAction = _model.ToQualifiedName<IJavaAction>(javaActionQualifiedName);
+                        javaActionCall.UseReturnVariable = false;
+
+                        var actionActivity = _model.Create<IActionActivity>();
+                        actionActivity.Action = javaActionCall;
+
+                        var insertResult = microflowService.TryInsertAfterStart(existingMf, actionActivity);
+                        if (!insertResult)
+                        {
+                            transaction.Rollback();
+                            return new { success = false, error = "Failed to insert Java action call activity into microflow", steps_completed = stepsCompleted };
+                        }
+                        transaction.Commit();
+                    }
+                    activityCreated = true;
+                    stepsCompleted.Add($"Added Java action call: {javaActionQualifiedName}");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "[setup_data_import] Failed to add Java action call");
+                    return new { success = false, error = $"Failed to add Java action call: {ex.Message}", steps_completed = stepsCompleted };
+                }
+            }
+            else
+            {
+                stepsCompleted.Add("Java action call already exists in microflow");
+            }
+
+            // --- STEP 5: Check/set After Startup ---
+            bool afterStartupSet = false;
+            string? afterStartupWarning = null;
+            string? currentAfterStartup = null;
+
+            try
+            {
+                var runtimeSettings = GetSettingsPart<IRuntimeSettings>();
+                if (runtimeSettings != null)
+                {
+                    currentAfterStartup = runtimeSettings.AfterStartupMicroflow?.ToString();
+
+                    if (string.IsNullOrEmpty(currentAfterStartup))
+                    {
+                        // Safe to set
+                        using (var transaction = _model.StartTransaction("Set After Startup"))
+                        {
+                            runtimeSettings.AfterStartupMicroflow = _model.ToQualifiedName<IMicroflow>(qualifiedMfName);
+                            transaction.Commit();
+                        }
+                        afterStartupSet = true;
+                        stepsCompleted.Add($"Set After Startup to: {qualifiedMfName}");
+                    }
+                    else if (currentAfterStartup.Equals(qualifiedMfName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Already correctly configured
+                        stepsCompleted.Add($"After Startup already set to: {qualifiedMfName}");
+                    }
+                    else if (forceAfterStartup)
+                    {
+                        // Force overwrite
+                        using (var transaction = _model.StartTransaction("Override After Startup"))
+                        {
+                            runtimeSettings.AfterStartupMicroflow = _model.ToQualifiedName<IMicroflow>(qualifiedMfName);
+                            transaction.Commit();
+                        }
+                        afterStartupSet = true;
+                        stepsCompleted.Add($"Overrode After Startup from '{currentAfterStartup}' to: {qualifiedMfName}");
+                    }
+                    else
+                    {
+                        // Conflict — don't overwrite
+                        afterStartupWarning = $"After Startup is already set to '{currentAfterStartup}'. " +
+                            $"Options: (a) Add a call to '{qualifiedMfName}' from '{currentAfterStartup}', " +
+                            $"(b) Add a call to '{currentAfterStartup}' from '{qualifiedMfName}', " +
+                            $"(c) Use set_runtime_settings to manually change After Startup, " +
+                            $"(d) Use setup_data_import with force_after_startup=true to overwrite.";
+                        stepsCompleted.Add($"After Startup conflict: currently '{currentAfterStartup}'");
+                    }
+                }
+                else
+                {
+                    afterStartupWarning = "Could not access runtime settings to configure After Startup.";
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[setup_data_import] Error configuring After Startup");
+                afterStartupWarning = $"Error configuring After Startup: {ex.Message}";
+            }
+
+            return new
+            {
+                success = true,
+                message = "Sample data import pipeline configured",
+                java_action = new { found = true, qualified_name = javaActionQualifiedName },
+                microflow = new { name = qualifiedMfName, created = microflowCreated, already_existed = !microflowCreated },
+                java_action_call = new { added = activityCreated, already_existed = activityAlreadyExists },
+                after_startup = new
+                {
+                    set_to = afterStartupSet ? qualifiedMfName : currentAfterStartup,
+                    changed = afterStartupSet,
+                    warning = afterStartupWarning
+                },
+                steps_completed = stepsCompleted
+            };
         }
 
         #region Sample Data Generation Helpers
