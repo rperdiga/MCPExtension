@@ -487,6 +487,19 @@ namespace MCPExtension
                 return (object)result;
             });
 
+            // Phase 19: Sample Data Generation
+            _mcpServer.RegisterTool("generate_sample_data", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.GenerateSampleData(parameters);
+                return (object)result;
+            });
+
+            _mcpServer.RegisterTool("read_sample_data", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ReadSampleData(parameters);
+                return (object)result;
+            });
+
             _logger.LogInformation("MCP tools registered successfully");
         }
 
@@ -526,7 +539,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 72, // Phase 18: +3 quality of life tools
+                registeredTools = 74, // Phase 19: +2 sample data generation tools
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",

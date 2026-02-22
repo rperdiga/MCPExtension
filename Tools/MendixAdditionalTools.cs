@@ -204,11 +204,14 @@ namespace MCPExtension.Tools
                 if (!validationResult.IsValid)
                 {
                     SetLastError(validationResult.Message);
-                    return JsonSerializer.Serialize(new { 
-                        error = validationResult.Message,
-                        details = validationResult.Details,
-                        success = false
-                    });
+                    var errorResponse = new Dictionary<string, object>
+                    {
+                        ["error"] = validationResult.Message,
+                        ["success"] = false
+                    };
+                    if (validationResult.Details != null) errorResponse["details"] = validationResult.Details;
+                    if (validationResult.Warnings.Any()) errorResponse["warnings"] = validationResult.Warnings;
+                    return JsonSerializer.Serialize(errorResponse);
                 }
 
                 // Save the data to a JSON file
@@ -222,12 +225,16 @@ namespace MCPExtension.Tools
                     });
                 }
 
-                return JsonSerializer.Serialize(new { 
-                    success = true, 
-                    message = "Data validated and saved successfully",
-                    file_path = saveResult.FilePath,
-                    entities_processed = validationResult.EntitiesProcessed
-                });
+                var successResponse = new Dictionary<string, object>
+                {
+                    ["success"] = true,
+                    ["message"] = "Data validated and saved successfully",
+                    ["file_path"] = saveResult.FilePath!,
+                    ["entities_processed"] = validationResult.EntitiesProcessed
+                };
+                if (validationResult.Warnings.Any())
+                    successResponse["warnings"] = validationResult.Warnings;
+                return JsonSerializer.Serialize(successResponse);
             }
             catch (Exception ex)
             {
@@ -239,6 +246,169 @@ namespace MCPExtension.Tools
                 });
             }
         }
+
+    public async Task<object> GenerateSampleData(JsonObject arguments)
+    {
+        try
+        {
+            if (_model == null)
+            {
+                return JsonSerializer.Serialize(new { error = "IModel instance is null", success = false });
+            }
+
+            // Resolve modules — support both module_name (string) and module_names (array)
+            var modules = new List<IModule>();
+            if (arguments.ContainsKey("module_names") && arguments["module_names"]?.GetValueKind() == JsonValueKind.Array)
+            {
+                foreach (var mn in arguments["module_names"]!.AsArray())
+                {
+                    if (mn?.GetValueKind() == JsonValueKind.String)
+                    {
+                        var mod = Utils.Utils.ResolveModule(_model, mn.GetValue<string>());
+                        if (mod?.DomainModel != null) modules.Add(mod);
+                    }
+                }
+            }
+            if (!modules.Any())
+            {
+                var moduleName = arguments.ContainsKey("module_name") ? arguments["module_name"]?.ToString() : null;
+                var mod = Utils.Utils.ResolveModule(_model, moduleName);
+                if (mod?.DomainModel != null) modules.Add(mod);
+            }
+            if (!modules.Any())
+            {
+                return JsonSerializer.Serialize(new { error = "No valid modules found", success = false });
+            }
+
+            var recordsPerEntity = 5;
+            if (arguments.ContainsKey("records_per_entity"))
+            {
+                var rpeNode = arguments["records_per_entity"];
+                if (rpeNode != null && rpeNode.GetValueKind() == JsonValueKind.Number)
+                    recordsPerEntity = Math.Clamp(rpeNode.GetValue<int>(), 1, 50);
+            }
+
+            // Optional entity filter
+            var entityFilter = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (arguments.ContainsKey("entity_names") && arguments["entity_names"]?.GetValueKind() == JsonValueKind.Array)
+            {
+                foreach (var en in arguments["entity_names"]!.AsArray())
+                {
+                    if (en?.GetValueKind() == JsonValueKind.String)
+                        entityFilter.Add(en.GetValue<string>());
+                }
+            }
+
+            // Optional seed for reproducibility
+            Random rng;
+            if (arguments.ContainsKey("seed") && arguments["seed"]?.GetValueKind() == JsonValueKind.Number)
+                rng = new Random(arguments["seed"]!.GetValue<int>());
+            else
+                rng = new Random();
+
+            // Gather all entities across modules (with module reference)
+            var allEntityModulePairs = new List<(IEntity Entity, IModule Module)>();
+            foreach (var mod in modules)
+            {
+                foreach (var entity in mod.DomainModel.GetEntities())
+                {
+                    if (!entityFilter.Any() || entityFilter.Contains(entity.Name))
+                        allEntityModulePairs.Add((entity, mod));
+                }
+            }
+
+            if (!allEntityModulePairs.Any())
+            {
+                return JsonSerializer.Serialize(new { success = true, message = "No entities found to generate data for", data = new { }, stats = new { entities = 0, total_records = 0 } });
+            }
+
+            // Topological sort across all modules
+            var sortedPairs = TopologicalSortEntitiesMultiModule(allEntityModulePairs);
+
+            // Build _metadata section
+            var metadataObj = BuildMetadata(sortedPairs, modules);
+
+            // Generate data records
+            // entityVirtualIds keyed by qualified name (Module.Entity)
+            var entityVirtualIds = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            var dataObject = new JsonObject();
+            int totalRecords = 0;
+
+            foreach (var (entity, mod) in sortedPairs)
+            {
+                var qualifiedName = $"{mod.Name}.{entity.Name}";
+                var records = GenerateEntityRecordsV2(entity, mod, recordsPerEntity, rng, entityVirtualIds);
+                var jsonArray = new JsonArray();
+                foreach (var record in records)
+                    jsonArray.Add(record);
+                dataObject[qualifiedName] = jsonArray;
+                totalRecords += records.Count;
+            }
+
+            // Build the full v2 root object
+            var rootObject = new JsonObject
+            {
+                ["_metadata"] = metadataObj,
+                ["data"] = dataObject
+            };
+
+            // Save to file
+            var saveResult = await SaveRootJsonToFile(rootObject);
+            var filePath = saveResult.Success ? saveResult.FilePath : null;
+
+            return JsonSerializer.Serialize(new
+            {
+                success = true,
+                message = $"Generated v2 sample data for {sortedPairs.Count} entities ({totalRecords} total records) across {modules.Count} module(s)",
+                file_path = filePath,
+                format_version = 2,
+                data = JsonSerializer.Deserialize<object>(rootObject.ToJsonString()),
+                stats = new { entities = sortedPairs.Count, total_records = totalRecords, modules = modules.Select(m => m.Name).ToList() }
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error generating sample data");
+            return JsonSerializer.Serialize(new { error = ex.Message, success = false });
+        }
+    }
+
+    public async Task<object> ReadSampleData(JsonObject arguments)
+    {
+        try
+        {
+            var filePath = arguments.ContainsKey("file_path") && arguments["file_path"]?.GetValueKind() == JsonValueKind.String
+                ? arguments["file_path"]!.GetValue<string>()
+                : GetSampleDataFilePath();
+
+            if (string.IsNullOrEmpty(filePath))
+                return JsonSerializer.Serialize(new { error = "Could not determine sample data file path", success = false });
+
+            if (!File.Exists(filePath))
+                return JsonSerializer.Serialize(new { error = $"No sample data file found at '{filePath}'", success = false });
+
+            var content = await File.ReadAllTextAsync(filePath);
+            var fileInfo = new FileInfo(filePath);
+
+            // Parse to validate JSON
+            object? parsedData;
+            try { parsedData = JsonSerializer.Deserialize<object>(content); }
+            catch { parsedData = content; }
+
+            return JsonSerializer.Serialize(new
+            {
+                success = true,
+                file_path = filePath,
+                file_size_bytes = fileInfo.Length,
+                data = parsedData
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error reading sample data");
+            return JsonSerializer.Serialize(new { error = ex.Message, success = false });
+        }
+    }
 
     public async Task<object> GenerateOverviewPages(JsonObject arguments)
     {
@@ -1274,7 +1444,9 @@ namespace MCPExtension.Tools
                     "sync_filesystem",
                     "update_microflow",
                     "read_attribute_details",
-                    "configure_constant_values"
+                    "configure_constant_values",
+                    "generate_sample_data",
+                    "read_sample_data"
                 };
 
                 return JsonSerializer.Serialize(new { available_tools = tools });
@@ -2563,20 +2735,21 @@ namespace MCPExtension.Tools
 
         #region Helper Methods
 
-        private (bool IsValid, string Message, string? Details, int EntitiesProcessed) ValidateDataStructure(JsonObject data, IModule module)
+        private (bool IsValid, string Message, string? Details, int EntitiesProcessed, List<string> Warnings) ValidateDataStructure(JsonObject data, IModule module)
         {
             try
             {
                 int entitiesProcessed = 0;
                 var validationIssues = new List<string>();
+                var warnings = new List<string>();
 
                 foreach (var entityData in data)
                 {
                     // Extract entity name (handle both "ModuleName.EntityName" and "ModuleName_EntityName" formats)
                     var entityKey = entityData.Key;
-                    var entityName = entityKey.Contains(".") ? entityKey.Split('.').Last() : 
+                    var entityName = entityKey.Contains(".") ? entityKey.Split('.').Last() :
                                     entityKey.Contains("_") ? entityKey.Split('_').Last() : entityKey;
-                    
+
                     var entity = module.DomainModel.GetEntities()
                         .FirstOrDefault(e => e.Name.Equals(entityName, StringComparison.OrdinalIgnoreCase));
 
@@ -2595,6 +2768,14 @@ namespace MCPExtension.Tools
                     var records = entityData.Value.AsArray();
                     var recordIndex = 0;
 
+                    // Precompute known names for unrecognized attribute detection
+                    var associations = entity.GetAssociations(AssociationDirection.Both, null);
+                    var knownAttrNames = entity.GetAttributes().Select(a => a.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    var knownAssocNames = associations.Select(a => a.Association.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    var knownRelatedEntityNames = associations.Select(a =>
+                        a.Parent.Name == entity.Name ? a.Child.Name : a.Parent.Name
+                    ).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
                     foreach (var recordNode in records)
                     {
                         recordIndex++;
@@ -2607,7 +2788,6 @@ namespace MCPExtension.Tools
                         var record = recordNode.AsObject();
 
                         // Check for required VirtualId if entity has associations
-                        var associations = entity.GetAssociations(AssociationDirection.Both, null);
                         if (associations.Any())
                         {
                             if (!record.ContainsKey("VirtualId") || record["VirtualId"]?.GetValueKind() != JsonValueKind.String)
@@ -2621,13 +2801,12 @@ namespace MCPExtension.Tools
                         foreach (var association in associations)
                         {
                             var assocName = association.Association.Name;
-                            var relatedEntityName = association.Parent.Name == entity.Name ? 
+                            var relatedEntityName = association.Parent.Name == entity.Name ?
                                 association.Child.Name : association.Parent.Name;
-                            
-                            // Check for relationship attribute (could be named after association or related entity)
-                            var relationshipKey = record.ContainsKey(relatedEntityName) ? relatedEntityName : 
+
+                            var relationshipKey = record.ContainsKey(relatedEntityName) ? relatedEntityName :
                                                  record.ContainsKey(assocName) ? assocName : null;
-                            
+
                             if (relationshipKey != null)
                             {
                                 var assocValue = record[relationshipKey];
@@ -2645,6 +2824,69 @@ namespace MCPExtension.Tools
                                 }
                             }
                         }
+
+                        // Attribute type validation (warnings — non-blocking)
+                        foreach (var attr in entity.GetAttributes())
+                        {
+                            if (!record.ContainsKey(attr.Name)) continue;
+                            var value = record[attr.Name];
+                            if (value == null || value.GetValueKind() == JsonValueKind.Null) continue;
+
+                            try
+                            {
+                                if (attr.Type is IStringAttributeType stringType && stringType.Length > 0)
+                                {
+                                    if (value.GetValueKind() == JsonValueKind.String && value.GetValue<string>().Length > stringType.Length)
+                                        warnings.Add($"String value for '{attr.Name}' in '{entityName}' record {recordIndex} exceeds max length {stringType.Length}");
+                                }
+                                else if (attr.Type is IEnumerationAttributeType enumType)
+                                {
+                                    if (value.GetValueKind() == JsonValueKind.String)
+                                    {
+                                        var enumeration = enumType.Enumeration?.Resolve();
+                                        if (enumeration != null)
+                                        {
+                                            var validValues = enumeration.GetValues().Select(v => v.Name).ToList();
+                                            var strVal = value.GetValue<string>();
+                                            if (!validValues.Any(v => v.Equals(strVal, StringComparison.OrdinalIgnoreCase)))
+                                                warnings.Add($"Enum value '{strVal}' for '{attr.Name}' in '{entityName}' record {recordIndex} not valid. Valid: {string.Join(", ", validValues)}");
+                                        }
+                                    }
+                                }
+                                else if (attr.Type is IDateTimeAttributeType)
+                                {
+                                    if (value.GetValueKind() == JsonValueKind.String)
+                                    {
+                                        if (!DateTime.TryParse(value.GetValue<string>(), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out _))
+                                            warnings.Add($"DateTime value for '{attr.Name}' in '{entityName}' record {recordIndex} is not valid ISO 8601");
+                                    }
+                                }
+                                else if (attr.Type is IIntegerAttributeType || attr.Type is ILongAttributeType)
+                                {
+                                    if (value.GetValueKind() != JsonValueKind.Number)
+                                        warnings.Add($"Value for integer attribute '{attr.Name}' in '{entityName}' record {recordIndex} is not a number");
+                                }
+                                else if (attr.Type is IDecimalAttributeType)
+                                {
+                                    if (value.GetValueKind() != JsonValueKind.Number)
+                                        warnings.Add($"Value for decimal attribute '{attr.Name}' in '{entityName}' record {recordIndex} is not a number");
+                                }
+                                else if (attr.Type is IBooleanAttributeType)
+                                {
+                                    if (value.GetValueKind() != JsonValueKind.True && value.GetValueKind() != JsonValueKind.False)
+                                        warnings.Add($"Value for boolean attribute '{attr.Name}' in '{entityName}' record {recordIndex} is not a boolean");
+                                }
+                            }
+                            catch { /* Skip validation errors for individual attributes */ }
+                        }
+
+                        // Warn on unrecognized attribute names
+                        foreach (var prop in record)
+                        {
+                            if (prop.Key == "VirtualId") continue;
+                            if (!knownAttrNames.Contains(prop.Key) && !knownAssocNames.Contains(prop.Key) && !knownRelatedEntityNames.Contains(prop.Key))
+                                warnings.Add($"Unrecognized attribute '{prop.Key}' in '{entityName}' record {recordIndex}");
+                        }
                     }
 
                     entitiesProcessed++;
@@ -2652,55 +2894,65 @@ namespace MCPExtension.Tools
 
                 if (validationIssues.Any())
                 {
-                    return (false, "Data validation failed", string.Join("; ", validationIssues), entitiesProcessed);
+                    return (false, "Data validation failed", string.Join("; ", validationIssues), entitiesProcessed, warnings);
                 }
 
-                return (true, "Validation successful", null, entitiesProcessed);
+                return (true, "Validation successful", null, entitiesProcessed, warnings);
             }
             catch (Exception ex)
             {
-                return (false, $"Validation error: {ex.Message}", ex.StackTrace, 0);
+                return (false, $"Validation error: {ex.Message}", ex.StackTrace, 0, new List<string>());
             }
+        }
+
+        private string? GetSampleDataFilePath()
+        {
+            string? targetDirectory = null;
+            if (!string.IsNullOrEmpty(_projectDirectory))
+            {
+                targetDirectory = _projectDirectory;
+            }
+            else
+            {
+                var assembly = Assembly.GetExecutingAssembly();
+                var executingDirectory = Path.GetDirectoryName(assembly.Location);
+                if (!string.IsNullOrEmpty(executingDirectory))
+                {
+                    var directory = new DirectoryInfo(executingDirectory);
+                    targetDirectory = directory?.Parent?.Parent?.Parent?.FullName;
+                }
+            }
+            if (string.IsNullOrEmpty(targetDirectory)) return null;
+            return Path.Combine(targetDirectory, "resources", "SampleData.json");
         }
 
         private async Task<(bool Success, string? ErrorMessage, string? FilePath)> SaveDataToFile(JsonObject data)
         {
+            var root = new JsonObject { ["data"] = data };
+            return await SaveRootJsonToFile(root);
+        }
+
+        private async Task<(bool Success, string? ErrorMessage, string? FilePath)> SaveRootJsonToFile(JsonObject rootObject)
+        {
             try
             {
-                var assembly = Assembly.GetExecutingAssembly();
-                var executingDirectory = Path.GetDirectoryName(assembly.Location);
-                
-                if (string.IsNullOrEmpty(executingDirectory))
-                {
-                    return (false, "Could not determine assembly location", null);
-                }
+                var filePath = GetSampleDataFilePath();
+                if (string.IsNullOrEmpty(filePath))
+                    return (false, "Could not determine sample data file path", null);
 
-                var directory = new DirectoryInfo(executingDirectory);
-                var targetDirectory = directory?.Parent?.Parent?.Parent?.FullName;
-
-                if (string.IsNullOrEmpty(targetDirectory))
-                {
-                    return (false, "Could not determine target directory", null);
-                }
-
-                var resourcesDir = Path.Combine(targetDirectory, "resources");
+                var resourcesDir = Path.GetDirectoryName(filePath)!;
                 if (!Directory.Exists(resourcesDir))
-                {
                     Directory.CreateDirectory(resourcesDir);
-                }
 
-                var filePath = Path.Combine(resourcesDir, "SampleData.json");
-                
-                var options = new JsonSerializerOptions 
-                { 
+                var options = new JsonSerializerOptions
+                {
                     WriteIndented = true,
                     PropertyNameCaseInsensitive = true
                 };
-                
-                var jsonData = JsonSerializer.Serialize(new { data = data }, options);
-                
+
+                var jsonData = rootObject.ToJsonString(options);
                 await File.WriteAllTextAsync(filePath, jsonData);
-                
+
                 return (true, null, filePath);
             }
             catch (Exception ex)
@@ -2708,6 +2960,405 @@ namespace MCPExtension.Tools
                 return (false, $"Error saving data to file: {ex.Message}", null);
             }
         }
+
+        #region Sample Data Generation Helpers
+
+        // --- Metadata Builder ---
+
+        private JsonObject BuildMetadata(List<(IEntity Entity, IModule Module)> entityPairs, List<IModule> modules)
+        {
+            var metadata = new JsonObject
+            {
+                ["version"] = 2,
+                ["generated_by"] = "MCP Extension v74",
+                ["generated_at"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                ["modules"] = new JsonArray(modules.Select(m => (JsonNode)JsonValue.Create(m.Name)!).ToArray())
+            };
+
+            // Build entity metadata (enum attributes)
+            var entitiesMeta = new JsonObject();
+            foreach (var (entity, mod) in entityPairs)
+            {
+                var qualifiedName = $"{mod.Name}.{entity.Name}";
+                var attrsMeta = new JsonObject();
+                bool hasEnumAttrs = false;
+
+                foreach (var attr in entity.GetAttributes())
+                {
+                    if (attr.Type is IEnumerationAttributeType enumType)
+                    {
+                        try
+                        {
+                            var enumeration = enumType.Enumeration?.Resolve();
+                            if (enumeration != null)
+                            {
+                                attrsMeta[attr.Name] = new JsonObject
+                                {
+                                    ["type"] = "Enum",
+                                    ["enum_name"] = enumeration.QualifiedName.ToString()
+                                };
+                                hasEnumAttrs = true;
+                            }
+                        }
+                        catch { /* Skip */ }
+                    }
+                }
+
+                if (hasEnumAttrs)
+                {
+                    entitiesMeta[qualifiedName] = new JsonObject { ["attributes"] = attrsMeta };
+                }
+            }
+            metadata["entities"] = entitiesMeta;
+
+            // Build association metadata
+            var assocsMeta = new JsonObject();
+            var seenAssocs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var (entity, mod) in entityPairs)
+            {
+                try
+                {
+                    var assocs = entity.GetAssociations(AssociationDirection.Both, null);
+                    foreach (var assoc in assocs)
+                    {
+                        // Build qualified association name
+                        var assocName = assoc.Association.Name;
+                        var parentQualified = $"{mod.Name}.{assoc.Parent.Name}";
+                        var childQualified = $"{mod.Name}.{assoc.Child.Name}";
+
+                        // For cross-module: check if child is in a different module
+                        foreach (var otherMod in modules)
+                        {
+                            if (otherMod.DomainModel.GetEntities().Any(e => e.Name == assoc.Child.Name))
+                            {
+                                childQualified = $"{otherMod.Name}.{assoc.Child.Name}";
+                                break;
+                            }
+                            if (otherMod.DomainModel.GetEntities().Any(e => e.Name == assoc.Parent.Name))
+                            {
+                                parentQualified = $"{otherMod.Name}.{assoc.Parent.Name}";
+                            }
+                        }
+
+                        var qualifiedAssocName = $"{mod.Name}.{assocName}";
+                        if (seenAssocs.Contains(qualifiedAssocName)) continue;
+                        seenAssocs.Add(qualifiedAssocName);
+
+                        assocsMeta[qualifiedAssocName] = new JsonObject
+                        {
+                            ["parent"] = parentQualified,
+                            ["child"] = childQualified,
+                            ["type"] = assoc.Association.Type.ToString()
+                        };
+                    }
+                }
+                catch { /* Skip entity association errors */ }
+            }
+            metadata["associations"] = assocsMeta;
+
+            return metadata;
+        }
+
+        // --- Topological Sort (Multi-Module) ---
+
+        private List<(IEntity Entity, IModule Module)> TopologicalSortEntitiesMultiModule(List<(IEntity Entity, IModule Module)> entityPairs)
+        {
+            var qualifiedNames = entityPairs.Select(p => $"{p.Module.Name}.{p.Entity.Name}")
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var inDegree = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var adjacency = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var (entity, mod) in entityPairs)
+            {
+                var qn = $"{mod.Name}.{entity.Name}";
+                inDegree[qn] = 0;
+                adjacency[qn] = new List<string>();
+            }
+
+            foreach (var (entity, mod) in entityPairs)
+            {
+                var ownerQn = $"{mod.Name}.{entity.Name}";
+                try
+                {
+                    var assocs = entity.GetAssociations(AssociationDirection.Both, null);
+                    foreach (var assoc in assocs)
+                    {
+                        var parentName = assoc.Parent.Name;
+                        var childName = assoc.Child.Name;
+
+                        if (parentName.Equals(entity.Name, StringComparison.OrdinalIgnoreCase))
+                        {
+                            // Find the child's qualified name
+                            var childQn = entityPairs
+                                .Where(p => p.Entity.Name.Equals(childName, StringComparison.OrdinalIgnoreCase))
+                                .Select(p => $"{p.Module.Name}.{p.Entity.Name}")
+                                .FirstOrDefault();
+
+                            if (childQn != null && qualifiedNames.Contains(childQn) && !childQn.Equals(ownerQn, StringComparison.OrdinalIgnoreCase))
+                            {
+                                adjacency[childQn].Add(ownerQn);
+                                inDegree[ownerQn] = inDegree.GetValueOrDefault(ownerQn) + 1;
+                            }
+                        }
+                    }
+                }
+                catch { /* Skip */ }
+            }
+
+            // Kahn's algorithm
+            var queue = new Queue<string>(inDegree.Where(kv => kv.Value == 0).Select(kv => kv.Key));
+            var sorted = new List<(IEntity, IModule)>();
+            var sortedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            while (queue.Count > 0)
+            {
+                var qn = queue.Dequeue();
+                var pair = entityPairs.FirstOrDefault(p => $"{p.Module.Name}.{p.Entity.Name}".Equals(qn, StringComparison.OrdinalIgnoreCase));
+                if (pair.Entity != null)
+                {
+                    sorted.Add(pair);
+                    sortedNames.Add(qn);
+                }
+
+                foreach (var dependent in adjacency.GetValueOrDefault(qn, new List<string>()))
+                {
+                    inDegree[dependent]--;
+                    if (inDegree[dependent] == 0) queue.Enqueue(dependent);
+                }
+            }
+
+            // Append remaining (cycles)
+            foreach (var pair in entityPairs)
+            {
+                var qn = $"{pair.Module.Name}.{pair.Entity.Name}";
+                if (!sortedNames.Contains(qn)) sorted.Add(pair);
+            }
+
+            return sorted;
+        }
+
+        // --- Record Generation (V2 format) ---
+
+        private List<JsonObject> GenerateEntityRecordsV2(IEntity entity, IModule module, int count, Random rng, Dictionary<string, List<string>> entityVirtualIds)
+        {
+            var records = new List<JsonObject>();
+            var virtualIds = new List<string>();
+            var qualifiedName = $"{module.Name}.{entity.Name}";
+
+            for (int i = 1; i <= count; i++)
+            {
+                var record = new JsonObject();
+                var virtualId = $"{entity.Name}_{i}";
+                record["VirtualId"] = virtualId;
+                virtualIds.Add(virtualId);
+
+                // Generate attribute values
+                foreach (var attr in entity.GetAttributes())
+                {
+                    try
+                    {
+                        var value = GenerateAttributeValue(attr, entity.Name, i, rng);
+                        if (value != null)
+                            record[attr.Name] = value;
+                    }
+                    catch { /* Skip */ }
+                }
+
+                // Generate association references in _associations format
+                try
+                {
+                    var assocs = entity.GetAssociations(AssociationDirection.Both, null);
+                    var associationsObj = new JsonObject();
+                    bool hasAssociations = false;
+
+                    foreach (var assoc in assocs)
+                    {
+                        var parentName = assoc.Parent.Name;
+                        var childName = assoc.Child.Name;
+                        var qualifiedAssocName = $"{module.Name}.{assoc.Association.Name}";
+
+                        // Only set references where this entity is the owner (parent)
+                        if (parentName.Equals(entity.Name, StringComparison.OrdinalIgnoreCase))
+                        {
+                            // Look for child VirtualIds by entity name (may be in different module)
+                            List<string>? targetIds = null;
+                            if (entityVirtualIds.ContainsKey(childName))
+                                targetIds = entityVirtualIds[childName];
+                            else
+                            {
+                                // Try qualified name lookup
+                                var qualifiedChild = entityVirtualIds.Keys
+                                    .FirstOrDefault(k => k.EndsWith($".{childName}", StringComparison.OrdinalIgnoreCase));
+                                if (qualifiedChild != null)
+                                    targetIds = entityVirtualIds[qualifiedChild];
+                            }
+
+                            if (targetIds != null && targetIds.Any())
+                            {
+                                var pickedId = targetIds[rng.Next(targetIds.Count)];
+                                associationsObj[qualifiedAssocName] = new JsonObject { ["VirtualId"] = pickedId };
+                                hasAssociations = true;
+                            }
+                        }
+                    }
+
+                    if (hasAssociations)
+                        record["_associations"] = associationsObj;
+                }
+                catch { /* Skip association errors */ }
+
+                records.Add(record);
+            }
+
+            // Store VirtualIds keyed by both entity name and qualified name
+            entityVirtualIds[entity.Name] = virtualIds;
+            entityVirtualIds[qualifiedName] = virtualIds;
+            return records;
+        }
+
+        // --- Attribute Value Generation ---
+
+        private JsonNode? GenerateAttributeValue(IAttribute attr, string entityName, int recordIndex, Random rng)
+        {
+            if (attr.Type is IAutoNumberAttributeType) return null;
+            if (attr.Type is IBinaryAttributeType) return null;
+
+            if (attr.Type is IStringAttributeType stringType)
+            {
+                int maxLen = stringType.Length > 0 ? stringType.Length : 100;
+                return JsonValue.Create(GenerateContextualString(attr.Name, entityName, maxLen, recordIndex, rng));
+            }
+            if (attr.Type is IIntegerAttributeType)
+            {
+                var name = attr.Name.ToLowerInvariant();
+                if (name.Contains("rating") || name.Contains("score") || name.Contains("stars"))
+                    return JsonValue.Create(rng.Next(1, 6)); // 1-5
+                if (name.Contains("sortorder") || name.Contains("sort_order") || name.Contains("priority") || name.Contains("rank") || name.Contains("order") || name.Contains("position") || name.Contains("index"))
+                    return JsonValue.Create(recordIndex * 10); // 10, 20, 30...
+                if (name.Contains("age")) return JsonValue.Create(rng.Next(18, 81));
+                if (name.Contains("count") || name.Contains("quantity") || name.Contains("stock"))
+                    return JsonValue.Create(rng.Next(1, 51)); // 1-50
+                if (name.Contains("year")) return JsonValue.Create(rng.Next(2020, 2027));
+                return JsonValue.Create(rng.Next(1, 101)); // 1-100 default
+            }
+            if (attr.Type is ILongAttributeType)
+            {
+                return JsonValue.Create((long)rng.Next(1000, 100001));
+            }
+            if (attr.Type is IDecimalAttributeType)
+            {
+                var name = attr.Name.ToLowerInvariant();
+                if (name.Contains("price") || name.Contains("amount") || name.Contains("cost") || name.Contains("total") || name.Contains("balance") || name.Contains("fee"))
+                    return JsonValue.Create(Math.Round(rng.NextDouble() * 499.98 + 0.01, 2)); // $0.01-$500
+                if (name.Contains("rate") || name.Contains("percentage") || name.Contains("percent") || name.Contains("discount"))
+                    return JsonValue.Create(Math.Round(rng.NextDouble() * 100, 2));
+                if (name.Contains("weight") || name.Contains("length") || name.Contains("width") || name.Contains("height"))
+                    return JsonValue.Create(Math.Round(rng.NextDouble() * 99.9 + 0.1, 2));
+                return JsonValue.Create(Math.Round(rng.NextDouble() * 999.98 + 0.01, 2));
+            }
+            if (attr.Type is IBooleanAttributeType)
+            {
+                return JsonValue.Create(rng.Next(2) == 1);
+            }
+            if (attr.Type is IDateTimeAttributeType)
+            {
+                var daysAgo = rng.Next(0, 366);
+                var date = DateTime.UtcNow.AddDays(-daysAgo).AddHours(rng.Next(0, 24)).AddMinutes(rng.Next(0, 60));
+                return JsonValue.Create(date.ToString("yyyy-MM-ddTHH:mm:ssZ"));
+            }
+            if (attr.Type is IEnumerationAttributeType enumType)
+            {
+                try
+                {
+                    var enumeration = enumType.Enumeration?.Resolve();
+                    if (enumeration != null)
+                    {
+                        var values = enumeration.GetValues().ToList();
+                        if (values.Any())
+                            return JsonValue.Create(values[rng.Next(values.Count)].Name);
+                    }
+                }
+                catch { /* fallback */ }
+                return JsonValue.Create("Unknown");
+            }
+            if (attr.Type is IHashedStringAttributeType)
+            {
+                return JsonValue.Create("Password123!");
+            }
+
+            return JsonValue.Create($"Sample_{attr.Name}_{recordIndex}");
+        }
+
+        // --- Contextual String Data ---
+
+        private static readonly string[] _firstNames = { "Alice", "Bob", "Charlie", "Diana", "Edward", "Fiona", "George", "Hannah", "Ivan", "Julia" };
+        private static readonly string[] _lastNames = { "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", "Rodriguez", "Martinez" };
+        private static readonly string[] _cities = { "Amsterdam", "Rotterdam", "Utrecht", "Berlin", "London", "Paris", "Brussels", "Munich", "Madrid", "Vienna" };
+        private static readonly string[] _countries = { "Netherlands", "Germany", "Belgium", "France", "United Kingdom", "Spain", "Austria", "Italy", "Switzerland", "Sweden" };
+        private static readonly string[] _streets = { "Main Street", "Oak Avenue", "Elm Road", "Park Lane", "High Street", "Church Road", "Mill Lane", "Station Road", "Victoria Road", "King Street" };
+        private static readonly string[] _titles = { "Project Alpha", "Quarterly Report", "System Update", "Customer Review", "Sales Analysis", "Product Launch", "Team Meeting", "Budget Plan", "Risk Assessment", "Process Improvement" };
+        private static readonly string[] _productNames = { "Widget Pro", "Smart Sensor", "Power Bank X", "Eco Filter", "TurboCharge", "DataSync Hub", "AeroShield", "FlexMount", "CrystalView", "QuickDrive" };
+        private static readonly string[] _categoryNames = { "Electronics", "Home & Garden", "Sports & Outdoors", "Books & Media", "Health & Beauty", "Automotive", "Toys & Games", "Office Supplies", "Food & Beverage", "Clothing" };
+        private static readonly string[] _companyNames = { "Acme Corp", "TechVista", "GreenLeaf", "NorthStar", "BluePeak", "SilverLine", "RedWave", "GoldCore", "DeepRoot", "BrightPath" };
+        private static readonly string[] _skuPrefixes = { "SKU", "PROD", "ITEM", "ART", "REF" };
+
+        private string GenerateContextualString(string attributeName, string entityName, int maxLength, int recordIndex, Random rng)
+        {
+            var name = attributeName.ToLowerInvariant();
+            var entName = entityName.ToLowerInvariant();
+            string result;
+
+            if (name.Contains("firstname") || name.Contains("first_name"))
+                result = _firstNames[rng.Next(_firstNames.Length)];
+            else if (name.Contains("lastname") || name.Contains("last_name") || name.Contains("surname"))
+                result = _lastNames[rng.Next(_lastNames.Length)];
+            else if (name.Contains("email"))
+                result = $"{_firstNames[rng.Next(_firstNames.Length)].ToLower()}.{_lastNames[rng.Next(_lastNames.Length)].ToLower()}@example.com";
+            else if (name.Contains("phone") || name.Contains("telephone") || name.Contains("mobile"))
+                result = $"+1-555-{rng.Next(100, 999)}-{rng.Next(1000, 9999)}";
+            else if (name.Contains("address") || name.Contains("street"))
+                result = $"{rng.Next(1, 9999)} {_streets[rng.Next(_streets.Length)]}";
+            else if (name.Contains("city"))
+                result = _cities[rng.Next(_cities.Length)];
+            else if (name.Contains("country"))
+                result = _countries[rng.Next(_countries.Length)];
+            else if (name.Contains("description") || name.Contains("notes") || name.Contains("comment") || name.Contains("remark"))
+                result = $"Sample {attributeName.ToLower()} for record {recordIndex}.";
+            else if (name.Contains("url") || name.Contains("website") || name.Contains("link"))
+                result = $"https://www.example.com/{attributeName.ToLower()}/{recordIndex}";
+            else if (name.Contains("sku"))
+                result = $"{_skuPrefixes[rng.Next(_skuPrefixes.Length)]}-{rng.Next(10000, 99999)}";
+            else if (name.Contains("code") || name.Contains("reference") || name.Contains("number"))
+                result = $"REF-{rng.Next(10000, 99999)}";
+            else if (name.Contains("title") || name.Contains("subject"))
+                result = _titles[rng.Next(_titles.Length)];
+            else if (name.Contains("company"))
+                result = _companyNames[rng.Next(_companyNames.Length)];
+            else if (name.Contains("name"))
+            {
+                // Context-aware name generation based on entity type
+                if (entName.Contains("product")) result = _productNames[rng.Next(_productNames.Length)];
+                else if (entName.Contains("category")) result = _categoryNames[rng.Next(_categoryNames.Length)];
+                else if (entName.Contains("company") || entName.Contains("organization") || entName.Contains("supplier") || entName.Contains("vendor"))
+                    result = _companyNames[rng.Next(_companyNames.Length)];
+                else
+                    result = $"{_firstNames[rng.Next(_firstNames.Length)]} {_lastNames[rng.Next(_lastNames.Length)]}";
+            }
+            else if (name.Contains("status"))
+                result = new[] { "Active", "Pending", "Completed", "Cancelled" }[rng.Next(4)];
+            else if (name.Contains("type") || name.Contains("category"))
+                result = new[] { "TypeA", "TypeB", "TypeC" }[rng.Next(3)];
+            else
+                result = $"Sample_{attributeName}_{recordIndex}";
+
+            if (maxLength > 0 && result.Length > maxLength)
+                result = result.Substring(0, maxLength);
+
+            return result;
+        }
+
+        #endregion
 
         /// <summary>
         /// Determines the optimal range (first/all) based on XPath constraint and variable naming patterns.
@@ -3613,8 +4264,48 @@ namespace MCPExtension.Tools
             }
         }
 
-        // Placeholder - java_action_call needs full parameter mapping support
-        private IActionActivity? CreateJavaActionCallActivity(JsonObject? activityData) => null;
+        private IActionActivity? CreateJavaActionCallActivity(JsonObject? activityData)
+        {
+            try
+            {
+                string javaActionName = activityData?["java_action_name"]?.ToString() ??
+                                        activityData?["javaActionName"]?.ToString() ??
+                                        activityData?["action_name"]?.ToString() ??
+                                        throw new ArgumentException("java_action_name is required");
+
+                string outputVariable = activityData?["output_variable"]?.ToString() ??
+                                        activityData?["outputVariable"]?.ToString() ??
+                                        "JavaActionResult";
+
+                bool useReturnVariable = activityData?["use_return_variable"]?.GetValue<bool>() ?? true;
+
+                // Create qualified name reference for the Java action
+                // Use ToQualifiedName to support marketplace modules that can't be resolved via typed API
+                _logger.LogInformation($"Creating Java action call: {javaActionName}");
+
+                var javaActionQualifiedName = _model.ToQualifiedName<IJavaAction>(javaActionName);
+
+                // Create the Java action call action
+                var javaActionCall = _model.Create<IJavaActionCallAction>();
+                javaActionCall.JavaAction = javaActionQualifiedName;
+                javaActionCall.UseReturnVariable = useReturnVariable;
+                if (useReturnVariable)
+                {
+                    javaActionCall.OutputVariableName = outputVariable;
+                }
+
+                // Create the activity wrapper
+                var activity = _model.Create<IActionActivity>();
+                activity.Action = javaActionCall;
+
+                return activity;
+            }
+            catch (Exception ex)
+            {
+                SetLastError($"Failed to create Java action call activity: {ex.Message}", ex);
+                return null;
+            }
+        }
 
         // Phase 11: Binary list operations (union, subtract, intersect, contains)
         private IActionActivity? CreateBinaryListOperationActivity<T>(JsonObject? activityData) where T : class, IBinaryListOperation

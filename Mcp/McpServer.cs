@@ -661,6 +661,8 @@ namespace MCPExtension.MCP
                 "update_microflow" => "Update microflow properties: return type (void, boolean, string, integer, decimal, float, datetime, object:Module.Entity, list:Module.Entity), return variable name, and URL.",
                 "read_attribute_details" => "Read detailed information about a single attribute: type details (string length, datetime localization, enumeration), default value, calculated microflow, and documentation.",
                 "configure_constant_values" => "Set a constant value override for a specific run configuration (e.g. Development, Production). Creates or updates the constant value in the specified configuration.",
+                "generate_sample_data" => "Auto-generate realistic sample data (v2 format) from domain model schema. Produces self-describing JSON with _metadata section (enum types, association definitions) for reliable import. Supports multi-module: use module_names array for cross-module data generation with cross-module association support. Reads entity attributes and types to produce contextual data (product names, emails, etc.). Saves to SampleData.json for automatic import on app startup via InsertDataFromJSON.",
+                "read_sample_data" => "Read previously saved sample data from SampleData.json (or a custom file path). Returns the JSON content and file size.",
                 _ => "Tool description not available"
             };
         }
@@ -1646,6 +1648,38 @@ namespace MCPExtension.MCP
                         value = new { type = "string", description = "New value for the constant in this configuration" }
                     },
                     required = new[] { "configuration_name", "constant_name", "value" }
+                },
+                "generate_sample_data" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Single target module. Falls back to default module if omitted." },
+                        module_names = new
+                        {
+                            type = "array",
+                            items = new { type = "string" },
+                            description = "Multiple target modules for cross-module data generation. Takes precedence over module_name."
+                        },
+                        records_per_entity = new { type = "integer", description = "Number of records to generate per entity (default 5, max 50)." },
+                        entity_names = new
+                        {
+                            type = "array",
+                            items = new { type = "string" },
+                            description = "Optional filter: only generate data for these entity names."
+                        },
+                        seed = new { type = "integer", description = "Random seed for reproducible generation. Omit for random results." }
+                    },
+                    required = new string[0]
+                },
+                "read_sample_data" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        file_path = new { type = "string", description = "Path to sample data file. Defaults to {project}/resources/SampleData.json if omitted." }
+                    },
+                    required = new string[0]
                 },
                 _ => new
                 {

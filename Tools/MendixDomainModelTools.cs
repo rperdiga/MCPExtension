@@ -1963,7 +1963,9 @@ namespace MCPExtension.Tools
                 "sync_filesystem",
                 "update_microflow",
                 "read_attribute_details",
-                "configure_constant_values"
+                "configure_constant_values",
+                "generate_sample_data",
+                "read_sample_data"
             };
 
             return JsonSerializer.Serialize(new { tools = tools, status = "success" });
