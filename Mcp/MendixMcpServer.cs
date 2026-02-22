@@ -507,6 +507,12 @@ namespace MCPExtension
                 return (object)result;
             });
 
+            _mcpServer.RegisterTool("arrange_domain_model", async (JsonObject parameters) =>
+            {
+                var result = await domainModelTools.ArrangeDomainModel(parameters);
+                return (object)result;
+            });
+
             _logger.LogInformation("MCP tools registered successfully");
         }
 
@@ -546,7 +552,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 75, // Phase 19b: +1 setup_data_import (auto-bootstrap)
+                registeredTools = 76, // Phase 20: +1 arrange_domain_model (smart layout)
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",

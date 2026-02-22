@@ -1469,7 +1469,8 @@ namespace MCPExtension.Tools
                     "configure_constant_values",
                     "generate_sample_data",
                     "read_sample_data",
-                    "setup_data_import"
+                    "setup_data_import",
+                    "arrange_domain_model"
                 };
 
                 return JsonSerializer.Serialize(new { available_tools = tools });

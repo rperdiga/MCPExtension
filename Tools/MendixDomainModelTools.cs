@@ -1442,13 +1442,29 @@ namespace MCPExtension.Tools
 
                     transaction.Commit();
 
-                    return JsonSerializer.Serialize(new 
-                    { 
-                        success = true, 
+                    // Auto-arrange the domain model after bulk creation
+                    object? layoutResult = null;
+                    try
+                    {
+                        using (var layoutTx = _model.StartTransaction("arrange domain model after bulk creation"))
+                        {
+                            layoutResult = ArrangeDomainModelInternal(defaultModule);
+                            layoutTx.Commit();
+                        }
+                    }
+                    catch (Exception layoutEx)
+                    {
+                        _logger.LogWarning(layoutEx, "Auto-arrange after bulk creation failed (non-fatal)");
+                    }
+
+                    return JsonSerializer.Serialize(new
+                    {
+                        success = true,
                         message = $"Successfully created {createdEntities.Count} {entityType} entities",
                         entities = createdEntities,
                         persistable = persistable,
-                        entityType = entityType
+                        entityType = entityType,
+                        auto_arranged = layoutResult != null
                     });
                 }
             }
@@ -1725,13 +1741,29 @@ namespace MCPExtension.Tools
 
                     transaction.Commit();
 
-                    return JsonSerializer.Serialize(new 
-                    { 
-                        success = true, 
+                    // Auto-arrange the domain model after schema creation (entities + associations now exist)
+                    object? layoutResult = null;
+                    try
+                    {
+                        using (var layoutTx = _model.StartTransaction("arrange domain model after schema creation"))
+                        {
+                            layoutResult = ArrangeDomainModelInternal(module);
+                            layoutTx.Commit();
+                        }
+                    }
+                    catch (Exception layoutEx)
+                    {
+                        _logger.LogWarning(layoutEx, "Auto-arrange after schema creation failed (non-fatal)");
+                    }
+
+                    return JsonSerializer.Serialize(new
+                    {
+                        success = true,
                         message = $"Successfully created domain model with {createdEntities.Count} entities and {createdAssociations.Count} associations",
                         entities = createdEntities,
                         associations = createdAssociations,
-                        persistable = persistable
+                        persistable = persistable,
+                        auto_arranged = layoutResult != null
                     });
                 }
             }
@@ -1966,7 +1998,8 @@ namespace MCPExtension.Tools
                 "configure_constant_values",
                 "generate_sample_data",
                 "read_sample_data",
-                "setup_data_import"
+                "setup_data_import",
+                "arrange_domain_model"
             };
 
             return JsonSerializer.Serialize(new { tools = tools, status = "success" });
@@ -2325,12 +2358,267 @@ namespace MCPExtension.Tools
 
             int column = entityCount % MaxColumns;
             int row = entityCount / MaxColumns;
-            
+
             int x = StartX + (column * SpacingX);
             int y = StartY + (row * SpacingY);
-            
+
             entity.Location = new Location(x, y);
         }
+
+        #region Smart Domain Model Layout
+
+        public async Task<string> ArrangeDomainModel(JsonObject parameters)
+        {
+            try
+            {
+                var moduleName = parameters["module_name"]?.ToString();
+                if (string.IsNullOrEmpty(moduleName))
+                    return JsonSerializer.Serialize(new { success = false, error = "module_name is required" });
+
+                var module = Utils.Utils.ResolveModule(_model, moduleName);
+                if (module == null)
+                    return JsonSerializer.Serialize(new { success = false, error = $"Module '{moduleName}' not found" });
+
+                using (var transaction = _model.StartTransaction("arrange domain model"))
+                {
+                    var result = ArrangeDomainModelInternal(module);
+                    transaction.Commit();
+                    return JsonSerializer.Serialize(result);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error arranging domain model");
+                return JsonSerializer.Serialize(new { success = false, error = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Core layout algorithm — can be called internally after bulk entity creation
+        /// </summary>
+        internal object ArrangeDomainModelInternal(IModule module)
+        {
+            var entities = module.DomainModel.GetEntities().ToList();
+            if (entities.Count == 0)
+                return new { success = true, message = "No entities to arrange", entities_arranged = 0 };
+
+            // Layout constants
+            const int ENTITY_WIDTH = 200;
+            const int H_SPACING = 250;       // horizontal space between sibling subtrees
+            const int V_SPACING = 100;       // vertical space between parent and children
+            const int INDENT = 80;           // horizontal indent per nesting level
+            const int START_X = 50;
+            const int START_Y = 50;
+            const int ORPHAN_COLUMNS = 4;
+            const int ATTR_LINE_HEIGHT = 15;
+            const int ATTR_PADDING = 10;
+            const int MIN_ATTRS = 4;
+
+            // Build entity lookup by name
+            var entityByName = new Dictionary<string, IEntity>();
+            foreach (var e in entities)
+                entityByName[e.Name] = e;
+
+            // Build adjacency: children[entity] = list of child entities
+            // A "child" is the entity on the other side of an association where this entity is the parent/owner
+            var children = new Dictionary<string, List<string>>();
+            var parents = new Dictionary<string, HashSet<string>>();
+            foreach (var e in entities)
+            {
+                children[e.Name] = new List<string>();
+                if (!parents.ContainsKey(e.Name))
+                    parents[e.Name] = new HashSet<string>();
+            }
+
+            foreach (var entity in entities)
+            {
+                var associations = entity.GetAssociations(AssociationDirection.Both, null);
+                if (associations == null) continue;
+
+                foreach (var assoc in associations)
+                {
+                    // Get parent and child from the association
+                    string? parentName = null;
+                    string? childName = null;
+
+                    try
+                    {
+                        var parentEntity = assoc.Parent;
+                        var childEntity = assoc.Child;
+                        if (parentEntity != null && childEntity != null)
+                        {
+                            parentName = parentEntity.Name;
+                            childName = childEntity.Name;
+                        }
+                    }
+                    catch { continue; }
+
+                    if (parentName == null || childName == null) continue;
+
+                    // Only process if both entities are in this module
+                    if (!entityByName.ContainsKey(parentName) || !entityByName.ContainsKey(childName))
+                        continue;
+
+                    // Avoid self-references
+                    if (parentName == childName) continue;
+
+                    // Parent → Child relationship (parent owns, child is referenced)
+                    if (!children[parentName].Contains(childName))
+                        children[parentName].Add(childName);
+                    if (!parents.ContainsKey(childName))
+                        parents[childName] = new HashSet<string>();
+                    parents[childName].Add(parentName);
+                }
+            }
+
+            // Find root entities (no parents within this module)
+            var roots = entities.Where(e => !parents.ContainsKey(e.Name) || parents[e.Name].Count == 0).ToList();
+
+            // If no roots (all circular), pick the entity with most associations
+            if (roots.Count == 0)
+            {
+                var bestRoot = entities.OrderByDescending(e =>
+                    (children.ContainsKey(e.Name) ? children[e.Name].Count : 0) +
+                    (parents.ContainsKey(e.Name) ? parents[e.Name].Count : 0)
+                ).First();
+                roots = new List<IEntity> { bestRoot };
+            }
+
+            // Estimate entity heights
+            int EstimateHeight(IEntity e)
+            {
+                var attrCount = Math.Max(MIN_ATTRS, e.GetAttributes().Count());
+                return (int)(attrCount * ATTR_LINE_HEIGHT + ATTR_PADDING);
+            }
+
+            // Track positioned entities and their locations
+            var positioned = new HashSet<string>();
+            var positions = new Dictionary<string, (int x, int y)>();
+
+            // Recursive tree layout: returns the total width used by this subtree
+            int LayoutSubtree(string entityName, int x, int y, int depth)
+            {
+                if (positioned.Contains(entityName)) return 0;
+                positioned.Add(entityName);
+
+                var entity = entityByName[entityName];
+                var entityHeight = EstimateHeight(entity);
+
+                // Position this entity
+                positions[entityName] = (x, y);
+
+                // Layout children below
+                var childList = children.ContainsKey(entityName) ? children[entityName] : new List<string>();
+                var unvisitedChildren = childList.Where(c => !positioned.Contains(c)).ToList();
+
+                if (unvisitedChildren.Count == 0)
+                {
+                    return ENTITY_WIDTH;
+                }
+
+                int childX = x;
+                int childY = y + entityHeight + V_SPACING;
+                int totalChildWidth = 0;
+
+                foreach (var childName in unvisitedChildren)
+                {
+                    int childWidth = LayoutSubtree(childName, childX, childY, depth + 1);
+                    if (childWidth > 0)
+                    {
+                        childX += childWidth + (H_SPACING - ENTITY_WIDTH);
+                        totalChildWidth = childX - x - (H_SPACING - ENTITY_WIDTH);
+                    }
+                }
+
+                // Ensure subtree is at least as wide as the entity itself
+                totalChildWidth = Math.Max(totalChildWidth, ENTITY_WIDTH);
+
+                // Center parent above its children if children are wider
+                if (totalChildWidth > ENTITY_WIDTH && unvisitedChildren.Count > 0)
+                {
+                    int centerX = x + (totalChildWidth - ENTITY_WIDTH) / 2;
+                    positions[entityName] = (centerX, y);
+                }
+
+                return totalChildWidth;
+            }
+
+            // Layout each root tree side by side
+            int currentX = START_X;
+            int treeCount = 0;
+
+            foreach (var root in roots.OrderByDescending(r => children.ContainsKey(r.Name) ? children[r.Name].Count : 0))
+            {
+                if (positioned.Contains(root.Name)) continue;
+
+                int treeWidth = LayoutSubtree(root.Name, currentX, START_Y, 0);
+                if (treeWidth > 0)
+                {
+                    currentX += treeWidth + H_SPACING;
+                    treeCount++;
+                }
+            }
+
+            // Handle orphans (entities not reached from any root)
+            var orphans = entities.Where(e => !positioned.Contains(e.Name)).ToList();
+            int orphanCount = 0;
+            if (orphans.Count > 0)
+            {
+                // Find the maximum Y used so far
+                int maxY = positions.Values.Any()
+                    ? positions.Values.Max(p => p.y) + 150 + V_SPACING
+                    : START_Y;
+
+                int orphanX = START_X;
+                int orphanCol = 0;
+
+                foreach (var orphan in orphans)
+                {
+                    positions[orphan.Name] = (orphanX, maxY);
+                    positioned.Add(orphan.Name);
+                    orphanCount++;
+                    orphanCol++;
+
+                    if (orphanCol >= ORPHAN_COLUMNS)
+                    {
+                        orphanCol = 0;
+                        orphanX = START_X;
+                        maxY += EstimateHeight(orphan) + V_SPACING;
+                    }
+                    else
+                    {
+                        orphanX += H_SPACING;
+                    }
+                }
+            }
+
+            // Apply positions to entities
+            foreach (var kvp in positions)
+            {
+                if (entityByName.TryGetValue(kvp.Key, out var entity))
+                {
+                    entity.Location = new Location(kvp.Value.x, kvp.Value.y);
+                }
+            }
+
+            // Calculate bounding box
+            int minX = positions.Values.Min(p => p.x);
+            int minY = positions.Values.Min(p => p.y);
+            int maxXFinal = positions.Values.Max(p => p.x) + ENTITY_WIDTH;
+            int maxYFinal = positions.Values.Max(p => p.y) + 150; // approximate max entity height
+
+            return new
+            {
+                success = true,
+                entities_arranged = positions.Count,
+                trees = treeCount,
+                orphans = orphanCount,
+                bounding_box = new { x = minX, y = minY, width = maxXFinal - minX, height = maxYFinal - minY },
+                layout = positions.Select(p => new { entity = p.Key, x = p.Value.x, y = p.Value.y }).ToList()
+            };
+        }
+
+        #endregion
 
         private static readonly HashSet<string> UsedNames = new HashSet<string>();
 

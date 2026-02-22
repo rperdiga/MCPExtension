@@ -664,6 +664,7 @@ namespace MCPExtension.MCP
                 "generate_sample_data" => "Auto-generate realistic sample data (v2 format) from domain model schema. Produces self-describing JSON with _metadata section (enum types, association definitions) for reliable import. Supports multi-module: use module_names array for cross-module data generation with cross-module association support. Automatically wires up the import pipeline (After Startup microflow + InsertDataFromJSON Java action call) unless auto_setup=false. Requires the AIExtension marketplace module for auto-setup.",
                 "read_sample_data" => "Read previously saved sample data from SampleData.json (or a custom file path). Returns the JSON content and file size.",
                 "setup_data_import" => "Wire up the sample data import pipeline: checks for AIExtension.InsertDataFromJSON Java action, creates an After Startup microflow that calls it, and configures the After Startup project setting. Idempotent — safe to call multiple times. Run after generate_sample_data or after manually placing a SampleData.json in resources/.",
+                "arrange_domain_model" => "Arrange entities on the domain model canvas using smart association-aware layout. Groups related entities together in hierarchical trees based on their associations. Root entities (no parent associations) appear at the top, children are positioned below. Disconnected entity groups are placed side by side. Orphan entities (no associations) go in a grid row at the bottom. Call after creating entities and associations to get a clean visual layout.",
                 _ => "Tool description not available"
             };
         }
@@ -1693,6 +1694,15 @@ namespace MCPExtension.MCP
                         force_after_startup = new { type = "boolean", description = "If true, overwrite existing After Startup setting even if it points to a different microflow. Default: false." }
                     },
                     required = new string[0]
+                },
+                "arrange_domain_model" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Name of the module whose domain model entities should be arranged" }
+                    },
+                    required = new[] { "module_name" }
                 },
                 _ => new
                 {
