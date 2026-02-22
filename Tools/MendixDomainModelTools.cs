@@ -2394,7 +2394,8 @@ namespace MCPExtension.Tools
         }
 
         /// <summary>
-        /// Core layout algorithm — can be called internally after bulk entity creation
+        /// Core layout algorithm — Sugiyama-style layered graph layout with crossing minimization.
+        /// Handles 20+ entity models efficiently. Can be called internally after bulk entity creation.
         /// </summary>
         internal object ArrangeDomainModelInternal(IModule module)
         {
@@ -2402,33 +2403,31 @@ namespace MCPExtension.Tools
             if (entities.Count == 0)
                 return new { success = true, message = "No entities to arrange", entities_arranged = 0 };
 
-            // Layout constants
+            // Layout constants (tuned for large models)
             const int ENTITY_WIDTH = 200;
-            const int H_SPACING = 250;       // horizontal space between sibling subtrees
-            const int V_SPACING = 100;       // vertical space between parent and children
-            const int INDENT = 80;           // horizontal indent per nesting level
+            const int H_GAP = 50;             // minimum horizontal gap between entities in same layer
+            const int V_SPACING = 120;        // vertical spacing between layers
             const int START_X = 50;
             const int START_Y = 50;
-            const int ORPHAN_COLUMNS = 4;
             const int ATTR_LINE_HEIGHT = 15;
             const int ATTR_PADDING = 10;
             const int MIN_ATTRS = 4;
+            const int BARYCENTER_ITERATIONS = 4;
 
-            // Build entity lookup by name
+            // ── Entity lookup ──
             var entityByName = new Dictionary<string, IEntity>();
             foreach (var e in entities)
                 entityByName[e.Name] = e;
 
-            // Build adjacency: children[entity] = list of child entities
-            // A "child" is the entity on the other side of an association where this entity is the parent/owner
-            var children = new Dictionary<string, List<string>>();
-            var parents = new Dictionary<string, HashSet<string>>();
+            // ── Phase A: Build UNDIRECTED graph from associations ──
+            // Mendix assoc.Parent/Child direction is inconsistent between UI-created and
+            // tool-created associations, so we treat all edges as undirected and use
+            // degree-based root selection for a consistent hierarchical layout.
+            var neighbors = new Dictionary<string, HashSet<string>>();
+            var edgeSet = new HashSet<(string, string)>();
+
             foreach (var e in entities)
-            {
-                children[e.Name] = new List<string>();
-                if (!parents.ContainsKey(e.Name))
-                    parents[e.Name] = new HashSet<string>();
-            }
+                neighbors[e.Name] = new HashSet<string>();
 
             foreach (var entity in entities)
             {
@@ -2437,175 +2436,334 @@ namespace MCPExtension.Tools
 
                 foreach (var assoc in associations)
                 {
-                    // Get parent and child from the association
-                    string? parentName = null;
-                    string? childName = null;
-
+                    string? nameA = null, nameB = null;
                     try
                     {
                         var parentEntity = assoc.Parent;
                         var childEntity = assoc.Child;
                         if (parentEntity != null && childEntity != null)
                         {
-                            parentName = parentEntity.Name;
-                            childName = childEntity.Name;
+                            nameA = parentEntity.Name;
+                            nameB = childEntity.Name;
                         }
                     }
                     catch { continue; }
 
-                    if (parentName == null || childName == null) continue;
+                    if (nameA == null || nameB == null) continue;
+                    if (!entityByName.ContainsKey(nameA) || !entityByName.ContainsKey(nameB)) continue;
+                    if (nameA == nameB) continue;
 
-                    // Only process if both entities are in this module
-                    if (!entityByName.ContainsKey(parentName) || !entityByName.ContainsKey(childName))
-                        continue;
+                    // Undirected: add both directions to neighbor sets
+                    neighbors[nameA].Add(nameB);
+                    neighbors[nameB].Add(nameA);
 
-                    // Avoid self-references
-                    if (parentName == childName) continue;
-
-                    // Parent → Child relationship (parent owns, child is referenced)
-                    if (!children[parentName].Contains(childName))
-                        children[parentName].Add(childName);
-                    if (!parents.ContainsKey(childName))
-                        parents[childName] = new HashSet<string>();
-                    parents[childName].Add(parentName);
+                    // Canonical edge for crossing minimization (alphabetical order for dedup)
+                    var canonical = string.Compare(nameA, nameB, StringComparison.Ordinal) < 0
+                        ? (nameA, nameB) : (nameB, nameA);
+                    edgeSet.Add(canonical);
                 }
             }
 
-            // Find root entities (no parents within this module)
-            var roots = entities.Where(e => !parents.ContainsKey(e.Name) || parents[e.Name].Count == 0).ToList();
+            // ── Phase B: Layer assignment (BFS from highest-degree roots per component) ──
+            // Find connected components, pick root = highest degree entity in each
+            var visited = new HashSet<string>();
+            var rootNames = new List<string>();
 
-            // If no roots (all circular), pick the entity with most associations
-            if (roots.Count == 0)
+            // For each connected component: find hub (highest degree), then pick the node
+            // farthest from hub as root. In hierarchical domain models, the farthest node
+            // from the hub is typically a top-level entity (e.g., Company) or a leaf entity.
+            // Picking the lower-degree endpoint of the graph diameter produces the best hierarchy.
+            var byDegree = entities.OrderByDescending(e => neighbors[e.Name].Count).Select(e => e.Name).ToList();
+            foreach (var name in byDegree)
             {
-                var bestRoot = entities.OrderByDescending(e =>
-                    (children.ContainsKey(e.Name) ? children[e.Name].Count : 0) +
-                    (parents.ContainsKey(e.Name) ? parents[e.Name].Count : 0)
-                ).First();
-                roots = new List<IEntity> { bestRoot };
+                if (visited.Contains(name)) continue;
+                if (neighbors[name].Count == 0) continue; // orphan — skip
+
+                // Flood-fill to collect entire component
+                var component = new List<string>();
+                var flood = new Queue<string>();
+                flood.Enqueue(name);
+                visited.Add(name);
+                while (flood.Count > 0)
+                {
+                    var n = flood.Dequeue();
+                    component.Add(n);
+                    foreach (var nb in neighbors[n])
+                    {
+                        if (!visited.Contains(nb))
+                        {
+                            visited.Add(nb);
+                            flood.Enqueue(nb);
+                        }
+                    }
+                }
+
+                // name = hub (highest degree, first entry). BFS from hub to find farthest node A.
+                string farthestA = name;
+                {
+                    var dist = new Dictionary<string, int> { [name] = 0 };
+                    var q = new Queue<string>();
+                    q.Enqueue(name);
+                    int maxDist = 0;
+                    while (q.Count > 0)
+                    {
+                        var cur = q.Dequeue();
+                        foreach (var nb in neighbors[cur])
+                        {
+                            if (!dist.ContainsKey(nb))
+                            {
+                                dist[nb] = dist[cur] + 1;
+                                q.Enqueue(nb);
+                                if (dist[nb] > maxDist)
+                                {
+                                    maxDist = dist[nb];
+                                    farthestA = nb;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // BFS from A to find farthest node B (diameter endpoint)
+                string farthestB = farthestA;
+                {
+                    var dist = new Dictionary<string, int> { [farthestA] = 0 };
+                    var q = new Queue<string>();
+                    q.Enqueue(farthestA);
+                    int maxDist = 0;
+                    while (q.Count > 0)
+                    {
+                        var cur = q.Dequeue();
+                        foreach (var nb in neighbors[cur])
+                        {
+                            if (!dist.ContainsKey(nb))
+                            {
+                                dist[nb] = dist[cur] + 1;
+                                q.Enqueue(nb);
+                                if (dist[nb] > maxDist)
+                                {
+                                    maxDist = dist[nb];
+                                    farthestB = nb;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Pick the diameter endpoint with lower degree as root (peripheral/top-level entity)
+                var root = neighbors[farthestA].Count <= neighbors[farthestB].Count ? farthestA : farthestB;
+                rootNames.Add(root);
             }
 
-            // Estimate entity heights
+            // BFS layer assignment from roots (undirected — visited set prevents backtracking)
+            var layerOf = new Dictionary<string, int>();
+            var bfsChildren = new Dictionary<string, List<string>>();
+            foreach (var e in entities)
+                bfsChildren[e.Name] = new List<string>();
+
+            var bfsQueue = new Queue<string>();
+            foreach (var r in rootNames)
+            {
+                layerOf[r] = 0;
+                bfsQueue.Enqueue(r);
+            }
+
+            while (bfsQueue.Count > 0)
+            {
+                var node = bfsQueue.Dequeue();
+                var nodeLayer = layerOf[node];
+                foreach (var nb in neighbors[node])
+                {
+                    if (!layerOf.ContainsKey(nb))
+                    {
+                        layerOf[nb] = nodeLayer + 1;
+                        bfsChildren[node].Add(nb);
+                        bfsQueue.Enqueue(nb);
+                    }
+                }
+            }
+
+            // Orphans: entities with no associations at all
+            var orphanNames = new List<string>();
+            foreach (var e in entities)
+            {
+                if (!layerOf.ContainsKey(e.Name))
+                    orphanNames.Add(e.Name);
+            }
+
+            // Build layers dictionary: layer number → ordered list of entity names
+            var maxLayer = layerOf.Values.Any() ? layerOf.Values.Max() : 0;
+            var layers = new Dictionary<int, List<string>>();
+            for (int i = 0; i <= maxLayer; i++)
+                layers[i] = new List<string>();
+            foreach (var kvp in layerOf)
+                layers[kvp.Value].Add(kvp.Key);
+
+            // ── Phase C: Crossing minimization (Barycenter heuristic) ──
+            // Edge set uses canonical (alphabetical) ordering, so check both permutations
+            double Barycenter(string node, List<string> referenceLayer, HashSet<(string, string)> edges)
+            {
+                var refIndices = new List<int>();
+                for (int i = 0; i < referenceLayer.Count; i++)
+                {
+                    var refNode = referenceLayer[i];
+                    if (edges.Contains((node, refNode)) || edges.Contains((refNode, node)))
+                        refIndices.Add(i);
+                }
+                return refIndices.Count > 0 ? refIndices.Average() : double.MaxValue;
+            }
+
+            for (int iter = 0; iter < BARYCENTER_ITERATIONS; iter++)
+            {
+                // Top-down sweep: fix layer i, reorder layer i+1
+                for (int i = 0; i < maxLayer; i++)
+                {
+                    var fixedLayer = layers[i];
+                    var freeLayer = layers[i + 1];
+                    if (freeLayer.Count <= 1) continue;
+
+                    var sorted = freeLayer
+                        .Select(n => (name: n, bc: Barycenter(n, fixedLayer, edgeSet)))
+                        .OrderBy(x => x.bc)
+                        .Select(x => x.name)
+                        .ToList();
+                    layers[i + 1] = sorted;
+                }
+
+                // Bottom-up sweep: fix layer i+1, reorder layer i
+                for (int i = maxLayer; i > 0; i--)
+                {
+                    var fixedLayer = layers[i];
+                    var freeLayer = layers[i - 1];
+                    if (freeLayer.Count <= 1) continue;
+
+                    var sorted = freeLayer
+                        .Select(n => (name: n, bc: Barycenter(n, fixedLayer, edgeSet)))
+                        .OrderBy(x => x.bc)
+                        .Select(x => x.name)
+                        .ToList();
+                    layers[i - 1] = sorted;
+                }
+            }
+
+            // ── Phase D: Coordinate assignment ──
             int EstimateHeight(IEntity e)
             {
                 var attrCount = Math.Max(MIN_ATTRS, e.GetAttributes().Count());
                 return (int)(attrCount * ATTR_LINE_HEIGHT + ATTR_PADDING);
             }
 
-            // Track positioned entities and their locations
-            var positioned = new HashSet<string>();
+            // Find the widest layer to determine total canvas width
+            int maxLayerCount = layers.Values.Any() ? layers.Values.Max(l => l.Count) : 1;
+            int layerTotalWidth = maxLayerCount * ENTITY_WIDTH + (maxLayerCount - 1) * H_GAP;
+
             var positions = new Dictionary<string, (int x, int y)>();
+            int currentY = START_Y;
 
-            // Recursive tree layout: returns the total width used by this subtree
-            int LayoutSubtree(string entityName, int x, int y, int depth)
+            for (int layer = 0; layer <= maxLayer; layer++)
             {
-                if (positioned.Contains(entityName)) return 0;
-                positioned.Add(entityName);
+                var layerNodes = layers[layer];
+                if (layerNodes.Count == 0) continue;
 
-                var entity = entityByName[entityName];
-                var entityHeight = EstimateHeight(entity);
+                // Calculate this layer's width and center it relative to the widest layer
+                int thisLayerWidth = layerNodes.Count * ENTITY_WIDTH + (layerNodes.Count - 1) * H_GAP;
+                int offsetX = START_X + (layerTotalWidth - thisLayerWidth) / 2;
 
-                // Position this entity
-                positions[entityName] = (x, y);
-
-                // Layout children below
-                var childList = children.ContainsKey(entityName) ? children[entityName] : new List<string>();
-                var unvisitedChildren = childList.Where(c => !positioned.Contains(c)).ToList();
-
-                if (unvisitedChildren.Count == 0)
+                // Find max entity height in this layer for uniform vertical spacing
+                int maxHeight = 0;
+                for (int i = 0; i < layerNodes.Count; i++)
                 {
-                    return ENTITY_WIDTH;
-                }
+                    var x = offsetX + i * (ENTITY_WIDTH + H_GAP);
+                    positions[layerNodes[i]] = (x, currentY);
 
-                int childX = x;
-                int childY = y + entityHeight + V_SPACING;
-                int totalChildWidth = 0;
-
-                foreach (var childName in unvisitedChildren)
-                {
-                    int childWidth = LayoutSubtree(childName, childX, childY, depth + 1);
-                    if (childWidth > 0)
+                    if (entityByName.TryGetValue(layerNodes[i], out var ent))
                     {
-                        childX += childWidth + (H_SPACING - ENTITY_WIDTH);
-                        totalChildWidth = childX - x - (H_SPACING - ENTITY_WIDTH);
+                        var h = EstimateHeight(ent);
+                        if (h > maxHeight) maxHeight = h;
                     }
                 }
 
-                // Ensure subtree is at least as wide as the entity itself
-                totalChildWidth = Math.Max(totalChildWidth, ENTITY_WIDTH);
-
-                // Center parent above its children if children are wider
-                if (totalChildWidth > ENTITY_WIDTH && unvisitedChildren.Count > 0)
-                {
-                    int centerX = x + (totalChildWidth - ENTITY_WIDTH) / 2;
-                    positions[entityName] = (centerX, y);
-                }
-
-                return totalChildWidth;
+                currentY += (maxHeight > 0 ? maxHeight : 80) + V_SPACING;
             }
 
-            // Layout each root tree side by side
-            int currentX = START_X;
-            int treeCount = 0;
-
-            foreach (var root in roots.OrderByDescending(r => children.ContainsKey(r.Name) ? children[r.Name].Count : 0))
+            // ── Phase D2: Parent centering post-pass ──
+            // Shift each parent toward the center of its children (within layer bounds)
+            for (int layer = 0; layer <= maxLayer - 1; layer++)
             {
-                if (positioned.Contains(root.Name)) continue;
-
-                int treeWidth = LayoutSubtree(root.Name, currentX, START_Y, 0);
-                if (treeWidth > 0)
+                var layerNodes = layers[layer];
+                foreach (var node in layerNodes)
                 {
-                    currentX += treeWidth + H_SPACING;
-                    treeCount++;
+                    var nodeChildren = bfsChildren[node].Where(c => layerOf.ContainsKey(c) && layerOf[c] == layer + 1).ToList();
+                    if (nodeChildren.Count < 2) continue;
+
+                    var childPositions = nodeChildren.Where(c => positions.ContainsKey(c)).Select(c => positions[c].x).ToList();
+                    if (childPositions.Count < 2) continue;
+
+                    int childCenter = (childPositions.Min() + childPositions.Max() + ENTITY_WIDTH) / 2 - ENTITY_WIDTH / 2;
+                    var currentPos = positions[node];
+
+                    // Only shift if it doesn't overlap siblings
+                    var siblings = layerNodes.Where(n => n != node && positions.ContainsKey(n)).ToList();
+                    bool canShift = true;
+                    foreach (var sib in siblings)
+                    {
+                        var sibX = positions[sib].x;
+                        if (Math.Abs(childCenter - sibX) < ENTITY_WIDTH + H_GAP / 2)
+                        {
+                            canShift = false;
+                            break;
+                        }
+                    }
+
+                    if (canShift)
+                        positions[node] = (childCenter, currentPos.y);
                 }
             }
 
-            // Handle orphans (entities not reached from any root)
-            var orphans = entities.Where(e => !positioned.Contains(e.Name)).ToList();
+            // ── Phase E: Orphan placement (adaptive grid) ──
             int orphanCount = 0;
-            if (orphans.Count > 0)
+            if (orphanNames.Count > 0)
             {
-                // Find the maximum Y used so far
-                int maxY = positions.Values.Any()
+                int orphanCols = Math.Min(6, (int)Math.Ceiling(Math.Sqrt(orphanNames.Count)));
+                int orphanY = positions.Values.Any()
                     ? positions.Values.Max(p => p.y) + 150 + V_SPACING
                     : START_Y;
-
                 int orphanX = START_X;
-                int orphanCol = 0;
+                int col = 0;
 
-                foreach (var orphan in orphans)
+                foreach (var orphanName in orphanNames)
                 {
-                    positions[orphan.Name] = (orphanX, maxY);
-                    positioned.Add(orphan.Name);
+                    positions[orphanName] = (orphanX, orphanY);
                     orphanCount++;
-                    orphanCol++;
+                    col++;
 
-                    if (orphanCol >= ORPHAN_COLUMNS)
+                    if (col >= orphanCols)
                     {
-                        orphanCol = 0;
+                        col = 0;
                         orphanX = START_X;
-                        maxY += EstimateHeight(orphan) + V_SPACING;
+                        orphanY += (entityByName.ContainsKey(orphanName) ? EstimateHeight(entityByName[orphanName]) : 80) + V_SPACING;
                     }
                     else
                     {
-                        orphanX += H_SPACING;
+                        orphanX += ENTITY_WIDTH + H_GAP;
                     }
                 }
             }
 
-            // Apply positions to entities
+            // ── Apply positions to entities ──
             foreach (var kvp in positions)
             {
                 if (entityByName.TryGetValue(kvp.Key, out var entity))
-                {
                     entity.Location = new Location(kvp.Value.x, kvp.Value.y);
-                }
             }
 
-            // Calculate bounding box
+            // ── Calculate bounding box ──
             int minX = positions.Values.Min(p => p.x);
             int minY = positions.Values.Min(p => p.y);
             int maxXFinal = positions.Values.Max(p => p.x) + ENTITY_WIDTH;
-            int maxYFinal = positions.Values.Max(p => p.y) + 150; // approximate max entity height
+            int maxYFinal = positions.Values.Max(p => p.y) + 150;
+
+            int treeCount = rootNames.Count;
 
             return new
             {
