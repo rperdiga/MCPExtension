@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using System.IO;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using Mendix.StudioPro.ExtensionsAPI.Model;
 using Mendix.StudioPro.ExtensionsAPI.Model.Projects;
 using Mendix.StudioPro.ExtensionsAPI.Model.Microflows;
@@ -1584,8 +1585,8 @@ namespace MCPExtension.Tools
                 }
 
                 // Prepare return value with proper expressions
-                var returnTypeStr = arguments["returnType"]?.ToString();
-                var returnEntityStr = arguments["returnEntity"]?.ToString();
+                var returnTypeStr = arguments["returnType"]?.ToString() ?? arguments["return_type"]?.ToString();
+                var returnEntityStr = arguments["returnEntity"]?.ToString() ?? arguments["return_entity"]?.ToString();
                 Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType returnType = Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.Void;
 
                 // Only set a non-void return type if explicitly specified and meaningful
@@ -1620,17 +1621,23 @@ namespace MCPExtension.Tools
                 _logger.LogInformation($"[create_microflow] Return type string: '{returnTypeStr ?? "null"}', entity: '{returnEntityStr ?? "null"}', resolved to: {returnType}");
 
                 Mendix.StudioPro.ExtensionsAPI.Model.Microflows.MicroflowReturnValue? returnValue = null;
-                
+
+                // Check for custom return expression (allows caller to set end event to return a variable like $CountResult)
+                var returnExpressionStr = arguments["return_expression"]?.ToString() ?? arguments["returnExpression"]?.ToString();
+
                 // For non-void return types, create proper return value with expression
                 if (returnType != Mendix.StudioPro.ExtensionsAPI.Model.DataTypes.DataType.Void)
                 {
                     try
                     {
                         var microflowExpressionService = serviceProvider.GetRequiredService<IMicroflowExpressionService>();
-                        var defaultExpression = GetDefaultExpressionForDataType(returnType);
-                        var expression = microflowExpressionService.CreateFromString(defaultExpression);
+                        // Use custom return expression if provided, otherwise use type default
+                        var expressionStr = !string.IsNullOrWhiteSpace(returnExpressionStr)
+                            ? NormalizeMendixExpression(returnExpressionStr)
+                            : GetDefaultExpressionForDataType(returnType);
+                        var expression = microflowExpressionService.CreateFromString(expressionStr);
                         returnValue = new Mendix.StudioPro.ExtensionsAPI.Model.Microflows.MicroflowReturnValue(returnType, expression);
-                        _logger.LogInformation($"[create_microflow] Created return value for {returnType} with expression: {defaultExpression}");
+                        _logger.LogInformation($"[create_microflow] Created return value for {returnType} with expression: {expressionStr}");
                     }
                     catch (Exception ex)
                     {
@@ -1732,6 +1739,46 @@ namespace MCPExtension.Tools
             if (string.IsNullOrEmpty(expression))
                 return expression;
             return expression.Replace('"', '\'');
+        }
+
+        /// <summary>
+        /// Normalizes reduce expressions by qualifying $currentObject/Attribute paths with the entity's qualified name.
+        /// Mendix requires entity-qualified attribute access: $currentObject/Module.Entity/Attribute
+        /// </summary>
+        private string NormalizeReduceExpression(string expr, string listVariable, JsonObject? activityData)
+        {
+            if (string.IsNullOrEmpty(expr)) return expr;
+
+            // Try to resolve entity from context
+            var entityName = activityData?["entity"]?.ToString() ??
+                            activityData?["entity_name"]?.ToString() ??
+                            activityData?["entityName"]?.ToString();
+            if (string.IsNullOrEmpty(entityName))
+            {
+                _logger.LogWarning($"NormalizeReduceExpression: No entity context provided for list '{listVariable}', cannot qualify attribute paths");
+                return expr;
+            }
+
+            var (entity, _) = Utils.Utils.FindEntityAcrossModules(_model, entityName);
+            if (entity == null)
+            {
+                _logger.LogWarning($"NormalizeReduceExpression: Entity '{entityName}' not found, cannot qualify attribute paths");
+                return expr;
+            }
+
+            // Replace $currentObject/AttrName with $currentObject/Module.Entity/AttrName
+            // Only replace if not already qualified (path segment doesn't contain a dot)
+            var normalized = Regex.Replace(expr, @"\$currentObject/([A-Za-z_]\w*)", match =>
+            {
+                var attrName = match.Groups[1].Value;
+                if (attrName.Contains('.')) return match.Value; // Already qualified
+                return $"$currentObject/{entity.QualifiedName}/{attrName}";
+            });
+
+            if (normalized != expr)
+                _logger.LogInformation($"NormalizeReduceExpression: '{expr}' → '{normalized}'");
+
+            return normalized;
         }
 
         public async Task<object> CreateMicroflowActivity(JsonObject arguments)
@@ -1864,6 +1911,7 @@ namespace MCPExtension.Tools
                             break;
 
                         // Database Operations
+                        case "retrieve":
                         case "retrieve_from_database":
                         case "retrieve_database":
                         case "database_retrieve":
@@ -1934,6 +1982,10 @@ namespace MCPExtension.Tools
                             activity = CreateChangeAssociationActivity(activityData);
                             break;
 
+                        case "change_object":
+                            activity = CreateChangeObjectActivity(activityData);
+                            break;
+
                         // Phase 11: Advanced list operations
                         case "union_lists":
                         case "union":
@@ -1974,7 +2026,7 @@ namespace MCPExtension.Tools
                             var supportedTypes = new[]
                             {
                                 "create_object/create_variable", "microflow_call/call_microflow", "change_variable/change_value",
-                                "retrieve_from_database", "retrieve_by_association", "commit_object/commit_objects/commit", "rollback_object/rollback",
+                                "retrieve/retrieve_from_database", "retrieve_by_association", "commit_object/commit_objects/commit", "rollback_object/rollback",
                                 "delete_object/delete", "create_list/new_list", "change_list/modify_list", "sort_list", "filter_list",
                                 "find_in_list", "aggregate_list", "java_action_call", "change_attribute", "change_association", "change_object",
                                 "union_lists/union", "subtract_lists/subtract", "intersect_lists/intersect",
@@ -2262,8 +2314,11 @@ namespace MCPExtension.Tools
                 var microflowExpressionService = _serviceProvider?.GetService<IMicroflowExpressionService>();
 
                 var variableName = activityData?["variableName"]?.ToString() ??
-                                  activityData?["variable_name"]?.ToString() ?? "newVariable";
+                                  activityData?["variable_name"]?.ToString() ??
+                                  activityData?["output_variable"]?.ToString() ??
+                                  activityData?["outputVariable"]?.ToString() ?? "newVariable";
                 var entityType = activityData?["entity"]?.ToString() ??
+                                activityData?["entity_name"]?.ToString() ??
                                 activityData?["entityType"]?.ToString() ??
                                 activityData?["entityName"]?.ToString() ??
                                 activityData?["variable_type"]?.ToString() ?? "String";
@@ -2289,6 +2344,8 @@ namespace MCPExtension.Tools
                     _logger.LogWarning($"Entity '{entityType}' not found. Creating basic create action.");
                     var createAction = _model.Create<ICreateObjectAction>();
                     createAction.OutputVariableName = variableName;
+                    createAction.Commit = commit;
+                    createAction.RefreshInClient = refreshInClient;
                     var activity = _model.Create<IActionActivity>();
                     activity.Action = createAction;
                     return activity;
@@ -2321,9 +2378,19 @@ namespace MCPExtension.Tools
                     }
 
                     _logger.LogInformation($"Using service CreateCreateObjectActivity with {initialValues.Count} initial values");
-                    return microflowActivitiesService.CreateCreateObjectActivity(
+                    var activity = microflowActivitiesService.CreateCreateObjectActivity(
                         _model, entity, variableName, commit, refreshInClient,
                         initialValues.ToArray());
+
+                    // Post-process: Extensions API bug — service doesn't set Entity/Commit/RefreshInClient
+                    if (activity?.Action is ICreateObjectAction createdAction)
+                    {
+                        createdAction.Entity = entity.QualifiedName;
+                        createdAction.Commit = commit;
+                        createdAction.RefreshInClient = refreshInClient;
+                        _logger.LogInformation($"Post-processed create_object: entity={entity.QualifiedName}, commit={commit}, refreshInClient={refreshInClient}");
+                    }
+                    return activity;
                 }
                 else
                 {
@@ -2331,6 +2398,8 @@ namespace MCPExtension.Tools
                     var createAction = _model.Create<ICreateObjectAction>();
                     createAction.OutputVariableName = variableName;
                     createAction.Entity = entity.QualifiedName;
+                    createAction.Commit = commit;
+                    createAction.RefreshInClient = refreshInClient;
                     var activity = _model.Create<IActionActivity>();
                     activity.Action = createAction;
                     return activity;
@@ -2977,13 +3046,19 @@ namespace MCPExtension.Tools
                     return null;
                 }
 
-                _logger.LogInformation($"Creating association retrieve: association='{associationName}', input='{inputVariable}', output='{outputVariable}'");
+                // Strip $ prefix if present — the API expects raw variable name, not expression syntax
+                if (inputVariable.StartsWith("$"))
+                    inputVariable = inputVariable.Substring(1);
+
+                _logger.LogInformation($"Calling CreateAssociationRetrieveSourceActivity: " +
+                    $"association='{association.Name}', output='{outputVariable}', input='{inputVariable}'");
                 return microflowActivitiesService.CreateAssociationRetrieveSourceActivity(
                     _model, association, outputVariable, inputVariable);
             }
             catch (Exception ex)
             {
-                SetLastError($"Failed to create association retrieve activity: {ex.Message}");
+                _logger.LogError(ex, $"Failed to create association retrieve activity: {ex.Message}");
+                SetLastError($"Failed to create association retrieve activity: {ex.Message}", ex);
                 return null;
             }
         }
@@ -3254,13 +3329,15 @@ namespace MCPExtension.Tools
                 {
                     // Single attribute sort
                     string? attrName = activityData?["attribute"]?.ToString() ??
-                                     activityData?["attribute_name"]?.ToString();
+                                     activityData?["attribute_name"]?.ToString() ??
+                                     activityData?["sort_attribute"]?.ToString() ??
+                                     activityData?["sortAttribute"]?.ToString();
                     bool descending = bool.Parse(activityData?["descending"]?.ToString() ?? "false") ||
                                     (activityData?["direction"]?.ToString()?.ToLowerInvariant() == "desc");
 
                     if (string.IsNullOrEmpty(attrName))
                     {
-                        SetLastError("At least one attribute is required for sort list. Use 'attribute' or 'sort_by' array.");
+                        SetLastError("At least one attribute is required for sort list. Use 'attribute', 'sort_attribute', or 'sort_by' array.");
                         return null;
                     }
 
@@ -3322,6 +3399,8 @@ namespace MCPExtension.Tools
                 string attributeName = activityData?["attribute_name"]?.ToString() ??
                                      activityData?["attributeName"]?.ToString() ??
                                      activityData?["attribute"]?.ToString() ??
+                                     activityData?["filter_attribute"]?.ToString() ??
+                                     activityData?["filterAttribute"]?.ToString() ??
                                      throw new ArgumentException("Attribute name is required for filter list by attribute");
 
                 var (entity, _) = Utils.Utils.FindEntityAcrossModules(_model, entityName);
@@ -3634,6 +3713,9 @@ namespace MCPExtension.Tools
                                    throw new ArgumentException("expression is required for reduce");
 
                 string returnTypeStr = activityData?["return_type"]?.ToString()?.ToLowerInvariant() ?? "integer";
+
+                // Qualify $currentObject/Attribute paths with entity name (Mendix requires Module.Entity qualification)
+                reduceExpr = NormalizeReduceExpression(reduceExpr, listVariable, activityData);
 
                 var initialExpression = microflowExpressionService.CreateFromString(NormalizeMendixExpression(initialValueExpr));
                 var expression = microflowExpressionService.CreateFromString(NormalizeMendixExpression(reduceExpr));
@@ -4091,8 +4173,35 @@ namespace MCPExtension.Tools
                     return CreateChangeAssociationActivity(activityData);
                 }
 
+                // Check if a member specified by "name" key should route to attribute or association
+                var memberName = activityData["name"]?.ToString();
+                if (!string.IsNullOrEmpty(memberName) && !string.IsNullOrEmpty(activityData["new_value"]?.ToString() ?? activityData["value"]?.ToString()))
+                {
+                    var entityForCheck = activityData["entity_name"]?.ToString() ?? activityData["entity"]?.ToString() ?? activityData["entityName"]?.ToString();
+                    if (!string.IsNullOrEmpty(entityForCheck))
+                    {
+                        var (entityObj, _) = Utils.Utils.FindEntityAcrossModules(_model, entityForCheck);
+                        if (entityObj != null)
+                        {
+                            var matchingAssoc = entityObj.GetAssociations(Mendix.StudioPro.ExtensionsAPI.Model.DomainModels.AssociationDirection.Both, null)
+                                .FirstOrDefault(ea => ea.Association.Name.Equals(memberName, StringComparison.OrdinalIgnoreCase));
+                            if (matchingAssoc != null)
+                            {
+                                _logger.LogInformation($"Member '{memberName}' matches association - delegating to CreateChangeAssociationActivity");
+                                activityData["association_name"] = memberName;
+                                return CreateChangeAssociationActivity(activityData);
+                            }
+                        }
+                    }
+                    // Not an association — treat as attribute change
+                    activityData["attribute"] = memberName;
+                    _logger.LogInformation($"Direct member '{memberName}' specified - delegating to CreateChangeAttributeActivity");
+                    return CreateChangeAttributeActivity(activityData);
+                }
+
                 // Check for changes specified as array (multiple attribute changes)
-                var changesArray = activityData["changes"]?.AsArray();
+                // Support both "changes" and "members" as parameter names
+                var changesArray = activityData["changes"]?.AsArray() ?? activityData["members"]?.AsArray();
                 if (changesArray != null && changesArray.Count > 0)
                 {
                     _logger.LogInformation($"Changes array with {changesArray.Count} items found - processing attribute changes");
@@ -4106,17 +4215,19 @@ namespace MCPExtension.Tools
                             // Convert array format to single attribute format
                             var convertedData = new JsonObject();
                             
-                            // Copy all existing properties
+                            // Copy all existing properties (exclude changes/members arrays)
                             foreach (var kvp in activityData)
                             {
-                                if (kvp.Key != "changes")
+                                if (kvp.Key != "changes" && kvp.Key != "members")
                                 {
                                     convertedData[kvp.Key] = kvp.Value?.DeepClone();
                                 }
                             }
-                            
+
                             // Add attribute-specific properties from the change
-                            convertedData["attribute"] = change["attribute"]?.ToString() ?? change["attribute_name"]?.ToString();
+                            convertedData["attribute"] = change["attribute"]?.ToString() ??
+                                                        change["attribute_name"]?.ToString() ??
+                                                        change["name"]?.ToString();
                             convertedData["new_value"] = change["value"]?.ToString() ?? change["new_value"]?.ToString();
                             
                             _logger.LogInformation($"Converted changes array to single attribute change: {convertedData["attribute"]}");
@@ -4131,7 +4242,7 @@ namespace MCPExtension.Tools
                 }
 
                 // Check for changes specified as object (key-value pairs)
-                var changesObject = activityData["changes"]?.AsObject();
+                var changesObject = activityData["changes"]?.AsObject() ?? activityData["members"]?.AsObject();
                 if (changesObject != null && changesObject.Count > 0)
                 {
                     _logger.LogInformation($"Changes object with {changesObject.Count} properties found - processing attribute changes");
@@ -4142,15 +4253,15 @@ namespace MCPExtension.Tools
                         var firstChange = changesObject.First();
                         var convertedData = new JsonObject();
                         
-                        // Copy all existing properties
+                        // Copy all existing properties (exclude changes/members)
                         foreach (var kvp in activityData)
                         {
-                            if (kvp.Key != "changes")
+                            if (kvp.Key != "changes" && kvp.Key != "members")
                             {
                                 convertedData[kvp.Key] = kvp.Value?.DeepClone();
                             }
                         }
-                        
+
                         // Add attribute-specific properties
                         convertedData["attribute"] = firstChange.Key;
                         convertedData["new_value"] = firstChange.Value?.ToString();
@@ -4325,6 +4436,21 @@ namespace MCPExtension.Tools
                                 }
                             }
 
+                            // BUG-019 fix: If activityConfig is still null after type auto-correction
+                            // (happens when user passes 'type' instead of 'activity_type' — the flat-format
+                            // construction above was skipped because activityType was null at that point)
+                            if (activityConfig == null && activityType != null)
+                            {
+                                activityConfig = new JsonObject();
+                                foreach (var prop in activityDef)
+                                {
+                                    if (prop.Key != "activity_type" && prop.Key != "type")
+                                    {
+                                        activityConfig[prop.Key] = prop.Value?.DeepClone();
+                                    }
+                                }
+                            }
+
                             // Apply variable name substitutions to activity config
                             await File.AppendAllTextAsync(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] VARIABLE TRACKING: Applying substitutions with {variableNameMap.Count} mappings\n");
                             var processedConfig = ApplyVariableNameSubstitutions(activityConfig, variableNameMap);
@@ -4447,6 +4573,7 @@ namespace MCPExtension.Tools
                     return CreateMicroflowCallActivity(activityConfig);
 
                 // Database Operations
+                case "retrieve":
                 case "retrieve_from_database":
                 case "retrieve_database":
                 case "database_retrieve":
@@ -4539,7 +4666,7 @@ namespace MCPExtension.Tools
                     var supportedTypes = new[]
                     {
                         "log/log_message", "change_variable/change_value", "create_variable/create_object/create",
-                        "microflow_call/call_microflow", "retrieve_from_database/retrieve_database/database_retrieve",
+                        "microflow_call/call_microflow", "retrieve/retrieve_from_database/retrieve_database/database_retrieve",
                         "retrieve_by_association/association_retrieve", "commit_object/commit", "rollback_object/rollback",
                         "delete_object/delete", "create_list/new_list", "change_list/modify_list", "sort_list", "filter_list",
                         "find_in_list/find_list_item", "aggregate_list/list_aggregate", "java_action_call/call_java_action",
@@ -5287,6 +5414,14 @@ namespace MCPExtension.Tools
                 {
                     doc = module.GetDocuments()
                         .FirstOrDefault(d => d.Name.Equals(documentName, StringComparison.OrdinalIgnoreCase));
+
+                    // If not found at root, search subfolders
+                    if (doc == null)
+                    {
+                        var (subDoc, _) = FindDocumentWithParent(module, documentName);
+                        doc = subDoc;
+                    }
+
                     if (doc != null)
                     {
                         foundModule = module.Name;
@@ -5955,10 +6090,17 @@ namespace MCPExtension.Tools
                             changes.Add($"outputVariable = '{newOutputVar}'");
                         }
                         var newCommit = parameters["commit"]?.ToString();
-                        if (newCommit != null && Enum.TryParse<CommitEnum>(newCommit, true, out var commitVal))
+                        if (newCommit != null)
                         {
-                            createObj.Commit = commitVal;
-                            changes.Add($"commit = {commitVal}");
+                            if (Enum.TryParse<CommitEnum>(newCommit, true, out var commitVal))
+                            {
+                                createObj.Commit = commitVal;
+                                changes.Add($"commit = {commitVal}");
+                            }
+                            else
+                            {
+                                changes.Add($"WARNING: Invalid commit value '{newCommit}'. Valid values: Yes, YesWithoutEvents, No");
+                            }
                         }
                         var newRefresh = parameters["refresh_in_client"];
                         if (newRefresh != null)
@@ -5978,10 +6120,17 @@ namespace MCPExtension.Tools
                             changes.Add($"changeVariable = '{newChangeVar}'");
                         }
                         var newCommit = parameters["commit"]?.ToString();
-                        if (newCommit != null && Enum.TryParse<CommitEnum>(newCommit, true, out var commitVal))
+                        if (newCommit != null)
                         {
-                            changeObj.Commit = commitVal;
-                            changes.Add($"commit = {commitVal}");
+                            if (Enum.TryParse<CommitEnum>(newCommit, true, out var commitVal))
+                            {
+                                changeObj.Commit = commitVal;
+                                changes.Add($"commit = {commitVal}");
+                            }
+                            else
+                            {
+                                changes.Add($"WARNING: Invalid commit value '{newCommit}'. Valid values: Yes, YesWithoutEvents, No");
+                            }
                         }
                         var newRefresh = parameters["refresh_in_client"];
                         if (newRefresh != null)
@@ -6471,6 +6620,7 @@ namespace MCPExtension.Tools
                     return JsonSerializer.Serialize(new { error = $"Microflow '{microflowName}' not found in module '{module.Name}'" });
 
                 var changes = new List<string>();
+                var warnings = new List<string>();
 
                 using var transaction = _model.StartTransaction($"Update microflow '{microflowName}'");
 
@@ -6518,6 +6668,16 @@ namespace MCPExtension.Tools
 
                     microflow.ReturnType = newReturnType;
                     changes.Add($"returnType = {FormatDataType(newReturnType)}");
+
+                    // Warn about end event limitation — Extensions API has no IEndEvent access
+                    if (newReturnType != DataType.Void)
+                    {
+                        var defaultExpr = GetDefaultExpressionForDataType(newReturnType);
+                        warnings.Add($"Return type changed but the end event expression could not be updated " +
+                            $"(Extensions API limitation — no IEndEvent access). The end event may still have the old " +
+                            $"return expression. Expected expression for {FormatDataType(newReturnType)}: '{defaultExpr}'. " +
+                            $"Please recreate the microflow with the correct return type, or update the end event manually in Studio Pro.");
+                    }
                 }
 
                 // Change return variable name
@@ -6545,12 +6705,16 @@ namespace MCPExtension.Tools
                 transaction.Commit();
 
                 _logger.LogInformation($"Updated microflow {module.Name}.{microflow.Name}: {string.Join(", ", changes)}");
-                return JsonSerializer.Serialize(new
+                var result = new Dictionary<string, object>
                 {
-                    success = true,
-                    microflow = $"{module.Name}.{microflow.Name}",
-                    changes = changes
-                });
+                    ["success"] = true,
+                    ["microflow"] = $"{module.Name}.{microflow.Name}",
+                    ["changes"] = changes
+                };
+                if (warnings.Count > 0)
+                    result["warnings"] = warnings;
+
+                return JsonSerializer.Serialize(result);
             }
             catch (Exception ex)
             {
@@ -6655,6 +6819,14 @@ namespace MCPExtension.Tools
                 var constantName = parameters["constant_name"]?.ToString();
                 var constantModule = parameters["module_name"]?.ToString();
                 var newValue = parameters["value"]?.ToString();
+
+                // Support qualified names like "Module.ConstantName"
+                if (!string.IsNullOrEmpty(constantName) && constantName.Contains('.') && string.IsNullOrEmpty(constantModule))
+                {
+                    var parts = constantName.Split('.', 2);
+                    constantModule = parts[0];
+                    constantName = parts[1];
+                }
 
                 if (string.IsNullOrEmpty(configName))
                     return JsonSerializer.Serialize(new { error = "configuration_name is required (e.g. 'Development', 'Production')" });

@@ -11,6 +11,7 @@ using Mendix.StudioPro.ExtensionsAPI.Model.Constants;
 using Mendix.StudioPro.ExtensionsAPI.Model.DataTypes;
 using Mendix.StudioPro.ExtensionsAPI.Model.Enumerations;
 using Mendix.StudioPro.ExtensionsAPI.Model.Microflows;
+using Mendix.StudioPro.ExtensionsAPI.Model.Settings;
 using Mendix.StudioPro.ExtensionsAPI.Model.Texts;
 using Microsoft.Extensions.Logging;
 using MCPExtension.Utils;
@@ -1746,10 +1747,11 @@ namespace MCPExtension.Tools
             try
             {
                 var elementType = parameters["element_type"]?.ToString();
-                var entityName = parameters["entity_name"]?.ToString();
+                var elementName = parameters["element_name"]?.ToString();
+                var entityName = parameters["entity_name"]?.ToString() ?? elementName;
                 var attributeName = parameters["attribute_name"]?.ToString();
                 var associationName = parameters["association_name"]?.ToString();
-                var documentName = parameters["document_name"]?.ToString() ?? entityName;
+                var documentName = parameters["document_name"]?.ToString() ?? elementName ?? entityName;
 
                 if (string.IsNullOrEmpty(elementType))
                 {
@@ -1794,7 +1796,7 @@ namespace MCPExtension.Tools
                     case "constant":
                         if (string.IsNullOrEmpty(documentName))
                             return JsonSerializer.Serialize(new { error = "document_name (or entity_name) is required for constant deletion" });
-                        return DeleteDocument<IConstant>(module, documentName, "Constant");
+                        return DeleteConstant(module, documentName);
 
                     case "enumeration":
                         if (string.IsNullOrEmpty(documentName))
@@ -2369,6 +2371,56 @@ namespace MCPExtension.Tools
             }
         }
 
+        private string DeleteConstant(IModule module, string constantName)
+        {
+            using (var transaction = _model.StartTransaction($"Delete Constant '{constantName}'"))
+            {
+                var constant = module.GetDocuments().OfType<IConstant>()
+                    .FirstOrDefault(d => d.Name.Equals(constantName, StringComparison.OrdinalIgnoreCase));
+
+                if (constant == null)
+                {
+                    return JsonSerializer.Serialize(new { error = $"Constant '{constantName}' not found in module '{module.Name}'" });
+                }
+
+                // Clean up configuration constant value references before deleting
+                var constantQualifiedName = constant.QualifiedName?.FullName;
+                if (!string.IsNullOrEmpty(constantQualifiedName))
+                {
+                    try
+                    {
+                        var project = _model.Root as IProject;
+                        var settings = project?.GetProjectDocuments().OfType<IProjectSettings>().FirstOrDefault();
+                        var configSettings = settings?.GetSettingsParts().OfType<IConfigurationSettings>().FirstOrDefault();
+                        if (configSettings != null)
+                        {
+                            foreach (var config in configSettings.GetConfigurations())
+                            {
+                                var orphanedValues = config.GetConstantValues()
+                                    .Where(cv => cv.Constant?.FullName == constantQualifiedName)
+                                    .ToList();
+                                foreach (var orphan in orphanedValues)
+                                {
+                                    config.RemoveConstantValue(orphan);
+                                    _logger.LogInformation($"Removed constant value reference for '{constantQualifiedName}' from configuration '{config.Name}'");
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning($"Could not clean up configuration references for constant '{constantName}': {ex.Message}");
+                    }
+                }
+
+                module.RemoveDocument(constant);
+                transaction.Commit();
+
+                _logger.LogInformation($"Deleted Constant '{constantName}' from module '{module.Name}'");
+                return JsonSerializer.Serialize(new { success = true, message = $"Constant '{constantName}' deleted successfully from module '{module.Name}'" });
+            }
+        }
+
         private string DeleteEntity(IDomainModel domainModel, string entityName)
         {
             using (var transaction = _model.StartTransaction("Delete Entity"))
@@ -2653,21 +2705,63 @@ namespace MCPExtension.Tools
                         var mxAttribute = _model.Create<IAttribute>();
                         mxAttribute.Name = attrName;
 
-                        if (attrType.Equals("Enumeration", StringComparison.OrdinalIgnoreCase))
+                        if (attrType.StartsWith("Enumeration:", StringComparison.OrdinalIgnoreCase))
                         {
-                            var enumValues = attrObj["enumerationValues"]?.AsArray()
-                                ?.Select(v => v?.ToString())
-                                ?.Where(v => !string.IsNullOrEmpty(v))
-                                ?.ToList();
+                            // "Enumeration:EnumName" syntax — link to existing enumeration
+                            var enumName = attrType.Substring("Enumeration:".Length).Trim();
+                            var explicitEnumName = attrObj["enumeration_name"]?.ToString();
+                            if (!string.IsNullOrEmpty(explicitEnumName))
+                                enumName = explicitEnumName;
 
-                            if (enumValues != null && enumValues.Any())
+                            var foundEnum = FindExistingEnumeration(enumName);
+                            if (foundEnum != null)
                             {
-                                var enumTypeInstance = CreateEnumerationType(_model, attrName, enumValues, targetModule);
+                                var enumTypeInstance = _model.Create<IEnumerationAttributeType>();
+                                enumTypeInstance.Enumeration = foundEnum.QualifiedName;
                                 mxAttribute.Type = enumTypeInstance;
                             }
                             else
                             {
-                                continue; // Skip invalid enumerations
+                                _logger.LogWarning($"Enumeration '{enumName}' not found — skipping attribute '{attrName}'");
+                                continue;
+                            }
+                        }
+                        else if (attrType.Equals("Enumeration", StringComparison.OrdinalIgnoreCase))
+                        {
+                            // Plain "Enumeration" type — check enumeration_name or enumerationValues
+                            var explicitEnumName = attrObj["enumeration_name"]?.ToString();
+                            if (!string.IsNullOrEmpty(explicitEnumName))
+                            {
+                                var foundEnum = FindExistingEnumeration(explicitEnumName);
+                                if (foundEnum != null)
+                                {
+                                    var enumTypeInstance = _model.Create<IEnumerationAttributeType>();
+                                    enumTypeInstance.Enumeration = foundEnum.QualifiedName;
+                                    mxAttribute.Type = enumTypeInstance;
+                                }
+                                else
+                                {
+                                    _logger.LogWarning($"Enumeration '{explicitEnumName}' not found — skipping attribute '{attrName}'");
+                                    continue;
+                                }
+                            }
+                            else
+                            {
+                                var enumValues = attrObj["enumerationValues"]?.AsArray()
+                                    ?.Select(v => v?.ToString())
+                                    ?.Where(v => !string.IsNullOrEmpty(v))
+                                    ?.ToList();
+
+                                if (enumValues != null && enumValues.Any())
+                                {
+                                    var enumTypeInstance = CreateEnumerationType(_model, attrName, enumValues, targetModule);
+                                    mxAttribute.Type = enumTypeInstance;
+                                }
+                                else
+                                {
+                                    _logger.LogWarning($"Enumeration attribute '{attrName}' requires 'enumeration_name' or 'enumerationValues' — skipping");
+                                    continue;
+                                }
                             }
                         }
                         else
@@ -2737,21 +2831,63 @@ namespace MCPExtension.Tools
                         var mxAttribute = _model.Create<IAttribute>();
                         mxAttribute.Name = attrName;
 
-                        if (attrType.Equals("Enumeration", StringComparison.OrdinalIgnoreCase))
+                        if (attrType.StartsWith("Enumeration:", StringComparison.OrdinalIgnoreCase))
                         {
-                            var enumValues = attrObj["enumerationValues"]?.AsArray()
-                                ?.Select(v => v?.ToString())
-                                ?.Where(v => !string.IsNullOrEmpty(v))
-                                ?.ToList();
+                            // "Enumeration:EnumName" syntax — link to existing enumeration
+                            var enumName = attrType.Substring("Enumeration:".Length).Trim();
+                            var explicitEnumName = attrObj["enumeration_name"]?.ToString();
+                            if (!string.IsNullOrEmpty(explicitEnumName))
+                                enumName = explicitEnumName;
 
-                            if (enumValues != null && enumValues.Any())
+                            var foundEnum = FindExistingEnumeration(enumName);
+                            if (foundEnum != null)
                             {
-                                var enumTypeInstance = CreateEnumerationType(_model, attrName, enumValues, targetModule);
+                                var enumTypeInstance = _model.Create<IEnumerationAttributeType>();
+                                enumTypeInstance.Enumeration = foundEnum.QualifiedName;
                                 mxAttribute.Type = enumTypeInstance;
                             }
                             else
                             {
-                                continue; // Skip invalid enumerations
+                                _logger.LogWarning($"Enumeration '{enumName}' not found — skipping attribute '{attrName}'");
+                                continue;
+                            }
+                        }
+                        else if (attrType.Equals("Enumeration", StringComparison.OrdinalIgnoreCase))
+                        {
+                            // Plain "Enumeration" type — check enumeration_name or enumerationValues
+                            var explicitEnumName = attrObj["enumeration_name"]?.ToString();
+                            if (!string.IsNullOrEmpty(explicitEnumName))
+                            {
+                                var foundEnum = FindExistingEnumeration(explicitEnumName);
+                                if (foundEnum != null)
+                                {
+                                    var enumTypeInstance = _model.Create<IEnumerationAttributeType>();
+                                    enumTypeInstance.Enumeration = foundEnum.QualifiedName;
+                                    mxAttribute.Type = enumTypeInstance;
+                                }
+                                else
+                                {
+                                    _logger.LogWarning($"Enumeration '{explicitEnumName}' not found — skipping attribute '{attrName}'");
+                                    continue;
+                                }
+                            }
+                            else
+                            {
+                                var enumValues = attrObj["enumerationValues"]?.AsArray()
+                                    ?.Select(v => v?.ToString())
+                                    ?.Where(v => !string.IsNullOrEmpty(v))
+                                    ?.ToList();
+
+                                if (enumValues != null && enumValues.Any())
+                                {
+                                    var enumTypeInstance = CreateEnumerationType(_model, attrName, enumValues, targetModule);
+                                    mxAttribute.Type = enumTypeInstance;
+                                }
+                                else
+                                {
+                                    _logger.LogWarning($"Enumeration attribute '{attrName}' requires 'enumeration_name' or 'enumerationValues' — skipping");
+                                    continue;
+                                }
                             }
                         }
                         else
@@ -2934,12 +3070,19 @@ namespace MCPExtension.Tools
                         if (string.IsNullOrEmpty(targetFolderName))
                             return JsonSerializer.Serialize(new { error = "target_folder is required for 'move_document' action" });
 
-                        var doc = module.GetDocuments().FirstOrDefault(d => d.Name.Equals(documentName, StringComparison.OrdinalIgnoreCase));
-                        if (doc == null)
+                        IDocument? doc = null;
+                        IFolderBase? sourceParent = null;
+
+                        doc = module.GetDocuments().FirstOrDefault(d => d.Name.Equals(documentName, StringComparison.OrdinalIgnoreCase));
+                        if (doc != null)
                         {
-                            // Also search in subfolders
-                            doc = FindDocumentRecursive(module, documentName);
+                            sourceParent = module;
                         }
+                        else
+                        {
+                            (doc, sourceParent) = FindDocumentWithParent(module, documentName);
+                        }
+
                         if (doc == null)
                             return JsonSerializer.Serialize(new { error = $"Document '{documentName}' not found in module '{module.Name}'" });
 
@@ -2948,6 +3091,7 @@ namespace MCPExtension.Tools
                             return JsonSerializer.Serialize(new { error = $"Target folder '{targetFolderName}' not found in module '{module.Name}'" });
 
                         using var transaction = _model.StartTransaction("Move document to folder");
+                        sourceParent!.RemoveDocument(doc);
                         targetFolder.AddDocument(doc);
                         transaction.Commit();
 
@@ -3012,6 +3156,18 @@ namespace MCPExtension.Tools
                 if (found != null) return found;
             }
             return null;
+        }
+
+        private (IDocument? doc, IFolderBase? parent) FindDocumentWithParent(IFolderBase parent, string documentName)
+        {
+            foreach (var folder in parent.GetFolders())
+            {
+                var doc = folder.GetDocuments().FirstOrDefault(d => d.Name.Equals(documentName, StringComparison.OrdinalIgnoreCase));
+                if (doc != null) return (doc, folder);
+                var result = FindDocumentWithParent(folder, documentName);
+                if (result.doc != null) return result;
+            }
+            return (null, null);
         }
 
         public async Task<string> ValidateName(JsonObject parameters)
@@ -3369,6 +3525,13 @@ namespace MCPExtension.Tools
                     };
 
                     foundDoc = filtered.FirstOrDefault(d => d.Name.Equals(documentName, StringComparison.OrdinalIgnoreCase));
+
+                    // If not found at root, search subfolders
+                    if (foundDoc == null)
+                    {
+                        foundDoc = FindDocumentRecursive(mod, documentName);
+                    }
+
                     if (foundDoc != null)
                     {
                         foundModule = mod;
