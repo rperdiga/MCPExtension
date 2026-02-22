@@ -2378,6 +2378,41 @@ namespace MCPExtension.Tools
 
                         transaction.Commit();
 
+                        // BUG-022 fix: Post-commit second-pass to set Commit/RefreshInClient on create_object activities.
+                        // The Extensions API service method ignores these params during creation, but setting them
+                        // in a separate transaction after the activity is fully committed to the model works.
+                        if (activityType is "create_object" or "create_variable" or "create")
+                        {
+                            try
+                            {
+                                var commitStr = activityData?["commit"]?.ToString()?.ToLowerInvariant() ?? "no";
+                                var refreshStr = activityData?["refresh_in_client"]?.ToString() ?? "false";
+                                var wantCommit = commitStr switch
+                                {
+                                    "yes" => Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.CommitEnum.Yes,
+                                    "yes_without_events" or "yeswithoutevents" => Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.CommitEnum.YesWithoutEvents,
+                                    _ => Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.CommitEnum.No
+                                };
+                                var wantRefresh = bool.TryParse(refreshStr, out var r) && r;
+
+                                if (wantCommit != Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.CommitEnum.No || wantRefresh)
+                                {
+                                    using var fixTx = _model.StartTransaction("Fix create_object commit/refresh");
+                                    if (activity?.Action is ICreateObjectAction fixAction)
+                                    {
+                                        fixAction.Commit = wantCommit;
+                                        fixAction.RefreshInClient = wantRefresh;
+                                        _logger.LogInformation($"BUG-022 post-commit fix: set Commit={wantCommit}, RefreshInClient={wantRefresh}");
+                                    }
+                                    fixTx.Commit();
+                                }
+                            }
+                            catch (Exception fixEx)
+                            {
+                                _logger.LogWarning(fixEx, "BUG-022 post-commit fix failed (non-fatal)");
+                            }
+                        }
+
                         return JsonSerializer.Serialize(new {
                             success = true,
                             message = $"Activity of type '{activityType}' added to microflow '{microflowName}' successfully. {insertMessage}",
@@ -4024,8 +4059,20 @@ namespace MCPExtension.Tools
 
                 _logger.LogInformation($"Calling CreateAssociationRetrieveSourceActivity: " +
                     $"association='{association.Name}', output='{outputVariable}', input='{inputVariable}'");
-                return microflowActivitiesService.CreateAssociationRetrieveSourceActivity(
+                var result = microflowActivitiesService.CreateAssociationRetrieveSourceActivity(
                     _model, association, outputVariable, inputVariable);
+
+                // BUG-021 fix: Check if the API returned null (silent failure)
+                if (result == null)
+                {
+                    var errorMsg = $"CreateAssociationRetrieveSourceActivity returned null. " +
+                        $"Ensure input_variable '{inputVariable}' refers to an existing variable in the microflow " +
+                        $"(created by a prior create_object or retrieve activity). " +
+                        $"Association: '{association.Name}', output: '{outputVariable}'";
+                    _logger.LogWarning(errorMsg);
+                    SetLastError(errorMsg);
+                }
+                return result;
             }
             catch (Exception ex)
             {
@@ -4726,8 +4773,9 @@ namespace MCPExtension.Tools
 
                 string returnTypeStr = activityData?["return_type"]?.ToString()?.ToLowerInvariant() ?? "integer";
 
-                // Qualify $currentObject/Attribute paths with entity name (Mendix requires Module.Entity qualification)
-                reduceExpr = NormalizeReduceExpression(reduceExpr, listVariable, activityData);
+                // BUG-023 fix: Do NOT entity-qualify $currentObject/Attribute paths in reduce expressions.
+                // Mendix reduce expressions use $currentObject/Attribute directly (no Module.Entity prefix)
+                // because $currentObject is already typed to the list's entity.
 
                 var initialExpression = microflowExpressionService.CreateFromString(NormalizeMendixExpression(initialValueExpr));
                 var expression = microflowExpressionService.CreateFromString(NormalizeMendixExpression(reduceExpr));
@@ -5387,6 +5435,9 @@ namespace MCPExtension.Tools
                 // Create all activities first
                 var createdActivities = new List<IActionActivity>();
                 var activityResults = new List<object>();
+
+                // BUG-022 fix: Track pending commit/refresh fixes for create_object activities
+                var pendingCommitFixes = new List<(IActionActivity activity, string commitStr, string refreshStr)>();
                 
                 // Variable name tracking for propagation across activities
                 Dictionary<string, string> variableNameMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -5474,7 +5525,19 @@ namespace MCPExtension.Tools
                             if (activity != null)
                             {
                                 createdActivities.Add(activity);
-                                
+
+                                // BUG-022: Collect commit/refresh fix info alongside the actual activity object
+                                if (activityType.ToLowerInvariant() is "create_object" or "create_variable" or "create")
+                                {
+                                    var commitVal = processedConfig?["commit"]?.ToString() ?? "no";
+                                    var refreshVal = processedConfig?["refresh_in_client"]?.ToString() ?? "false";
+                                    if (!commitVal.Equals("no", StringComparison.OrdinalIgnoreCase) ||
+                                        (bool.TryParse(refreshVal, out var rv) && rv))
+                                    {
+                                        pendingCommitFixes.Add((activity, commitVal, refreshVal));
+                                    }
+                                }
+
                                 // Track variable names for future activities
                                 await File.AppendAllTextAsync(debugLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] VARIABLE TRACKING: Tracking variables for activity type '{activityType}'\n");
                                 TrackVariableNames(activityType, processedConfig, variableNameMap);
@@ -5535,6 +5598,38 @@ namespace MCPExtension.Tools
                         }
 
                         transaction.Commit();
+
+                        // BUG-022 fix: Post-commit second-pass to set Commit/RefreshInClient on create_object activities.
+                        // The Extensions API ignores these params during creation; they must be set in a separate transaction.
+                        // Uses pendingCommitFixes collected during the creation loop (properly aligned with activity objects).
+                        if (pendingCommitFixes.Count > 0)
+                        {
+                            try
+                            {
+                                using var fixTx = _model.StartTransaction("Fix create_object commit/refresh (batch)");
+                                foreach (var (fixActivity, commitVal, refreshVal) in pendingCommitFixes)
+                                {
+                                    if (fixActivity?.Action is ICreateObjectAction fixAction)
+                                    {
+                                        var wantCommit = commitVal.ToLowerInvariant() switch
+                                        {
+                                            "yes" => Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.CommitEnum.Yes,
+                                            "yes_without_events" or "yeswithoutevents" => Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.CommitEnum.YesWithoutEvents,
+                                            _ => Mendix.StudioPro.ExtensionsAPI.Model.Microflows.Actions.CommitEnum.No
+                                        };
+                                        var wantRefresh = bool.TryParse(refreshVal, out var r) && r;
+                                        fixAction.Commit = wantCommit;
+                                        fixAction.RefreshInClient = wantRefresh;
+                                        _logger.LogInformation($"BUG-022 batch fix: set Commit={wantCommit}, RefreshInClient={wantRefresh} on activity");
+                                    }
+                                }
+                                fixTx.Commit();
+                            }
+                            catch (Exception fixEx)
+                            {
+                                _logger.LogWarning(fixEx, "BUG-022 batch post-commit fix failed (non-fatal)");
+                            }
+                        }
 
                         return JsonSerializer.Serialize(new
                         {
@@ -7681,14 +7776,24 @@ namespace MCPExtension.Tools
                     microflow.ReturnType = newReturnType;
                     changes.Add($"returnType = {FormatDataType(newReturnType)}");
 
-                    // Warn about end event limitation — Extensions API has no IEndEvent access
+                    // BUG-024: Extensions API explicitly excludes "flows" from IMicroflowBase,
+                    // and the untyped model API is read-only — no way to update end event expression.
                     if (newReturnType != DataType.Void)
                     {
                         var defaultExpr = GetDefaultExpressionForDataType(newReturnType);
-                        warnings.Add($"Return type changed but the end event expression could not be updated " +
-                            $"(Extensions API limitation — no IEndEvent access). The end event may still have the old " +
-                            $"return expression. Expected expression for {FormatDataType(newReturnType)}: '{defaultExpr}'. " +
-                            $"Please recreate the microflow with the correct return type, or update the end event manually in Studio Pro.");
+                        warnings.Add($"IMPORTANT: Return type changed to {FormatDataType(newReturnType)} but the end event " +
+                            $"expression was NOT updated (Mendix Extensions API limitation — end events are inaccessible). " +
+                            $"This WILL cause error CE0117 in check_project_errors. " +
+                            $"Workaround: delete this microflow (delete_document) and recreate it with the correct return type " +
+                            $"using create_microflow with returnType={FormatDataType(newReturnType)}. " +
+                            $"Expected end event expression: '{defaultExpr}'.");
+                    }
+                    else
+                    {
+                        // Changing TO void also needs end event update (remove the return expression)
+                        warnings.Add($"Return type changed to Void but the end event expression was NOT cleared " +
+                            $"(Mendix Extensions API limitation). This may cause error CE0117. " +
+                            $"Workaround: delete this microflow (delete_document) and recreate it as Void.");
                     }
                 }
 
