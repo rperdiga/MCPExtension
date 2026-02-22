@@ -634,7 +634,10 @@ namespace MCPExtension.MCP
                 "set_microflow_url" => "Read or set the URL of a microflow. When a URL is set, the microflow is exposed as a REST endpoint. Omit 'url' to read, provide it to set (empty string to clear).",
                 "list_rules" => "List validation rules (special server-side microflows) across modules or in a specific module.",
                 "exclude_document" => "Mark a document (microflow, page, etc.) as excluded from the project, or un-exclude it. Excluded documents are not compiled or deployed.",
-                "read_security_info" => "Read module security configuration including module roles and entity access rules. Uses the untyped model API for deep introspection.",
+                "read_security_info" => "Read project and module security configuration: security level, user roles, module roles, password policy, guest access, demo users. Use scope='project' for project-level settings, scope='module' for module roles, scope='all' (default) for both. READ-ONLY (security config cannot be modified via API).",
+                "read_entity_access_rules" => "Read detailed entity-level access rules: allowCreate, allowDelete, defaultMemberAccessRights, xPathConstraint, module roles, and per-member (attribute/association) access rights. Requires entity_name. READ-ONLY.",
+                "read_microflow_security" => "Read microflow/nanoflow security: which module roles are allowed to execute, and whether entity access is applied. Filter by microflow_name or module_name. READ-ONLY.",
+                "audit_security" => "Security gap analysis: finds entities without access rules, overly permissive rules (full CRUD + no XPath), orphaned module roles, and project security level warnings. Use checks parameter to run specific checks ('entities', 'roles', 'project', 'all').",
                 "list_nanoflows" => "List all nanoflows (client-side flows) in the project or a specific module.",
                 "list_scheduled_events" => "List all scheduled events with their interval, type, and enabled status.",
                 "list_rest_services" => "List all published REST services with their paths, versions, authentication, and resources.",
@@ -1321,7 +1324,39 @@ namespace MCPExtension.MCP
                     type = "object",
                     properties = new
                     {
-                        module_name = new { type = "string", description = "Module to read security from. Reads all if omitted." }
+                        module_name = new { type = "string", description = "Module to read security from. Reads all if omitted." },
+                        scope = new { type = "string", description = "Scope: 'project' (project security only), 'module' (module roles only), 'all' (both, default)." }
+                    },
+                    required = new string[0]
+                },
+                "read_entity_access_rules" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        entity_name = new { type = "string", description = "Entity name (supports qualified 'Module.Entity' format)." },
+                        module_name = new { type = "string", description = "Module filter (optional if entity_name is qualified)." }
+                    },
+                    required = new[] { "entity_name" }
+                },
+                "read_microflow_security" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        microflow_name = new { type = "string", description = "Microflow name or qualified name. Lists all if omitted." },
+                        module_name = new { type = "string", description = "Module to filter by. Lists all modules if omitted." },
+                        include_nanoflows = new { type = "boolean", description = "Also include nanoflows (default: false)." }
+                    },
+                    required = new string[0]
+                },
+                "audit_security" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Module to audit. Audits all user modules if omitted." },
+                        checks = new { type = "string", description = "Which checks: 'entities', 'roles', 'project', 'all' (default)." }
                     },
                     required = new string[0]
                 },

@@ -397,6 +397,23 @@ namespace MCPExtension
                 var result = await additionalTools.ReadSecurityInfo(parameters);
                 return (object)result;
             });
+            // Phase 23: Security Introspection
+            _mcpServer.RegisterTool("read_entity_access_rules", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ReadEntityAccessRules(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("read_microflow_security", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ReadMicroflowSecurity(parameters);
+                return (object)result;
+            });
+            _mcpServer.RegisterTool("audit_security", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.AuditSecurity(parameters);
+                return (object)result;
+            });
+
             _mcpServer.RegisterTool("list_nanoflows", async (JsonObject parameters) =>
             {
                 var result = await additionalTools.ListNanoflows(parameters);
@@ -552,7 +569,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 76, // Phase 20: +1 arrange_domain_model (smart layout)
+                registeredTools = 79, // Phase 23: +3 security introspection tools (read_entity_access_rules, read_microflow_security, audit_security)
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",

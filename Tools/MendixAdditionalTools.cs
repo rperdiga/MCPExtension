@@ -1441,6 +1441,9 @@ namespace MCPExtension.Tools
                     "list_rules",
                     "exclude_document",
                     "read_security_info",
+                    "read_entity_access_rules",
+                    "read_microflow_security",
+                    "audit_security",
                     "list_nanoflows",
                     "list_scheduled_events",
                     "list_rest_services",
@@ -6622,52 +6625,132 @@ namespace MCPExtension.Tools
                     return JsonSerializer.Serialize(new { error = "IUntypedModelAccessService is not available" });
 
                 var moduleName = parameters?["module_name"]?.ToString();
+                var scope = parameters?["scope"]?.ToString()?.ToLowerInvariant() ?? "all";
 
-                var securityUnits = GetUnitsWithFallback(root, "Security$ModuleSecurity");
-                if (!securityUnits.Any())
-                    securityUnits = GetUnitsWithFallback(root, "Security$ProjectSecurity");
+                var result = new Dictionary<string, object?>();
+                result["success"] = true;
 
-                var result = new List<object>();
-                foreach (var unit in securityUnits)
+                // ── Project-level security ──
+                if (scope is "project" or "all")
                 {
-                    if (!string.IsNullOrEmpty(moduleName))
+                    var projectSecUnits = GetUnitsWithFallback(root, "Security$ProjectSecurity");
+                    if (projectSecUnits.Any())
                     {
-                        var unitName = unit.Name ?? unit.QualifiedName;
-                        if (unitName != null && !unitName.Contains(moduleName, StringComparison.OrdinalIgnoreCase))
-                            continue;
-                    }
+                        var projUnit = projectSecUnits.First();
+                        var projectInfo = new Dictionary<string, object?>();
 
-                    var roles = unit.GetElementsOfType("Security$ModuleRole")
-                        .Select(r => new { name = r.Name, id = r.ID })
-                        .ToList();
-
-                    var accessRules = unit.GetElementsOfType("Security$AccessRule")
-                        .Select(r => new
+                        // Read project security properties (untyped model uses camelCase)
+                        try
                         {
-                            name = r.Name,
-                            type = r.Type,
-                            propertyCount = r.GetProperties().Count
-                        })
-                        .Take(50)
-                        .ToList();
+                            projectInfo["securityLevel"] = ReadPropValue(projUnit, "securityLevel");
+                            projectInfo["checkSecurity"] = ReadPropValue(projUnit, "checkSecurity");
+                            projectInfo["adminUserName"] = ReadPropValue(projUnit, "adminUserName");
+                            projectInfo["enableDemoUsers"] = ReadPropValue(projUnit, "enableDemoUsers");
+                            projectInfo["enableGuestAccess"] = ReadPropValue(projUnit, "enableGuestAccess");
+                            projectInfo["strictMode"] = ReadPropValue(projUnit, "strictMode");
+                            projectInfo["strictPageUrlCheck"] = ReadPropValue(projUnit, "strictPageUrlCheck");
+                        }
+                        catch { /* some properties may not exist in all versions */ }
 
-                    result.Add(new
+                        // User roles
+                        var userRoles = projUnit.GetElementsOfType("Security$UserRole")
+                            .Select(r =>
+                            {
+                                var ur = new Dictionary<string, object?>();
+                                ur["name"] = r.Name;
+                                ur["id"] = r.ID.ToString();
+                                ur["description"] = ReadPropValue(r, "description");
+                                ur["manageAllRoles"] = ReadPropValue(r, "manageAllRoles");
+                                ur["manageUsersWithoutRoles"] = ReadPropValue(r, "manageUsersWithoutRoles");
+                                // Module roles linked to this user role
+                                try
+                                {
+                                    var moduleRoleProp = r.GetProperty("moduleRoles");
+                                    if (moduleRoleProp != null && moduleRoleProp.IsList)
+                                    {
+                                        var mrValues = moduleRoleProp.GetValues()?.Select(v => v?.ToString()).Where(v => v != null).ToList();
+                                        ur["moduleRoleCount"] = mrValues?.Count ?? 0;
+                                        ur["moduleRoleNames"] = mrValues;
+                                    }
+                                }
+                                catch { }
+                                return ur;
+                            }).ToList();
+                        projectInfo["userRoles"] = userRoles;
+
+                        // Demo users
+                        var demoUsers = projUnit.GetElementsOfType("Security$DemoUser")
+                            .Select(d => new
+                            {
+                                userName = ReadPropValue(d, "userName"),
+                                entity = ReadPropValue(d, "entity")
+                            }).ToList();
+                        if (demoUsers.Any())
+                            projectInfo["demoUsers"] = demoUsers;
+
+                        // Password policy
+                        var passwordPolicies = projUnit.GetElementsOfType("Security$PasswordPolicySettings");
+                        if (passwordPolicies.Any())
+                        {
+                            var pp = passwordPolicies.First();
+                            projectInfo["passwordPolicy"] = new
+                            {
+                                minimumLength = ReadPropValue(pp, "minimumLength"),
+                                requireDigit = ReadPropValue(pp, "requireDigit"),
+                                requireMixedCase = ReadPropValue(pp, "requireMixedCase"),
+                                requireSymbol = ReadPropValue(pp, "requireSymbol")
+                            };
+                        }
+
+                        result["projectSecurity"] = projectInfo;
+                    }
+                    else
                     {
-                        name = unit.Name,
-                        qualifiedName = unit.QualifiedName,
-                        type = unit.Type,
-                        moduleRoles = roles,
-                        accessRuleCount = accessRules.Count,
-                        accessRules
-                    });
+                        result["projectSecurity"] = null;
+                    }
                 }
 
-                return JsonSerializer.Serialize(new
+                // ── Module-level security ──
+                if (scope is "module" or "all")
                 {
-                    success = true,
-                    totalSecurityUnits = result.Count,
-                    security = result
-                });
+                    var moduleSecUnits = GetUnitsWithFallback(root, "Security$ModuleSecurity");
+                    var moduleResults = new List<object>();
+
+                    foreach (var unit in moduleSecUnits)
+                    {
+                        // ModuleSecurity units have null Name/QualifiedName — extract from child ModuleRole QualifiedNames
+                        var roles = unit.GetElementsOfType("Security$ModuleRole")
+                            .Select(r => new
+                            {
+                                name = r.Name,
+                                qualifiedName = r.QualifiedName,
+                                id = r.ID.ToString(),
+                                description = ReadPropValue(r, "description")
+                            })
+                            .ToList();
+
+                        var msModuleName = roles.FirstOrDefault()?.qualifiedName?.Split('.')?.FirstOrDefault() ?? "Unknown";
+
+                        if (!string.IsNullOrEmpty(moduleName))
+                        {
+                            if (!msModuleName.Equals(moduleName, StringComparison.OrdinalIgnoreCase))
+                                continue;
+                        }
+
+                        moduleResults.Add(new
+                        {
+                            module = msModuleName,
+                            type = unit.Type,
+                            moduleRoles = roles,
+                            moduleRoleCount = roles.Count
+                        });
+                    }
+
+                    result["moduleSecurity"] = moduleResults;
+                    result["totalModules"] = moduleResults.Count;
+                }
+
+                return JsonSerializer.Serialize(result);
             }
             catch (Exception ex)
             {
@@ -6675,6 +6758,486 @@ namespace MCPExtension.Tools
                 return JsonSerializer.Serialize(new { error = ex.Message });
             }
         }
+
+        /// <summary>Helper to safely read a property value from an untyped model element</summary>
+        private object? ReadPropValue(IModelStructure element, string propertyName)
+        {
+            try
+            {
+                var prop = element.GetProperty(propertyName);
+                if (prop == null) return null;
+                if (prop.IsList)
+                {
+                    var values = prop.GetValues();
+                    return values?.Select(v => v?.ToString()).ToList();
+                }
+                return prop.Value?.ToString();
+            }
+            catch { return null; }
+        }
+
+        #endregion
+
+        #region Phase 23: Security Introspection
+
+        public async Task<string> ReadEntityAccessRules(JsonObject parameters)
+        {
+            try
+            {
+                var root = GetUntypedModelRoot();
+                if (root == null)
+                    return JsonSerializer.Serialize(new { error = "IUntypedModelAccessService is not available" });
+
+                var entityName = parameters?["entity_name"]?.ToString();
+                var moduleName = parameters?["module_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(entityName))
+                    return JsonSerializer.Serialize(new { error = "entity_name is required" });
+
+                // Parse qualified name
+                string? targetModule = moduleName;
+                string targetEntity = entityName;
+                if (entityName.Contains("."))
+                {
+                    var parts = entityName.Split('.', 2);
+                    targetModule = parts[0];
+                    targetEntity = parts[1];
+                }
+
+                // Find the entity via untyped model (DomainModels$DomainModel → DomainModels$Entity → DomainModels$AccessRule)
+                var domainModelUnits = GetUnitsWithFallback(root, "DomainModels$DomainModel");
+                var accessRuleResults = new List<object>();
+                string? foundModule = null;
+
+                foreach (var dmUnit in domainModelUnits)
+                {
+                    // DomainModel units have null Name/QualifiedName — extract module name from child entities
+                    var entities = dmUnit.GetElementsOfType("DomainModels$Entity");
+                    var dmModuleName = entities.FirstOrDefault()?.QualifiedName?.Split('.')?.FirstOrDefault() ?? "";
+
+                    if (!string.IsNullOrEmpty(targetModule) && !dmModuleName.Equals(targetModule, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    foreach (var entityEl in entities)
+                    {
+                        if (!string.Equals(entityEl.Name, targetEntity, StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        foundModule = dmModuleName;
+
+                        // Found the entity — read its access rules (camelCase property names)
+                        var rules = entityEl.GetElementsOfType("DomainModels$AccessRule");
+                        foreach (var rule in rules)
+                        {
+                            var ruleInfo = new Dictionary<string, object?>();
+                            ruleInfo["allowCreate"] = ReadPropValue(rule, "allowCreate");
+                            ruleInfo["allowDelete"] = ReadPropValue(rule, "allowDelete");
+                            ruleInfo["defaultMemberAccessRights"] = ReadPropValue(rule, "defaultMemberAccessRights");
+                            ruleInfo["xPathConstraint"] = ReadPropValue(rule, "xPathConstraint");
+                            ruleInfo["documentation"] = ReadPropValue(rule, "documentation");
+
+                            // Module roles this rule applies to
+                            try
+                            {
+                                var rolesProp = rule.GetProperty("moduleRoles");
+                                if (rolesProp != null && rolesProp.IsList)
+                                {
+                                    var roleValues = rolesProp.GetValues()?.Select(v => v?.ToString()).Where(v => v != null).ToList();
+                                    ruleInfo["moduleRoles"] = roleValues;
+                                    ruleInfo["moduleRoleCount"] = roleValues?.Count ?? 0;
+                                }
+                                else
+                                {
+                                    var roleVal = rolesProp?.Value?.ToString();
+                                    ruleInfo["moduleRoles"] = roleVal != null ? new List<string> { roleVal } : new List<string>();
+                                }
+                            }
+                            catch { ruleInfo["moduleRoles"] = new List<string>(); }
+
+                            // Per-member access rights
+                            var memberAccesses = rule.GetElementsOfType("DomainModels$MemberAccess");
+                            if (memberAccesses.Any())
+                            {
+                                ruleInfo["memberAccess"] = memberAccesses.Select(ma => new
+                                {
+                                    attribute = ReadPropValue(ma, "attribute"),
+                                    association = ReadPropValue(ma, "association"),
+                                    accessRights = ReadPropValue(ma, "accessRights")
+                                }).ToList();
+                            }
+
+                            accessRuleResults.Add(ruleInfo);
+                        }
+                        break; // found entity
+                    }
+                    if (foundModule != null) break; // found module
+                }
+
+                if (foundModule == null)
+                    return JsonSerializer.Serialize(new { success = false, error = $"Entity '{entityName}' not found in untyped model" });
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    entity = targetEntity,
+                    module = foundModule,
+                    accessRuleCount = accessRuleResults.Count,
+                    accessRules = accessRuleResults
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error reading entity access rules");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> ReadMicroflowSecurity(JsonObject parameters)
+        {
+            try
+            {
+                var root = GetUntypedModelRoot();
+                if (root == null)
+                    return JsonSerializer.Serialize(new { error = "IUntypedModelAccessService is not available" });
+
+                var microflowName = parameters?["microflow_name"]?.ToString();
+                var moduleName = parameters?["module_name"]?.ToString();
+                var includeNanoflows = parameters?["include_nanoflows"]?.GetValue<bool>() ?? false;
+
+                var microflowUnits = GetUnitsWithFallback(root, "Microflows$Microflow");
+                if (includeNanoflows)
+                {
+                    var nanoflows = GetUnitsWithFallback(root, "Microflows$Nanoflow");
+                    microflowUnits = microflowUnits.Concat(nanoflows).ToList();
+                }
+
+                var results = new List<object>();
+
+                foreach (var mf in microflowUnits)
+                {
+                    var mfName = mf.Name ?? "";
+                    var mfQualified = mf.QualifiedName ?? "";
+
+                    // Filter by module name
+                    if (!string.IsNullOrEmpty(moduleName))
+                    {
+                        if (!mfQualified.StartsWith(moduleName + ".", StringComparison.OrdinalIgnoreCase) &&
+                            !mfQualified.StartsWith(moduleName + "$", StringComparison.OrdinalIgnoreCase))
+                            continue;
+                    }
+
+                    // Filter by microflow name
+                    if (!string.IsNullOrEmpty(microflowName))
+                    {
+                        if (!mfName.Equals(microflowName, StringComparison.OrdinalIgnoreCase) &&
+                            !mfQualified.Equals(microflowName, StringComparison.OrdinalIgnoreCase) &&
+                            !mfQualified.Contains(microflowName, StringComparison.OrdinalIgnoreCase))
+                            continue;
+                    }
+
+                    var info = new Dictionary<string, object?>();
+                    info["name"] = mfName;
+                    info["qualifiedName"] = mfQualified;
+                    info["type"] = mf.Type;
+
+                    // Read allowed module roles (camelCase property names)
+                    try
+                    {
+                        var rolesProp = mf.GetProperty("allowedModuleRoles");
+
+                        if (rolesProp != null)
+                        {
+                            if (rolesProp.IsList)
+                            {
+                                var roleValues = rolesProp.GetValues()?.Select(v => v?.ToString()).Where(v => v != null).ToList();
+                                info["allowedRoles"] = roleValues;
+                                info["allowedRoleCount"] = roleValues?.Count ?? 0;
+                                info["hasRoleRestriction"] = (roleValues?.Count ?? 0) > 0;
+                            }
+                            else
+                            {
+                                var val = rolesProp.Value?.ToString();
+                                info["allowedRoles"] = val != null ? new List<string> { val } : new List<string>();
+                                info["hasRoleRestriction"] = val != null;
+                            }
+                        }
+                        else
+                        {
+                            info["allowedRoles"] = null;
+                            info["hasRoleRestriction"] = false;
+                        }
+                    }
+                    catch
+                    {
+                        info["allowedRoles"] = null;
+                        info["hasRoleRestriction"] = false;
+                    }
+
+                    // Read apply entity access
+                    info["applyEntityAccess"] = ReadPropValue(mf, "applyEntityAccess");
+
+                    results.Add(info);
+                }
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    count = results.Count,
+                    microflows = results
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error reading microflow security");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> AuditSecurity(JsonObject parameters)
+        {
+            try
+            {
+                var root = GetUntypedModelRoot();
+                if (root == null)
+                    return JsonSerializer.Serialize(new { error = "IUntypedModelAccessService is not available" });
+
+                var moduleName = parameters?["module_name"]?.ToString();
+                var checksParam = parameters?["checks"]?.ToString()?.ToLowerInvariant() ?? "all";
+                var runAll = checksParam == "all";
+
+                var findings = new List<object>();
+
+                // ── Check 1: Project security level ──
+                if (runAll || checksParam.Contains("project"))
+                {
+                    var projectSecUnits = GetUnitsWithFallback(root, "Security$ProjectSecurity");
+                    if (projectSecUnits.Any())
+                    {
+                        var projUnit = projectSecUnits.First();
+                        var secLevel = ReadPropValue(projUnit, "securityLevel")?.ToString()
+                                    ?? ReadPropValue(projUnit, "checkSecurity")?.ToString();
+                        var guestAccess = ReadPropValue(projUnit, "enableGuestAccess")?.ToString();
+
+                        if (secLevel != null && !secLevel.Contains("Production", StringComparison.OrdinalIgnoreCase)
+                            && !secLevel.Contains("true", StringComparison.OrdinalIgnoreCase))
+                        {
+                            findings.Add(new
+                            {
+                                severity = "warning",
+                                category = "project",
+                                message = $"Project security level is '{secLevel}' — should be 'Production' for production apps",
+                                detail = "Non-production security levels bypass access rules and allow broader access"
+                            });
+                        }
+                        else if (secLevel != null)
+                        {
+                            findings.Add(new
+                            {
+                                severity = "info",
+                                category = "project",
+                                message = $"Project security level: {secLevel}",
+                                detail = (string?)null
+                            });
+                        }
+
+                        if (guestAccess != null && guestAccess.Contains("true", StringComparison.OrdinalIgnoreCase))
+                        {
+                            findings.Add(new
+                            {
+                                severity = "warning",
+                                category = "project",
+                                message = "Guest access is ENABLED",
+                                detail = "Anonymous users can access the app. Ensure guest role permissions are minimal."
+                            });
+                        }
+                    }
+                }
+
+                // ── Check 2: Entities without access rules ──
+                if (runAll || checksParam.Contains("entities"))
+                {
+                    var domainModelUnits = GetUnitsWithFallback(root, "DomainModels$DomainModel");
+                    var entitiesWithoutRules = new List<string>();
+                    var overpermissiveRules = new List<object>();
+
+                    foreach (var dmUnit in domainModelUnits)
+                    {
+                        // DomainModel units have null Name/QualifiedName — extract from child entities
+                        var entities = dmUnit.GetElementsOfType("DomainModels$Entity");
+                        var dmName = entities.FirstOrDefault()?.QualifiedName?.Split('.')?.FirstOrDefault() ?? "Unknown";
+
+                        if (!string.IsNullOrEmpty(moduleName) && !dmName.Equals(moduleName, StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        // Skip marketplace/system modules for audit
+                        var matchedModule = Utils.Utils.GetAllNonAppStoreModules(_model)
+                            .FirstOrDefault(m => dmName.Equals(m.Name, StringComparison.OrdinalIgnoreCase));
+                        if (matchedModule == null && string.IsNullOrEmpty(moduleName))
+                            continue;
+
+                        foreach (var entityEl in entities)
+                        {
+                            var entityDisplayName = $"{dmName}.{entityEl.Name}";
+                            var accessRules = entityEl.GetElementsOfType("DomainModels$AccessRule");
+
+                            if (!accessRules.Any())
+                            {
+                                entitiesWithoutRules.Add(entityDisplayName);
+                                continue;
+                            }
+
+                            // Check for overly permissive rules (ReadWrite with no XPath)
+                            foreach (var rule in accessRules)
+                            {
+                                var defaultAccess = ReadPropValue(rule, "defaultMemberAccessRights")?.ToString();
+                                var xpath = ReadPropValue(rule, "xPathConstraint")?.ToString();
+                                var allowCreate = ReadPropValue(rule, "allowCreate")?.ToString();
+                                var allowDelete = ReadPropValue(rule, "allowDelete")?.ToString();
+
+                                if (defaultAccess != null && defaultAccess.Contains("ReadWrite", StringComparison.OrdinalIgnoreCase)
+                                    && string.IsNullOrWhiteSpace(xpath)
+                                    && (allowCreate?.Contains("true", StringComparison.OrdinalIgnoreCase) ?? false)
+                                    && (allowDelete?.Contains("true", StringComparison.OrdinalIgnoreCase) ?? false))
+                                {
+                                    overpermissiveRules.Add(new
+                                    {
+                                        entity = entityDisplayName,
+                                        defaultMemberAccess = defaultAccess,
+                                        xpathConstraint = "(none)",
+                                        allowCreate,
+                                        allowDelete
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    if (entitiesWithoutRules.Any())
+                    {
+                        findings.Add(new
+                        {
+                            severity = "error",
+                            category = "entities",
+                            message = $"{entitiesWithoutRules.Count} entities have NO access rules (security gap)",
+                            detail = (object)entitiesWithoutRules.Take(30).ToList()
+                        });
+                    }
+                    else
+                    {
+                        findings.Add(new
+                        {
+                            severity = "info",
+                            category = "entities",
+                            message = "All entities have at least one access rule",
+                            detail = (object?)null
+                        });
+                    }
+
+                    if (overpermissiveRules.Any())
+                    {
+                        findings.Add(new
+                        {
+                            severity = "warning",
+                            category = "entities",
+                            message = $"{overpermissiveRules.Count} entities have overly permissive rules (full CRUD + no XPath)",
+                            detail = (object)overpermissiveRules.Take(20).ToList()
+                        });
+                    }
+                }
+
+                // ── Check 3: Orphaned module roles ──
+                if (runAll || checksParam.Contains("roles"))
+                {
+                    // Collect all module roles
+                    var moduleSecUnits = GetUnitsWithFallback(root, "Security$ModuleSecurity");
+                    var allModuleRoles = new List<(string module, string role, string id)>();
+
+                    foreach (var msUnit in moduleSecUnits)
+                    {
+                        var roles = msUnit.GetElementsOfType("Security$ModuleRole");
+                        var msModuleName = roles.FirstOrDefault()?.QualifiedName?.Split('.')?.FirstOrDefault() ?? "Unknown";
+
+                        if (!string.IsNullOrEmpty(moduleName))
+                        {
+                            if (!msModuleName.Equals(moduleName, StringComparison.OrdinalIgnoreCase))
+                                continue;
+                        }
+
+                        foreach (var role in roles)
+                            allModuleRoles.Add((msModuleName, role.Name ?? "Unknown", role.QualifiedName ?? $"{msModuleName}.{role.Name}"));
+                    }
+
+                    // Collect all module role QualifiedNames referenced by user roles
+                    var projectSecUnits = GetUnitsWithFallback(root, "Security$ProjectSecurity");
+                    var referencedRoleQNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    if (projectSecUnits.Any())
+                    {
+                        var userRoles = projectSecUnits.First().GetElementsOfType("Security$UserRole");
+                        foreach (var ur in userRoles)
+                        {
+                            try
+                            {
+                                var moduleRoleProp = ur.GetProperty("moduleRoles");
+                                if (moduleRoleProp != null && moduleRoleProp.IsList)
+                                {
+                                    var vals = moduleRoleProp.GetValues();
+                                    if (vals != null)
+                                        foreach (var v in vals)
+                                            if (v != null) referencedRoleQNames.Add(v.ToString()!);
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+
+                    // Find orphaned roles (not referenced by any user role) — compare by QualifiedName
+                    var orphanedRoles = allModuleRoles
+                        .Where(mr => !referencedRoleQNames.Contains(mr.id)) // id field now holds QualifiedName
+                        .Select(mr => $"{mr.module}.{mr.role}")
+                        .ToList();
+
+                    if (orphanedRoles.Any())
+                    {
+                        findings.Add(new
+                        {
+                            severity = "warning",
+                            category = "roles",
+                            message = $"{orphanedRoles.Count} module roles are not assigned to any user role",
+                            detail = (object)orphanedRoles.Take(20).ToList()
+                        });
+                    }
+                    else
+                    {
+                        findings.Add(new
+                        {
+                            severity = "info",
+                            category = "roles",
+                            message = $"All {allModuleRoles.Count} module roles are assigned to at least one user role",
+                            detail = (object?)null
+                        });
+                    }
+                }
+
+                // Summary
+                int errors = findings.Count(f => ((dynamic)f).severity == "error");
+                int warnings = findings.Count(f => ((dynamic)f).severity == "warning");
+                int infos = findings.Count(f => ((dynamic)f).severity == "info");
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    summary = new { errors, warnings, infos, total = findings.Count },
+                    findings
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error auditing security");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        #endregion
 
         public async Task<string> ListNanoflows(JsonObject parameters)
         {
@@ -6926,8 +7489,6 @@ namespace MCPExtension.Tools
                 return JsonSerializer.Serialize(new { error = ex.Message });
             }
         }
-
-        #endregion
 
         #region Phase 15: Navigation Management
 
