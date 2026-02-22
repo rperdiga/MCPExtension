@@ -638,7 +638,8 @@ namespace MCPExtension.MCP
                 "read_entity_access_rules" => "Read detailed entity-level access rules: allowCreate, allowDelete, defaultMemberAccessRights, xPathConstraint, module roles, and per-member (attribute/association) access rights. Requires entity_name. READ-ONLY.",
                 "read_microflow_security" => "Read microflow/nanoflow security: which module roles are allowed to execute, and whether entity access is applied. Filter by microflow_name or module_name. READ-ONLY.",
                 "audit_security" => "Security gap analysis: finds entities without access rules, overly permissive rules (full CRUD + no XPath), orphaned module roles, and project security level warnings. Use checks parameter to run specific checks ('entities', 'roles', 'project', 'all').",
-                "list_nanoflows" => "List all nanoflows (client-side flows) in the project or a specific module.",
+                "read_nanoflow_details" => "Read comprehensive details of a nanoflow: parameters with types, return type, activities with action types, flow structure, security roles, and documentation. The nanoflow equivalent of read_microflow_details. READ-ONLY via untyped model.",
+                "list_nanoflows" => "List all nanoflows (client-side flows) with return type, activity count, parameter count, role count, and documentation. Filter by module_name.",
                 "list_scheduled_events" => "List all scheduled events with their interval, type, and enabled status.",
                 "list_rest_services" => "List all published REST services with their paths, versions, authentication, and resources.",
                 "query_model_elements" => "Generic escape-hatch tool: query any metamodel type by name (e.g. 'Navigation$NavigationProfile', 'Microflows$Nanoflow', 'Pages$Page'). Returns names, qualified names, and optionally all properties. Future-proofs the extension for any model element type.",
@@ -1359,6 +1360,16 @@ namespace MCPExtension.MCP
                         checks = new { type = "string", description = "Which checks: 'entities', 'roles', 'project', 'all' (default)." }
                     },
                     required = new string[0]
+                },
+                "read_nanoflow_details" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        nanoflow_name = new { type = "string", description = "Name of the nanoflow (e.g. 'ACT_Login' or 'Atlas_Web_Content.ACT_Login')" },
+                        module_name = new { type = "string", description = "Module to search in (optional if using qualified name)" }
+                    },
+                    required = new[] { "nanoflow_name" }
                 },
                 "list_nanoflows" => new
                 {

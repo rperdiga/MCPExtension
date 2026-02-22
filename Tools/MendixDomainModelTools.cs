@@ -1973,6 +1973,7 @@ namespace MCPExtension.Tools
                 "read_entity_access_rules",
                 "read_microflow_security",
                 "audit_security",
+                "read_nanoflow_details",
                 "list_nanoflows",
                 "list_scheduled_events",
                 "list_rest_services",

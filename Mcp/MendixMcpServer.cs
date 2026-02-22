@@ -414,6 +414,13 @@ namespace MCPExtension
                 return (object)result;
             });
 
+            // Phase 24: Nanoflow Introspection
+            _mcpServer.RegisterTool("read_nanoflow_details", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ReadNanoflowDetails(parameters);
+                return (object)result;
+            });
+
             _mcpServer.RegisterTool("list_nanoflows", async (JsonObject parameters) =>
             {
                 var result = await additionalTools.ListNanoflows(parameters);
@@ -569,7 +576,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 79, // Phase 23: +3 security introspection tools (read_entity_access_rules, read_microflow_security, audit_security)
+                registeredTools = 80, // Phase 24: +1 nanoflow introspection (read_nanoflow_details)
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",

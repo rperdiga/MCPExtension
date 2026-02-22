@@ -1444,6 +1444,7 @@ namespace MCPExtension.Tools
                     "read_entity_access_rules",
                     "read_microflow_security",
                     "audit_security",
+                    "read_nanoflow_details",
                     "list_nanoflows",
                     "list_scheduled_events",
                     "list_rest_services",
@@ -7239,6 +7240,341 @@ namespace MCPExtension.Tools
 
         #endregion
 
+        #region Phase 24: Nanoflow Introspection
+
+        /// <summary>Maps untyped model DataType type strings to friendly names</summary>
+        private string MapReturnType(IModelUnit unit)
+        {
+            try
+            {
+                var rtProp = unit.GetProperty("microflowReturnType");
+                if (rtProp == null) return "Unknown";
+
+                var rtVal = rtProp.Value;
+                if (rtVal == null) return "Unknown";
+
+                // rtVal is an IModelStructure child element — get its Type
+                if (rtVal is IModelStructure rtElement)
+                {
+                    var typeName = rtElement.Type ?? "";
+                    return typeName switch
+                    {
+                        "DataTypes$VoidType" => "Void",
+                        "DataTypes$BooleanType" => "Boolean",
+                        "DataTypes$StringType" => "String",
+                        "DataTypes$IntegerType" => "Integer",
+                        "DataTypes$LongType" => "Long",
+                        "DataTypes$DecimalType" => "Decimal",
+                        "DataTypes$FloatType" => "Float",
+                        "DataTypes$DateTimeType" => "DateTime",
+                        "DataTypes$BinaryType" => "Binary",
+                        "DataTypes$ObjectType" => ExtractEntityFromDataType(rtElement, "Object"),
+                        "DataTypes$ListType" => ExtractEntityFromDataType(rtElement, "List"),
+                        "DataTypes$EnumerationType" => ExtractEnumFromDataType(rtElement),
+                        _ => typeName.Contains("$") ? typeName.Split('$').Last() : typeName
+                    };
+                }
+
+                return rtVal.ToString() ?? "Unknown";
+            }
+            catch { return "Unknown"; }
+        }
+
+        private string ExtractEntityFromDataType(IModelStructure rtElement, string prefix)
+        {
+            try
+            {
+                var entityProp = rtElement.GetProperty("entity") ?? rtElement.GetProperty("entityRef");
+                if (entityProp != null)
+                {
+                    var val = entityProp.Value?.ToString();
+                    if (!string.IsNullOrEmpty(val))
+                        return $"{prefix}<{val}>";
+                }
+            }
+            catch { }
+            return prefix;
+        }
+
+        private string ExtractEnumFromDataType(IModelStructure rtElement)
+        {
+            try
+            {
+                var enumProp = rtElement.GetProperty("enumeration") ?? rtElement.GetProperty("enumerationRef");
+                if (enumProp != null)
+                {
+                    var val = enumProp.Value?.ToString();
+                    if (!string.IsNullOrEmpty(val))
+                        return $"Enum<{val}>";
+                }
+            }
+            catch { }
+            return "Enumeration";
+        }
+
+        /// <summary>Counts activities in a nanoflow/microflow objectCollection</summary>
+        private (int activityCount, int flowCount, int paramCount) CountFlowElements(IModelUnit unit)
+        {
+            int activityCount = 0, flowCount = 0, paramCount = 0;
+            try
+            {
+                // Count flows
+                var flowsProp = unit.GetProperty("flows");
+                if (flowsProp != null && flowsProp.IsList)
+                    flowCount = flowsProp.GetValues()?.Count() ?? 0;
+
+                // Count activities from objectCollection
+                var objCollProp = unit.GetProperty("objectCollection");
+                if (objCollProp?.Value is IModelStructure objColl)
+                {
+                    var objects = objColl.GetProperty("objects");
+                    if (objects != null && objects.IsList)
+                    {
+                        var vals = objects.GetValues();
+                        if (vals != null)
+                        {
+                            foreach (var v in vals)
+                            {
+                                if (v is IModelStructure obj)
+                                {
+                                    var typeName = obj.Type ?? "";
+                                    if (typeName.Contains("ParameterObject"))
+                                        paramCount++;
+                                    else if (!typeName.Contains("StartEvent") && !typeName.Contains("EndEvent"))
+                                        activityCount++;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+            return (activityCount, flowCount, paramCount);
+        }
+
+        public async Task<string> ReadNanoflowDetails(JsonObject parameters)
+        {
+            try
+            {
+                var root = GetUntypedModelRoot();
+                if (root == null)
+                    return JsonSerializer.Serialize(new { error = "IUntypedModelAccessService is not available" });
+
+                var nanoflowName = parameters?["nanoflow_name"]?.ToString();
+                var moduleName = parameters?["module_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(nanoflowName))
+                    return JsonSerializer.Serialize(new { error = "nanoflow_name is required" });
+
+                // Parse qualified name
+                string? targetModule = moduleName;
+                string targetName = nanoflowName;
+                if (nanoflowName.Contains("."))
+                {
+                    var parts = nanoflowName.Split('.', 2);
+                    targetModule = parts[0];
+                    targetName = parts[1];
+                }
+
+                var nanoflows = GetUnitsWithFallback(root, "Microflows$Nanoflow");
+                IModelUnit? found = null;
+
+                foreach (var nf in nanoflows)
+                {
+                    var nfName = nf.Name ?? "";
+                    var nfQualified = nf.QualifiedName ?? "";
+
+                    if (!string.IsNullOrEmpty(targetModule))
+                    {
+                        if (!nfQualified.StartsWith(targetModule + ".", StringComparison.OrdinalIgnoreCase))
+                            continue;
+                    }
+
+                    if (nfName.Equals(targetName, StringComparison.OrdinalIgnoreCase) ||
+                        nfQualified.Equals(nanoflowName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        found = nf;
+                        break;
+                    }
+                }
+
+                if (found == null)
+                    return JsonSerializer.Serialize(new { success = false, error = $"Nanoflow '{nanoflowName}' not found" });
+
+                var result = new Dictionary<string, object?>();
+                result["success"] = true;
+                result["name"] = found.Name;
+                result["qualifiedName"] = found.QualifiedName;
+                result["module"] = found.QualifiedName?.Split('.').FirstOrDefault();
+                result["type"] = "Nanoflow";
+
+                // Basic properties (camelCase)
+                result["documentation"] = ReadPropValue(found, "documentation");
+                result["excluded"] = ReadPropValue(found, "excluded");
+                result["exportLevel"] = ReadPropValue(found, "exportLevel");
+                result["markAsUsed"] = ReadPropValue(found, "markAsUsed");
+                result["returnVariableName"] = ReadPropValue(found, "returnVariableName");
+
+                // Return type
+                result["returnType"] = MapReturnType(found);
+
+                // Security — allowedModuleRoles
+                try
+                {
+                    var rolesProp = found.GetProperty("allowedModuleRoles");
+                    if (rolesProp != null && rolesProp.IsList)
+                    {
+                        var roleValues = rolesProp.GetValues()?.Select(v => v?.ToString()).Where(v => v != null).ToList();
+                        result["allowedModuleRoles"] = roleValues;
+                        result["allowedRoleCount"] = roleValues?.Count ?? 0;
+                    }
+                    else
+                    {
+                        result["allowedModuleRoles"] = new List<string>();
+                        result["allowedRoleCount"] = 0;
+                    }
+                }
+                catch
+                {
+                    result["allowedModuleRoles"] = new List<string>();
+                    result["allowedRoleCount"] = 0;
+                }
+
+                // Parameters and activities from objectCollection
+                var parameterList = new List<object>();
+                var activityList = new List<object>();
+                var activityTypeCounts = new Dictionary<string, int>();
+                int startEvents = 0, endEvents = 0;
+
+                try
+                {
+                    var objCollProp = found.GetProperty("objectCollection");
+                    if (objCollProp?.Value is IModelStructure objColl)
+                    {
+                        var objects = objColl.GetProperty("objects");
+                        if (objects != null && objects.IsList)
+                        {
+                            var vals = objects.GetValues();
+                            if (vals != null)
+                            {
+                                foreach (var v in vals)
+                                {
+                                    if (v is not IModelStructure obj) continue;
+                                    var typeName = obj.Type ?? "";
+
+                                    if (typeName.Contains("ParameterObject"))
+                                    {
+                                        // Extract parameter info
+                                        var paramName = obj.Name ?? ReadPropValue(obj, "name")?.ToString();
+                                        var paramType = "Unknown";
+                                        try
+                                        {
+                                            var vtProp = obj.GetProperty("variableType");
+                                            if (vtProp?.Value is IModelStructure vtEl)
+                                            {
+                                                paramType = vtEl.Type switch
+                                                {
+                                                    "DataTypes$ObjectType" => ExtractEntityFromDataType(vtEl, "Object"),
+                                                    "DataTypes$ListType" => ExtractEntityFromDataType(vtEl, "List"),
+                                                    "DataTypes$BooleanType" => "Boolean",
+                                                    "DataTypes$StringType" => "String",
+                                                    "DataTypes$IntegerType" => "Integer",
+                                                    "DataTypes$DecimalType" => "Decimal",
+                                                    "DataTypes$DateTimeType" => "DateTime",
+                                                    "DataTypes$EnumerationType" => ExtractEnumFromDataType(vtEl),
+                                                    _ => vtEl.Type?.Split('$').LastOrDefault() ?? "Unknown"
+                                                };
+                                            }
+                                        }
+                                        catch { }
+                                        parameterList.Add(new { name = paramName, type = paramType });
+                                    }
+                                    else if (typeName.Contains("StartEvent"))
+                                    {
+                                        startEvents++;
+                                    }
+                                    else if (typeName.Contains("EndEvent"))
+                                    {
+                                        endEvents++;
+                                    }
+                                    else
+                                    {
+                                        // Activity — classify by type
+                                        var activityType = typeName.Split('$').LastOrDefault() ?? typeName;
+
+                                        // For ActionActivity, dig into the action child to get specific action type
+                                        string? specificAction = null;
+                                        string? outputVar = null;
+                                        if (typeName.Contains("ActionActivity"))
+                                        {
+                                            try
+                                            {
+                                                var actionProp = obj.GetProperty("action");
+                                                if (actionProp?.Value is IModelStructure actionEl)
+                                                {
+                                                    specificAction = actionEl.Type?.Split('$').LastOrDefault();
+                                                    outputVar = ReadPropValue(actionEl, "outputVariableName")?.ToString();
+                                                }
+                                            }
+                                            catch { }
+                                        }
+
+                                        var displayType = specificAction ?? activityType;
+                                        activityTypeCounts[displayType] = activityTypeCounts.GetValueOrDefault(displayType) + 1;
+
+                                        var actInfo = new Dictionary<string, object?>();
+                                        actInfo["type"] = displayType;
+                                        if (specificAction != null)
+                                            actInfo["containerType"] = activityType;
+                                        if (outputVar != null)
+                                            actInfo["outputVariable"] = outputVar;
+                                        // Read caption/label if available
+                                        var caption = ReadPropValue(obj, "caption");
+                                        if (caption != null)
+                                            actInfo["caption"] = caption;
+
+                                        activityList.Add(actInfo);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    result["activityError"] = ex.Message;
+                }
+
+                result["parameters"] = parameterList;
+                result["parameterCount"] = parameterList.Count;
+                result["activities"] = activityList;
+                result["activityCount"] = activityList.Count;
+                result["activityTypeSummary"] = activityTypeCounts;
+                result["startEvents"] = startEvents;
+                result["endEvents"] = endEvents;
+
+                // Flow count
+                try
+                {
+                    var flowsProp = found.GetProperty("flows");
+                    if (flowsProp != null && flowsProp.IsList)
+                        result["flowCount"] = flowsProp.GetValues()?.Count() ?? 0;
+                    else
+                        result["flowCount"] = 0;
+                }
+                catch { result["flowCount"] = 0; }
+
+                return JsonSerializer.Serialize(result);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error reading nanoflow details");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        #endregion
+
         public async Task<string> ListNanoflows(JsonObject parameters)
         {
             try
@@ -7253,11 +7589,39 @@ namespace MCPExtension.Tools
                 var result = nanoflows
                     .Where(nf => string.IsNullOrEmpty(moduleName) ||
                                  (nf.QualifiedName?.Contains(moduleName, StringComparison.OrdinalIgnoreCase) ?? false))
-                    .Select(nf => new
+                    .Select(nf =>
                     {
-                        name = nf.Name,
-                        qualifiedName = nf.QualifiedName,
-                        module = nf.QualifiedName?.Split('.').FirstOrDefault()
+                        var info = new Dictionary<string, object?>
+                        {
+                            ["name"] = nf.Name,
+                            ["qualifiedName"] = nf.QualifiedName,
+                            ["module"] = nf.QualifiedName?.Split('.').FirstOrDefault(),
+                            ["returnType"] = MapReturnType(nf)
+                        };
+
+                        // Activity/flow/param counts
+                        var (actCount, flowCount, paramCount) = CountFlowElements(nf);
+                        info["activityCount"] = actCount;
+                        info["flowCount"] = flowCount;
+                        info["parameterCount"] = paramCount;
+
+                        // Role count
+                        try
+                        {
+                            var rolesProp = nf.GetProperty("allowedModuleRoles");
+                            if (rolesProp != null && rolesProp.IsList)
+                                info["allowedRoleCount"] = rolesProp.GetValues()?.Count() ?? 0;
+                            else
+                                info["allowedRoleCount"] = 0;
+                        }
+                        catch { info["allowedRoleCount"] = 0; }
+
+                        // Documentation (truncated)
+                        var doc = ReadPropValue(nf, "documentation")?.ToString();
+                        if (!string.IsNullOrEmpty(doc))
+                            info["documentation"] = doc.Length > 100 ? doc[..100] + "..." : doc;
+
+                        return (object)info;
                     })
                     .ToList();
 
