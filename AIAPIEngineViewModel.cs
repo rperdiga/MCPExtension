@@ -276,15 +276,9 @@ namespace MCPExtension
             padding: 7px 14px;
             border-bottom: 1px solid #f1f5f9;
             align-items: center;
-            animation: slideIn 0.2s ease;
         }
 
         .entry:hover { background: #f8fafc; }
-
-        @keyframes slideIn {
-            from { opacity: 0; transform: translateY(-2px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
 
         .entry-time { color: var(--text-muted); font-size: 11px; }
         .entry-tool { color: var(--text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -340,8 +334,11 @@ namespace MCPExtension
     </style>
 
     <script>
-        const MAX_ENTRIES = 100;
+        const MAX_ENTRIES = 50;
         const activeEntries = new Map();
+        let entryCount = 0;
+        let pendingEvents = [];
+        let rafScheduled = false;
 
         function handleMessageFromHost(event) {
             let raw = event.data;
@@ -423,68 +420,91 @@ namespace MCPExtension
         }
 
         function handleToolCallEvent(data) {
+            pendingEvents.push(data);
+            if (!rafScheduled) {
+                rafScheduled = true;
+                requestAnimationFrame(flushEvents);
+            }
+        }
+
+        function flushEvents() {
+            rafScheduled = false;
             const feed = document.getElementById('activityFeed');
             const empty = document.getElementById('emptyState');
             if (empty) empty.style.display = 'none';
 
-            if (data.status === 'started') {
-                const el = document.createElement('div');
-                el.className = 'entry';
-                el.id = 'c-' + data.callId;
-                el.innerHTML =
-                    '<span class=""entry-time"">' + data.timestamp + '</span>' +
-                    '<span class=""entry-tool"">' + data.toolName + '</span>' +
-                    '<span class=""badge badge-running""><span class=""spinner""></span></span>' +
-                    '<span class=""entry-duration"">...</span>';
-                feed.appendChild(el);
-                activeEntries.set(data.callId, el);
+            const frag = document.createDocumentFragment();
+            let needsScroll = false;
+            let latestTotalCalls, latestSSE;
 
-                // Trim old entries
-                while (feed.children.length > MAX_ENTRIES + 1) {
-                    const first = feed.firstElementChild;
-                    if (first && first.id !== 'emptyState') {
-                        activeEntries.delete(first.id.replace('c-', ''));
-                        feed.removeChild(first);
+            const batch = pendingEvents.splice(0);
+            for (const data of batch) {
+                if (data.status === 'started') {
+                    const el = document.createElement('div');
+                    el.className = 'entry';
+                    el.id = 'c-' + data.callId;
+                    el.innerHTML =
+                        '<span class=""entry-time"">' + data.timestamp + '</span>' +
+                        '<span class=""entry-tool"">' + data.toolName + '</span>' +
+                        '<span class=""badge badge-running""><span class=""spinner""></span></span>' +
+                        '<span class=""entry-duration"">...</span>';
+                    frag.appendChild(el);
+                    activeEntries.set(data.callId, el);
+                    entryCount++;
+                    needsScroll = true;
+                }
+                else if (data.status === 'completed' || data.status === 'failed') {
+                    const el = activeEntries.get(data.callId);
+                    if (el) {
+                        const badge = el.querySelector('.badge');
+                        const dur = el.querySelector('.entry-duration');
+                        if (data.status === 'completed') {
+                            badge.className = 'badge badge-ok';
+                            badge.textContent = 'OK';
+                        } else {
+                            badge.className = 'badge badge-err';
+                            badge.textContent = 'ERR';
+                            el.title = data.errorMessage || '';
+                        }
+                        dur.textContent = data.durationMs + 'ms';
+                        activeEntries.delete(data.callId);
                     }
                 }
 
-                feed.scrollTop = feed.scrollHeight;
-            }
-            else if (data.status === 'completed' || data.status === 'failed') {
-                const el = activeEntries.get(data.callId);
-                if (el) {
-                    const badge = el.querySelector('.badge');
-                    const dur = el.querySelector('.entry-duration');
-
-                    if (data.status === 'completed') {
-                        badge.className = 'badge badge-ok';
-                        badge.innerHTML = 'OK';
-                    } else {
-                        badge.className = 'badge badge-err';
-                        badge.innerHTML = 'ERR';
-                        el.title = data.errorMessage || '';
-                    }
-
-                    dur.textContent = data.durationMs + 'ms';
-                    activeEntries.delete(data.callId);
-                }
+                if (data.totalToolCalls !== undefined) latestTotalCalls = data.totalToolCalls;
+                if (data.sseConnections !== undefined) latestSSE = data.sseConnections;
             }
 
-            // Update stats
-            if (data.totalToolCalls !== undefined)
-                document.getElementById('statCalls').textContent = data.totalToolCalls;
-            if (data.sseConnections !== undefined)
-                document.getElementById('statSSE').textContent = data.sseConnections;
+            // Single DOM append for all new entries
+            if (frag.childNodes.length > 0) feed.appendChild(frag);
 
-            // Update count display
-            var count = feed.querySelectorAll('.entry').length;
-            document.getElementById('activityCount').textContent = count + ' calls';
+            // Trim old entries (single pass)
+            while (feed.children.length > MAX_ENTRIES + 1) {
+                const first = feed.firstElementChild;
+                if (first && first.id !== 'emptyState') {
+                    activeEntries.delete(first.id.replace('c-', ''));
+                    feed.removeChild(first);
+                    entryCount--;
+                } else break;
+            }
+
+            if (needsScroll) feed.scrollTop = feed.scrollHeight;
+
+            // Update stats once per frame
+            if (latestTotalCalls !== undefined)
+                document.getElementById('statCalls').textContent = latestTotalCalls;
+            if (latestSSE !== undefined)
+                document.getElementById('statSSE').textContent = latestSSE;
+
+            document.getElementById('activityCount').textContent = entryCount + ' calls';
         }
 
         function clearLog() {
             const feed = document.getElementById('activityFeed');
             feed.innerHTML = '<div id=""emptyState"" class=""empty-state"">Log cleared</div>';
             activeEntries.clear();
+            pendingEvents = [];
+            entryCount = 0;
             document.getElementById('activityCount').textContent = '0 calls';
         }
 

@@ -2376,6 +2376,7 @@ namespace MCPExtension.Tools
             try
             {
                 var moduleName = parameters["module_name"]?.ToString();
+                var rootEntity = parameters["root_entity"]?.ToString();
                 if (string.IsNullOrEmpty(moduleName))
                     return JsonSerializer.Serialize(new { success = false, error = "module_name is required" });
 
@@ -2385,7 +2386,7 @@ namespace MCPExtension.Tools
 
                 using (var transaction = _model.StartTransaction("arrange domain model"))
                 {
-                    var result = ArrangeDomainModelInternal(module);
+                    var result = ArrangeDomainModelInternal(module, rootEntity);
                     transaction.Commit();
                     return JsonSerializer.Serialize(result);
                 }
@@ -2401,7 +2402,7 @@ namespace MCPExtension.Tools
         /// Core layout algorithm — Sugiyama-style layered graph layout with crossing minimization.
         /// Handles 20+ entity models efficiently. Can be called internally after bulk entity creation.
         /// </summary>
-        internal object ArrangeDomainModelInternal(IModule module)
+        internal object ArrangeDomainModelInternal(IModule module, string? rootEntity = null)
         {
             var entities = module.DomainModel.GetEntities().ToList();
             if (entities.Count == 0)
@@ -2554,9 +2555,17 @@ namespace MCPExtension.Tools
                     }
                 }
 
-                // Pick the diameter endpoint with lower degree as root (peripheral/top-level entity)
-                var root = neighbors[farthestA].Count <= neighbors[farthestB].Count ? farthestA : farthestB;
-                rootNames.Add(root);
+                // If user specified a root entity and it's in this component, use it
+                if (!string.IsNullOrEmpty(rootEntity) && component.Contains(rootEntity))
+                {
+                    rootNames.Add(rootEntity);
+                }
+                else
+                {
+                    // Pick the diameter endpoint with lower degree as root (peripheral/top-level entity)
+                    var root = neighbors[farthestA].Count <= neighbors[farthestB].Count ? farthestA : farthestB;
+                    rootNames.Add(root);
+                }
             }
 
             // BFS layer assignment from roots (undirected — visited set prevents backtracking)
