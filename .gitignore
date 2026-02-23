@@ -1,0 +1,14 @@
+# Build artifacts
+bin/
+obj/
+
+# Debug/test logs
+*.log
+mcp_debug.log
+
+# Local config
+.mcp.json
+
+# Stress test artifacts
+stress-test-call.sh
+stress-test-results.log
