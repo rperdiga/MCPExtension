@@ -15,11 +15,30 @@ The same 83 tools work on both Studio Pro 10.x and 11.x. The Mendix Extensions A
 
 > **Studio Pro 10.x users**: See [backport-10x/README.md](backport-10x/README.md) for build, deploy, and launch instructions specific to your version. The tool reference, usage examples, and troubleshooting sections below apply to both versions.
 
+## Pre-built Extension (No Build Required)
+
+Pre-built versions of the MCP Extension are available in the [`dist/`](dist/) folder. Download the file for your Studio Pro version — no .NET SDK or compilation needed.
+
+| Studio Pro Version | Download |
+|---|---|
+| **11.5+** | [`MCP-StudioPro-11.5.mxmodule`](dist/MCP-StudioPro-11.5.mxmodule) |
+| **10.24.13+** | [`MCP-StudioPro-10.24.13.mxmodule`](dist/MCP-StudioPro-10.24.13.mxmodule) |
+
+**Installation:**
+
+1. Download the `.mxmodule` file for your Studio Pro version
+2. In Studio Pro, go to **App** > **Import Extension** and select the downloaded file
+3. Launch Studio Pro with the `-enable-extension-development` flag
+4. Open the **MCP dockable pane** (the server starts when the pane opens)
+5. Connect at `http://localhost:3001/health`
+
+> These are builds of the same source code in this repository. For building from source, see the Quick Start section below.
+
 ## Mendix Marketplace Module
 
 A pre-built version for **Mendix 10.24.2** is available in the `.github/Mendix Marketplace Module/` folder with installation instructions.
 
-## Quick Start (Studio Pro 11.x)
+## Quick Start — Build from Source (Studio Pro 11.x)
 
 ### Prerequisites
 

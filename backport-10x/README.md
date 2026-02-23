@@ -4,6 +4,8 @@ Build and deploy instructions for running the MCPExtension on **Mendix Studio Pr
 
 This is the same **83-tool** extension as the Studio Pro 11.x version — same codebase, no code duplication. The Mendix Extensions API is 99% identical between 10.x and 11.x, so all tools work on both versions.
 
+> **Pre-built available**: A ready-to-use `.mxmodule` file is in [`dist/MCP-StudioPro-10.24.13.mxmodule`](../dist/MCP-StudioPro-10.24.13.mxmodule) — no build required. See the [main README](../README.md#pre-built-extension-no-build-required) for installation instructions.
+
 > For the full tool reference, usage examples, and troubleshooting, see the [main README](../README.md).
 
 ## Prerequisites
