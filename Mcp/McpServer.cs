@@ -661,6 +661,8 @@ namespace MCPExtension.MCP
                 "insert_before_activity" => "Insert a new activity before a specific position in a microflow. Uses the same activity format as create_microflow_activities. Use read_microflow_details to find the target position. Note: Position numbers in read_microflow_details may reflect creation order rather than visual flow order; verify positions after insertion.",
                 "list_pages" => "List all pages in a module or across all modules. Returns page name, module, qualified name, excluded status, widget count, layout name, whether page has parameters, and documentation excerpt.",
                 "read_page_details" => "Read comprehensive details of a page: widget tree structure (DataViews, ListViews, DataGrids, buttons, inputs, containers), data source bindings, layout info, page parameters with types, and widget type summary. Uses untyped model for deep introspection. READ-ONLY.",
+                "list_workflows" => "List all workflows in a module or across all modules. Returns workflow name, module, context entity, activity count, and documentation excerpt. Uses untyped model. READ-ONLY.",
+                "read_workflow_details" => "Read comprehensive details of a workflow: activities (UserTasks, SystemActivities, Decisions, ParallelSplits), outcomes, microflow references, context entity, security roles, flow count, and activity type summary. Uses untyped model for deep introspection. READ-ONLY.",
                 "delete_document" => "Delete a document (page, microflow, or any document type) from a module. Searches recursively in subfolders. Optionally filter by document_type to prevent accidental deletion of wrong type.",
                 "sync_filesystem" => "Synchronize model with the file system. Imports changes from JavaScript actions, widgets, and other file-based resources. Equivalent to 'Synchronize App Directory' menu item. Note: IAppService may not be available in all extension contexts — returns a graceful error if unavailable.",
                 "update_microflow" => "Update microflow properties: return type, return variable name, and URL. WARNING: Changing return_type does NOT update the end event expression (API limitation — causes CE0117). To change return type safely, delete and recreate the microflow. Supported return types: void, boolean, string, integer, decimal, float, datetime, object:Module.Entity, list:Module.Entity.",
@@ -1655,6 +1657,25 @@ namespace MCPExtension.MCP
                         max_depth = new { type = "integer", description = "Maximum depth for widget tree traversal (1-5, default: 3). Higher values show more nested detail but produce larger output." }
                     },
                     required = new[] { "page_name" }
+                },
+                "list_workflows" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Module to list workflows from (optional, lists all modules if omitted)" }
+                    },
+                    required = new string[0]
+                },
+                "read_workflow_details" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        workflow_name = new { type = "string", description = "Name of the workflow (e.g. 'ApprovalWorkflow' or 'MyModule.ApprovalWorkflow')" },
+                        module_name = new { type = "string", description = "Module to search in (optional if using qualified name)" }
+                    },
+                    required = new[] { "workflow_name" }
                 },
                 "delete_document" => new
                 {

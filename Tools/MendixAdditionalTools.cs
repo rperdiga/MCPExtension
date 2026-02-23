@@ -1467,6 +1467,8 @@ namespace MCPExtension.Tools
                     "insert_before_activity",
                     "list_pages",
                     "read_page_details",
+                    "list_workflows",
+                    "read_workflow_details",
                     "delete_document",
                     "sync_filesystem",
                     "update_microflow",
@@ -9365,6 +9367,335 @@ namespace MCPExtension.Tools
             catch { }
 
             return (widgetCount, hasParams, layoutName, doc);
+        }
+
+        #endregion
+
+        #region Phase 26: Workflow Introspection
+
+        public async Task<string> ListWorkflows(JsonObject parameters)
+        {
+            try
+            {
+                var root = GetUntypedModelRoot();
+                if (root == null)
+                    return JsonSerializer.Serialize(new { error = "IUntypedModelAccessService is not available" });
+
+                var moduleName = parameters?["module_name"]?.ToString();
+                var workflows = GetUnitsWithFallback(root, "Workflows$Workflow");
+
+                var results = new List<object>();
+                foreach (var wf in workflows)
+                {
+                    var qName = wf.QualifiedName ?? "";
+                    var wfModule = qName.Contains('.') ? qName.Split('.').First() : "";
+
+                    if (!string.IsNullOrEmpty(moduleName) &&
+                        !wfModule.Equals(moduleName, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var info = new Dictionary<string, object?>();
+                    info["name"] = wf.Name;
+                    info["qualifiedName"] = qName;
+                    info["module"] = wfModule;
+
+                    // Context entity
+                    try
+                    {
+                        var ctxProp = wf.GetProperty("contextEntity");
+                        if (ctxProp != null)
+                            info["contextEntity"] = ctxProp.Value?.ToString();
+                    }
+                    catch { }
+
+                    // Documentation (truncated)
+                    var doc = ReadPropValue(wf, "documentation")?.ToString();
+                    if (!string.IsNullOrEmpty(doc))
+                        info["documentation"] = doc.Length > 100 ? doc.Substring(0, 100) + "..." : doc;
+
+                    // Activity count from elements
+                    try
+                    {
+                        var elements = wf.GetElements();
+                        if (elements != null)
+                        {
+                            int actCount = 0;
+                            foreach (var el in elements)
+                            {
+                                var t = el.Type ?? "";
+                                if (IsWorkflowActivityType(t))
+                                    actCount++;
+                            }
+                            info["activityCount"] = actCount;
+                        }
+                    }
+                    catch { }
+
+                    results.Add(info);
+                }
+
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    count = results.Count,
+                    moduleName = moduleName ?? "(all)",
+                    workflows = results
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error listing workflows");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        public async Task<string> ReadWorkflowDetails(JsonObject parameters)
+        {
+            try
+            {
+                var root = GetUntypedModelRoot();
+                if (root == null)
+                    return JsonSerializer.Serialize(new { error = "IUntypedModelAccessService is not available" });
+
+                var workflowName = parameters?["workflow_name"]?.ToString();
+                var moduleName = parameters?["module_name"]?.ToString();
+
+                if (string.IsNullOrEmpty(workflowName))
+                    return JsonSerializer.Serialize(new { error = "workflow_name is required" });
+
+                // Parse qualified name
+                string? targetModule = moduleName;
+                string targetName = workflowName;
+                if (workflowName.Contains("."))
+                {
+                    var parts = workflowName.Split('.', 2);
+                    targetModule = parts[0];
+                    targetName = parts[1];
+                }
+
+                var workflows = GetUnitsWithFallback(root, "Workflows$Workflow");
+                IModelUnit? found = null;
+
+                foreach (var wf in workflows)
+                {
+                    var wfName = wf.Name ?? "";
+                    var wfQualified = wf.QualifiedName ?? "";
+
+                    if (!string.IsNullOrEmpty(targetModule))
+                    {
+                        if (!wfQualified.StartsWith(targetModule + ".", StringComparison.OrdinalIgnoreCase))
+                            continue;
+                    }
+
+                    if (wfName.Equals(targetName, StringComparison.OrdinalIgnoreCase) ||
+                        wfQualified.Equals(workflowName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        found = wf;
+                        break;
+                    }
+                }
+
+                if (found == null)
+                    return JsonSerializer.Serialize(new { success = false, error = $"Workflow '{workflowName}' not found" });
+
+                var result = new Dictionary<string, object?>();
+                result["success"] = true;
+                result["name"] = found.Name;
+                result["qualifiedName"] = found.QualifiedName;
+                result["module"] = found.QualifiedName?.Split('.').FirstOrDefault();
+                result["type"] = "Workflow";
+
+                // Basic properties
+                result["documentation"] = ReadPropValue(found, "documentation");
+                result["excluded"] = ReadPropValue(found, "excluded");
+                result["exportLevel"] = ReadPropValue(found, "exportLevel");
+                result["markAsUsed"] = ReadPropValue(found, "markAsUsed");
+
+                // Context entity
+                try
+                {
+                    var ctxProp = found.GetProperty("contextEntity");
+                    if (ctxProp != null)
+                        result["contextEntity"] = ctxProp.Value?.ToString();
+                }
+                catch { }
+
+                // Admin/overview pages
+                result["adminPage"] = ReadPropValue(found, "adminPage");
+                result["overviewPage"] = ReadPropValue(found, "overviewPage");
+                result["workflowType"] = ReadPropValue(found, "workflowType");
+                result["dueDate"] = ReadPropValue(found, "dueDate");
+
+                // Security — allowedModuleRoles
+                try
+                {
+                    var rolesProp = found.GetProperty("allowedModuleRoles");
+                    if (rolesProp != null && rolesProp.IsList)
+                    {
+                        var roleValues = rolesProp.GetValues()?.Select(v => v?.ToString()).Where(v => v != null).ToList();
+                        result["allowedModuleRoles"] = roleValues;
+                        result["allowedRoleCount"] = roleValues?.Count ?? 0;
+                    }
+                    else
+                    {
+                        result["allowedModuleRoles"] = new List<string>();
+                        result["allowedRoleCount"] = 0;
+                    }
+                }
+                catch
+                {
+                    result["allowedModuleRoles"] = new List<string>();
+                    result["allowedRoleCount"] = 0;
+                }
+
+                // Elements — flat list analysis (same pattern as read_page_details)
+                var activityTypeCounts = new Dictionary<string, int>();
+                var activities = new List<object>();
+                int flowCount = 0;
+
+                try
+                {
+                    var allElements = found.GetElements();
+                    if (allElements != null)
+                    {
+                        foreach (var el in allElements)
+                        {
+                            var rawType = el.Type ?? "";
+                            var simplifiedType = SimplifyWidgetType(rawType);
+
+                            // Skip noise/internal types
+                            if (IsWorkflowNoiseType(rawType))
+                                continue;
+
+                            // Count flows separately
+                            if (rawType.Contains("Flow") || rawType.Contains("SequenceFlow"))
+                            {
+                                flowCount++;
+                                continue;
+                            }
+
+                            // Count activity types
+                            activityTypeCounts[simplifiedType] = activityTypeCounts.GetValueOrDefault(simplifiedType) + 1;
+
+                            // Build detail for interesting activity types
+                            if (IsWorkflowActivityType(rawType))
+                            {
+                                var actInfo = new Dictionary<string, object?>();
+                                actInfo["type"] = simplifiedType;
+
+                                var elName = el.Name;
+                                if (!string.IsNullOrEmpty(elName))
+                                    actInfo["name"] = elName;
+
+                                // Read common activity properties
+                                var caption = ReadPropValue(el, "caption");
+                                if (caption != null)
+                                    actInfo["caption"] = caption;
+
+                                var taskPage = ReadPropValue(el, "taskPage");
+                                if (taskPage != null)
+                                    actInfo["taskPage"] = taskPage;
+
+                                var microflow = ReadPropValue(el, "microflow");
+                                if (microflow != null)
+                                    actInfo["microflow"] = microflow;
+
+                                var documentation = ReadPropValue(el, "documentation");
+                                if (documentation != null && documentation.ToString() != "")
+                                    actInfo["documentation"] = documentation;
+
+                                // Outcomes for user tasks
+                                try
+                                {
+                                    var outcomesProp = el.GetProperty("outcomes");
+                                    if (outcomesProp != null && outcomesProp.IsList)
+                                    {
+                                        var outcomeVals = outcomesProp.GetValues();
+                                        if (outcomeVals != null)
+                                        {
+                                            var outcomeNames = new List<string>();
+                                            foreach (var o in outcomeVals)
+                                            {
+                                                if (o is IModelStructure os)
+                                                {
+                                                    var oName = os.Name ?? ReadPropValue(os, "name")?.ToString() ?? ReadPropValue(os, "caption")?.ToString();
+                                                    if (oName != null) outcomeNames.Add(oName);
+                                                }
+                                            }
+                                            if (outcomeNames.Count > 0)
+                                                actInfo["outcomes"] = outcomeNames;
+                                        }
+                                    }
+                                }
+                                catch { }
+
+                                activities.Add(actInfo);
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    result["elementError"] = ex.Message;
+                }
+
+                result["activities"] = activities;
+                result["activityCount"] = activities.Count;
+                result["activityTypeSummary"] = activityTypeCounts;
+                result["flowCount"] = flowCount;
+
+                // Also dump all property names for discovery (helps refine in future)
+                try
+                {
+                    var props = found.GetProperties();
+                    if (props != null)
+                    {
+                        result["availableProperties"] = props.Select(p => new
+                        {
+                            name = p.Name,
+                            type = p.Type.ToString(),
+                            isList = p.IsList
+                        }).ToList();
+                    }
+                }
+                catch { }
+
+                return JsonSerializer.Serialize(result);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error reading workflow details");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        private bool IsWorkflowActivityType(string rawType)
+        {
+            return rawType.Contains("UserTask") ||
+                   rawType.Contains("SystemActivity") ||
+                   rawType.Contains("CallMicroflow") ||
+                   rawType.Contains("CallWorkflow") ||
+                   rawType.Contains("Decision") || rawType.Contains("ExclusiveSplit") ||
+                   rawType.Contains("ParallelSplit") ||
+                   rawType.Contains("JumpActivity") || rawType.Contains("Jump") ||
+                   rawType.Contains("EndActivity") || rawType.Contains("EndEvent") ||
+                   rawType.Contains("StartActivity") || rawType.Contains("StartEvent") ||
+                   rawType.Contains("Boundary") ||
+                   rawType.Contains("Timer") ||
+                   rawType.Contains("MultiUserTask") ||
+                   rawType.Contains("ScriptTask");
+        }
+
+        private bool IsWorkflowNoiseType(string rawType)
+        {
+            // Internal/structural types to skip from counting
+            return rawType.Contains("$Text") ||
+                   rawType.Contains("$Translation") ||
+                   rawType.Contains("$Appearance") ||
+                   rawType.Contains("DesignPropertyValue") ||
+                   rawType.Contains("OptionDesignPropertyValue") ||
+                   rawType.Contains("MicroflowParameterMapping") ||
+                   rawType.Contains("$Annotation");
         }
 
         #endregion

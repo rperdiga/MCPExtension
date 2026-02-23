@@ -487,6 +487,19 @@ namespace MCPExtension
                 return (object)result;
             });
 
+            // Phase 26: Workflow Introspection
+            _mcpServer.RegisterTool("list_workflows", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ListWorkflows(parameters);
+                return (object)result;
+            });
+
+            _mcpServer.RegisterTool("read_workflow_details", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ReadWorkflowDetails(parameters);
+                return (object)result;
+            });
+
             _mcpServer.RegisterTool("delete_document", async (JsonObject parameters) =>
             {
                 var result = await additionalTools.DeleteDocument(parameters);
@@ -583,7 +596,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 81, // Phase 25: +1 page introspection (read_page_details)
+                registeredTools = 83, // Phase 26: +2 workflow introspection (list_workflows, read_workflow_details)
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",

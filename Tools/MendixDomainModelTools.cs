@@ -1996,6 +1996,8 @@ namespace MCPExtension.Tools
                 "insert_before_activity",
                 "list_pages",
                 "read_page_details",
+                "list_workflows",
+                "read_workflow_details",
                 "delete_document",
                 "sync_filesystem",
                 "update_microflow",
