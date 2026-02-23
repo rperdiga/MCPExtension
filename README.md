@@ -1,456 +1,353 @@
-# Mendix Studio Pro MCPExtension
+# Mendix Studio Pro MCP Extension
 
-## 📦 Mendix Marketplace Module
+A C# extension for **Mendix Studio Pro 11.5** that exposes the full modeling API through a **Model Context Protocol (MCP) server** over HTTP/SSE. Enables AI tools (Claude, Cursor, Copilot, etc.) to read, create, modify, and manage Mendix application models programmatically.
 
-**For Mendix 10.24.2 Users**: A pre-built version of this extension is available in the **`Mendix Marketplace Module`** folder, complete with installation instructions and setup guide. This provides a ready-to-use version without requiring compilation from source.
+**83 tools** across domain modeling, microflows, pages, security, workflows, and more.
 
-**Location**: `./Mendix Marketplace Module/`  
-**Target Version**: Mendix 10.24.2  
-**Contents**: Built extension files and comprehensive setup documentation
+## Mendix Marketplace Module
 
-## Overview
+A pre-built version for **Mendix 10.24.2** is available in the `.github/Mendix Marketplace Module/` folder with installation instructions.
 
-MCPExtension is an experimental C# Mendix Extensibility framework project that exposes **Mendix Studio Pro capabilities and tools** through a **Model Context Protocol (MCP) Server**. This extension allows external applications and AI tools to interact with Mendix Studio Pro's domain modeling capabilities via standardized MCP protocols.
+## Quick Start
 
-## Features
+### Prerequisites
 
-- **HTTP/SSE MCP Server** - Provides a standards-compliant MCP server implementation
-- **Advanced Domain Model Management** - Create, read, update, and delete domain model entities and associations with support for 9 entity types
-- **Template-Based Entity Creation** - Leverages AIExtension module templates for specialized entity types including audit trails and file storage
-- **Comprehensive Entity Types** - Full support for persistent, non-persistent, FileDocument, Image, and audit trail entities
-- **Page Generation** - Generate overview pages for domain entities
-- **Microflow Management** - Create, inspect, and manage microflows with activity sequences
-- **Sample Data Generation** - Create realistic sample data for testing with proper relationships
-- **Real-time Debug Logging** - Comprehensive logging for troubleshooting
-- **Visual Studio Pro Integration** - Seamless integration with Mendix Studio Pro through a dockable pane
-- **Complete Parameter Documentation** - Full JSON schemas for all MCP tools with detailed parameter specifications
+- Mendix Studio Pro 11.5+
+- .NET 8.0 SDK
+- `--enable-extension-development` flag on Studio Pro
+
+### Build & Deploy
+
+```bash
+dotnet build MCPExtension.csproj
+```
+
+Post-build automatically copies to `{YourProject}/extensions/MCP/`.
+
+### Launch Studio Pro
+
+All flags are required:
+
+```bash
+studiopro.exe "YourProject.mpr" \
+  --enable-extension-development \
+  --enable-universal-maia \
+  --enable-microflow-generation \
+  --enable-workflow-generation \
+  --enable-maia-session-story-attachment
+```
+
+### Start the MCP Server
+
+Open the **MCP dockable pane** in Studio Pro (the server starts when the pane opens).
+
+### Connect
+
+| Endpoint | URL |
+|----------|-----|
+| SSE | `http://localhost:3001/sse` |
+| Messages | `http://localhost:3001/message` |
+| Health | `http://localhost:3001/health` |
+| MCP Metadata | `http://localhost:3001/.well-known/mcp` |
+
+Port auto-increments from 3001 if occupied.
 
 ## Architecture
 
-The extension consists of several key components:
+| Component | File | Purpose |
+|-----------|------|---------|
+| Entry Point | `AIAPIEngine.cs` | DockablePaneExtension, starts MCP server on pane open |
+| MCP Server | `Mcp/McpServer.cs` | HTTP/SSE server, tool descriptions & JSON schemas |
+| Tool Wiring | `Mcp/MendixMcpServer.cs` | Registers all 83 tools, routes calls to implementations |
+| Domain Tools | `Tools/MendixDomainModelTools.cs` | Entities, associations, attributes, domain model ops |
+| Additional Tools | `Tools/MendixAdditionalTools.cs` | Microflows, pages, security, workflows, settings |
+| Utilities | `Utils/Utils.cs` | Module/entity resolution helpers |
 
-### Core Components
+### Dependency Injection (MEF)
 
-- **`AIAPIEngine`** - Main extension entry point and lifecycle management
-- **`MendixMcpServer`** - MCP server implementation with tool registration
-- **`McpServer`** - HTTP/SSE server handling MCP protocol messages
-- **`AIAPIEngineViewModel`** - WebView-based UI for server control
+Services injected via `[ImportingConstructor]`:
+- `IMicroflowService`, `IMicroflowExpressionService`, `IMicroflowActivitiesService`
+- `IPageGenerationService`, `INavigationManagerService`
+- `INameValidationService`, `IVersionControlService` (optional)
+- `IUntypedModelAccessService` (optional, for metamodel escape-hatch)
 
-### Tool Categories
+## Tool Reference (83 Tools)
 
-#### Domain Model Tools (`MendixDomainModelTools`)
-- `read_domain_model` - Read current domain model structure with entities and associations
-- `create_entity` - Create new entities with comprehensive support for 9 entity types and attributes
-- `create_association` - Create associations between entities with proper relationship types
-- `create_multiple_entities` - Bulk entity creation with mixed entity types support
-- `create_multiple_associations` - Bulk association creation for complex domain models
-- `create_domain_model_from_schema` - Create complete domain models from JSON schemas with all entity types
-- `delete_model_element` - Delete entities, attributes, or associations from the domain model
-- `diagnose_associations` - Troubleshoot association creation issues with detailed diagnostics
+### Domain Model — CRUD (15 tools)
 
-##### Supported Entity Types
+| Tool | Description |
+|------|-------------|
+| `read_domain_model` | Read full domain model: entities, attributes, associations, generalizations, event handlers |
+| `create_entity` | Create entity with attributes. Supports 9 types: persistent, non-persistent, filedocument, image, audit trail variants |
+| `create_association` | Create association between entities. Cross-module supported |
+| `create_multiple_entities` | Bulk entity creation with per-entity module targeting |
+| `create_multiple_associations` | Bulk association creation with cross-module support |
+| `create_domain_model_from_schema` | Create complete domain model from JSON schema |
+| `delete_model_element` | Delete entity, attribute, association, or microflow |
+| `add_attribute` | Add attribute to existing entity (all types including Binary, HashedString, Long) |
+| `set_calculated_attribute` | Make attribute calculated via microflow |
+| `set_entity_generalization` | Set entity inheritance (cross-module) |
+| `remove_entity_generalization` | Remove entity inheritance |
+| `add_event_handler` | Add before/after event handler (create/commit/delete/rollback) |
+| `configure_system_attributes` | Toggle system attrs: HasCreatedDate, HasChangedDate, HasOwner, HasChangedBy |
+| `diagnose_associations` | Troubleshoot association creation issues |
+| `arrange_domain_model` | Smart layout of entities on domain model canvas |
 
-The extension supports **9 comprehensive entity types** through template-based creation:
+### Domain Model — Modify & Rename (11 tools)
 
-1. **`persistent`** (default) - Standard database entities
-2. **`non-persistent`** - Session entities (NPE template)
-3. **`filedocument`** - File storage entities (inherits from System.FileDocument)
-4. **`image`** - Image storage entities (inherits from System.Image)
-5. **`storecreateddate`** - Automatic creation date tracking
-6. **`storechangedate`** - Automatic modification date tracking
-7. **`storecreatedchangedate`** - Both creation and modification date tracking
-8. **`storeowner`** - Automatic owner (creator) tracking
-9. **`storechangeby`** - Automatic last modifier tracking
+| Tool | Description |
+|------|-------------|
+| `update_attribute` | Change type, length, default value, or enumeration of existing attribute |
+| `update_association` | Change owner, type, delete behavior of existing association |
+| `rename_entity` | Rename entity (auto-updates all references) |
+| `rename_attribute` | Rename attribute (auto-updates all references) |
+| `rename_association` | Rename association (auto-updates all references) |
+| `rename_document` | Rename any document (microflow, page, constant, etc.) |
+| `rename_module` | Rename a module (auto-updates qualified references) |
+| `rename_enumeration_value` | Rename enumeration value |
+| `set_documentation` | Set documentation on entity, attribute, association, or domain model |
+| `read_attribute_details` | Detailed attribute info: type details, validation, access rights |
+| `query_associations` | Query associations by module, entity pair, or direction |
 
-**Template Requirements**: All special entity types require corresponding templates in the AIExtension module for proper inheritance and property setup.
+### Microflows (14 tools)
 
-#### Additional Tools (`MendixAdditionalTools`)
-- `save_data` - Generate and validate sample data with proper entity relationships
-- `generate_overview_pages` - Create list view pages for entities with navigation support
-- `list_microflows` - List microflows in a module with detailed metadata
-- `create_microflow` - Create new microflows with parameters and return types
-- `create_microflow_activities` - Create microflow activity sequences with proper ordering
-- `read_microflow_details` - Get detailed microflow information including all activities
-- `get_last_error` - Retrieve last error information with stack traces
-- `list_available_tools` - List all available MCP tools with capabilities
-- `debug_info` - Get comprehensive domain model debug information with usage examples
+| Tool | Description |
+|------|-------------|
+| `list_microflows` | List microflows with metadata |
+| `create_microflow` | Create microflow with parameters and return type |
+| `read_microflow_details` | Full microflow inspection: parameters, return type, all activities |
+| `create_microflow_activities` | Create activity sequences (create_object, change_object, retrieve, commit, delete, show_message, close_page) |
+| `update_microflow` | Update return type, return variable, URL |
+| `modify_microflow_activity` | Modify existing activity properties by position |
+| `insert_before_activity` | Insert activity before a specific position |
+| `check_variable_name` | Check if variable name is available in a microflow |
+| `set_microflow_url` | Expose microflow as REST endpoint |
+| `list_rules` | List validation rules across modules |
+| `exclude_document` | Mark document as excluded/included |
+| `copy_model_element` | Deep-copy entity, microflow, constant, or enumeration |
+| `list_java_actions` | List Java actions with parameters |
+| `validate_name` | Validate candidate name for model elements |
 
-## Installation
+### Constants & Enumerations (6 tools)
 
-1. **Build the Extension**
-   ```powershell
-   dotnet build MCPExtension.sln
-   ```
+| Tool | Description |
+|------|-------------|
+| `create_constant` | Create constant (string/integer/boolean/decimal/datetime) |
+| `list_constants` | List constants across modules |
+| `update_constant` | Modify constant default value or exposed_to_client flag |
+| `configure_constant_values` | Set constant value overrides per run configuration |
+| `create_enumeration` | Create enumeration with values and captions |
+| `list_enumerations` | List enumerations with all values |
+| `update_enumeration` | Add/remove enumeration values |
 
-2. **Deploy to Mendix Studio Pro**
-   - The extension automatically copies to `C:\Mendix Projects\{YourProjectName}\extensions\MCP\` after build
-   - Alternatively, copy the built files to your Mendix project's `extensions` folder
+### Pages (4 tools)
 
-3. **Load in Studio Pro**
-   - Open Mendix Studio Pro while using --enable-extension-development
-   - Open your Mendix project
-   - Access via menu: **Extensions → MCP → MCP Server**
+| Tool | Description |
+|------|-------------|
+| `list_pages` | List pages with widget count, layout, parameters, documentation |
+| `read_page_details` | Full page inspection: widget tree, data sources, parameters, actions |
+| `generate_overview_pages` | Generate CRUD overview pages for entities |
+| `delete_document` | Delete page, microflow, or any document from module |
 
-## Usage
+### Nanoflows (2 tools)
 
-### Server Endpoints
+| Tool | Description |
+|------|-------------|
+| `list_nanoflows` | List nanoflows with return type, activity count, parameters |
+| `read_nanoflow_details` | Full nanoflow inspection: parameters, activities, actions |
 
-Once started, the MCP server exposes several endpoints:
+### Workflows (2 tools)
 
-- **SSE Endpoint**: `http://localhost:3001/sse` - Server-Sent Events connection
-- **Message Endpoint**: `http://localhost:3001/message` - MCP message handling
-- **Health Check**: `http://localhost:3001/health` - Server health status
-- **MCP Metadata**: `http://localhost:3001/.well-known/mcp` - MCP server metadata
+| Tool | Description |
+|------|-------------|
+| `list_workflows` | List workflows with context entity, activity count, documentation |
+| `read_workflow_details` | Full workflow inspection: activities (UserTasks, Decisions, SystemActivities), flows, security |
 
-### Entity Creation Examples
+### Security (4 tools)
 
-The extension provides powerful entity creation capabilities with comprehensive type support:
+| Tool | Description |
+|------|-------------|
+| `read_security_info` | Project/module security: user roles, module roles, password policy |
+| `read_entity_access_rules` | Entity access rules: CRUD permissions, XPath constraints, member rights |
+| `read_microflow_security` | Microflow execution permissions by role |
+| `audit_security` | Gap analysis: entities without access rules, overly permissive rules |
 
-#### Basic Persistent Entity
+### Project & Settings (7 tools)
+
+| Tool | Description |
+|------|-------------|
+| `read_project_info` | Project overview: all modules with entity/microflow/page counts |
+| `read_runtime_settings` | Read after-startup, before-shutdown, health-check microflows |
+| `set_runtime_settings` | Assign/clear runtime hook microflows |
+| `read_configurations` | List run configurations with settings and constant overrides |
+| `set_configuration` | Create/update run configuration |
+| `read_version_control` | Version control status: branch, commit, VC type |
+| `manage_navigation` | Add pages to responsive web navigation |
+
+### Module & Folder Management (3 tools)
+
+| Tool | Description |
+|------|-------------|
+| `create_module` | Create new module |
+| `manage_folders` | Create, list, or move documents between folders |
+| `sync_filesystem` | Import changes from JavaScript actions, widgets, external files |
+
+### Data & Diagnostics (8 tools)
+
+| Tool | Description |
+|------|-------------|
+| `save_data` | Generate sample data with entity relationships |
+| `generate_sample_data` | Auto-generate realistic sample data from domain model schema |
+| `read_sample_data` | Read previously saved sample data |
+| `setup_data_import` | Wire up sample data import pipeline with Java action |
+| `check_model` | Validate model for broken generalizations, missing handlers, etc. |
+| `check_project_errors` | Run mx.exe consistency check (CE error codes) |
+| `get_studio_pro_logs` | Read Studio Pro and MCP extension logs |
+| `get_last_error` | Get last error details with stack trace |
+
+### Meta & Discovery (4 tools)
+
+| Tool | Description |
+|------|-------------|
+| `list_available_tools` | List all 83 tools with capabilities |
+| `debug_info` | Comprehensive domain model debug info with usage examples |
+| `list_scheduled_events` | List scheduled events with interval and status |
+| `list_rest_services` | List published REST services with paths and authentication |
+| `query_model_elements` | Generic metamodel escape-hatch: query any type by name |
+
+## Usage Examples
+
+### Create a Domain Model
+
 ```json
 {
-  "entity_name": "Customer",
-  "attributes": [
-    {"name": "firstName", "type": "String"},
-    {"name": "lastName", "type": "String"},
-    {"name": "birthDate", "type": "DateTime"},
-    {"name": "isActive", "type": "Boolean"}
-  ]
-}
-```
-
-#### Non-Persistent Entity (Session Data)
-```json
-{
-  "entity_name": "ShoppingCart",
-  "entityType": "non-persistent",
-  "attributes": [
-    {"name": "sessionId", "type": "String"},
-    {"name": "totalAmount", "type": "Decimal"}
-  ]
-}
-```
-
-#### FileDocument Entity (File Storage)
-```json
-{
-  "entity_name": "Invoice",
-  "entityType": "filedocument",
-  "attributes": [
-    {"name": "invoiceNumber", "type": "String"},
-    {"name": "issueDate", "type": "DateTime"}
-  ]
-}
-```
-
-#### Image Entity (Image Storage)
-```json
-{
-  "entity_name": "ProductPhoto",
-  "entityType": "image",
-  "attributes": [
-    {"name": "altText", "type": "String"},
-    {"name": "displayOrder", "type": "Integer"}
-  ]
-}
-```
-
-#### Audit Trail Entities
-
-**Creation Date Tracking:**
-```json
-{
-  "entity_name": "AuditDocument",
-  "entityType": "storecreateddate",
-  "attributes": [
-    {"name": "documentTitle", "type": "String"},
-    {"name": "description", "type": "String"}
-  ]
-}
-```
-
-**Modification Date Tracking:**
-```json
-{
-  "entity_name": "TrackedProduct",
-  "entityType": "storechangedate",
-  "attributes": [
-    {"name": "productName", "type": "String"},
-    {"name": "price", "type": "Decimal"}
-  ]
-}
-```
-
-**Full Audit Trail (Creation + Modification):**
-```json
-{
-  "entity_name": "FullAuditEntity",
-  "entityType": "storecreatedchangedate",
-  "attributes": [
-    {"name": "name", "type": "String"},
-    {"name": "value", "type": "String"}
-  ]
-}
-```
-
-**Owner Tracking:**
-```json
-{
-  "entity_name": "OwnedDocument",
-  "entityType": "storeowner",
-  "attributes": [
-    {"name": "title", "type": "String"},
-    {"name": "content", "type": "String"}
-  ]
-}
-```
-
-**Last Modifier Tracking:**
-```json
-{
-  "entity_name": "EditableRecord",
-  "entityType": "storechangeby",
-  "attributes": [
-    {"name": "recordName", "type": "String"},
-    {"name": "data", "type": "String"}
-  ]
-}
-```
-
-#### Entity with Enumeration
-```json
-{
-  "entity_name": "Product",
-  "attributes": [
-    {"name": "productName", "type": "String"},
-    {"name": "price", "type": "Decimal"},
-    {
-      "name": "status",
-      "type": "Enumeration",
-      "enumerationValues": ["Available", "OutOfStock", "Discontinued"]
+  "name": "tools/call",
+  "params": {
+    "name": "create_domain_model_from_schema",
+    "arguments": {
+      "module_name": "CRM",
+      "entities": [
+        {
+          "entity_name": "Customer",
+          "attributes": [
+            {"name": "firstName", "type": "String"},
+            {"name": "lastName", "type": "String"},
+            {"name": "email", "type": "String"},
+            {"name": "isActive", "type": "Boolean"}
+          ]
+        },
+        {
+          "entity_name": "Order",
+          "entityType": "storecreateddate",
+          "attributes": [
+            {"name": "orderNumber", "type": "String"},
+            {"name": "totalAmount", "type": "Decimal"}
+          ]
+        }
+      ],
+      "associations": [
+        {
+          "name": "Order_Customer",
+          "parent": "Order",
+          "child": "Customer",
+          "type": "Reference"
+        }
+      ]
     }
-  ]
+  }
 }
 ```
 
-#### Bulk Entity Creation
+### Create a Microflow with Activities
+
 ```json
 {
-  "entities": [
-    {
-      "entity_name": "Customer",
-      "attributes": [{"name": "name", "type": "String"}]
-    },
-    {
-      "entity_name": "Order",
-      "entityType": "storecreateddate",
-      "attributes": [{"name": "orderNumber", "type": "String"}]
-    },
-    {
-      "entity_name": "OrderImage",
-      "entityType": "image",
-      "attributes": [{"name": "description", "type": "String"}]
-    }
-  ]
+  "name": "create_microflow",
+  "arguments": {
+    "module_name": "CRM",
+    "microflow_name": "CreateCustomer",
+    "parameters": [
+      {"name": "Name", "type": "String"},
+      {"name": "Email", "type": "String"}
+    ],
+    "return_type": "Boolean"
+  }
 }
 ```
 
-### Parameter Documentation
+### Inspect a Page
 
-All MCP tools include comprehensive JSON schemas with:
-- **Required/Optional Parameters** - Clear specification of mandatory fields
-- **Parameter Types** - Detailed type information with validation
-- **Enumeration Values** - Valid options for choice parameters (e.g., entityType)
-- **Parameter Descriptions** - Detailed explanations of parameter usage
-- **Examples** - Practical usage examples for each tool
-
-Use the `debug_info` tool to see complete parameter documentation and examples for all available tools.
-
-### Logging
-
-Debug logs are written to:
-- `{MendixProjectPath}/resources/mcp_debug.log`
-
-## Configuration
-
-### Port Configuration
-
-The server automatically finds an available port starting from 3001. You can modify the port in `AIAPIEngine.cs`:
-
-```csharp
-// Use a different starting port
-_mcpPort = FindAvailablePort(3001);
+```json
+{
+  "name": "read_page_details",
+  "arguments": {
+    "page_name": "Customer_NewEdit",
+    "module_name": "CRM"
+  }
+}
 ```
 
-### Project Directory
+### Security Audit
 
-The extension automatically detects the Mendix project directory. Sample data and logs are stored in:
-- `{MendixProjectPath}/resources/`
+```json
+{
+  "name": "audit_security",
+  "arguments": {}
+}
+```
+
+## Known Limitations
+
+### Write Capabilities
+
+The Extensions API has limited write support for some model element types:
+
+- **Pages**: Only overview page generation (`GenerateOverviewPages`). No widget-level creation/editing — use read tools for introspection
+- **Nanoflows**: Read-only introspection via untyped model. No creation API
+- **Workflows**: Read-only introspection via untyped model. No creation/editing API
+- **Log Message Activity**: `CreateLogMessageActivity` does not exist in the Extensions API
+- **IDomainModelService**: Not injectable via MEF (crashes on load). Use `entity.GetAssociations()` instead
+
+### Microflow Activity Quirks
+
+- `retrieve` and `change_object` activity types in `create_microflow_activities` may create the wrong action type — use `modify_microflow_activity` to fix after creation
+- `output_variable` parameter is ignored during activity creation — set it via `modify_microflow_activity`
+- `return_type` on `create_microflow` may not apply — use `update_microflow` after creation
 
 ## Troubleshooting
 
-### Server Won't Start
+| Issue | Solution |
+|-------|----------|
+| Server won't start | Open the MCP dockable pane in Studio Pro |
+| Extension not loading | Verify all `--enable-*` flags on Studio Pro launch |
+| Port conflict | Server auto-finds next available port from 3001 |
+| Connection refused | Check `http://localhost:3001/health` and Windows Firewall |
+| Tool errors | Use `get_last_error` for stack traces, `check_project_errors` for CE codes |
+| Entity type errors | Ensure AIExtension module has required templates (NPE, FileDocument, Image, etc.) |
 
-1. Check if the port is already in use
-2. Verify the Mendix project is open
-3. Check the debug log at `{MendixProjectPath}/resources/mcp_debug.log`
+### Logs
 
-### Connection Issues
-
-1. Verify the server is running (check the UI status indicator)
-2. Test the health endpoint: `http://localhost:3001/health`
-3. Check Windows Firewall settings
-4. Ensure no antivirus software is blocking the connection
-
-### Tool Errors
-
-1. Use the `get_last_error` tool to retrieve detailed error information
-2. Use the `debug_info` tool to inspect the current domain model state
-3. Check the debug log for detailed error traces
-
-### Entity Creation Issues
-
-#### Template Not Found Errors
-- **Problem**: Special entity types (non-persistent, filedocument, image, audit entities) require templates
-- **Solution**: Ensure the AIExtension module contains the required templates:
-  - `NPE` - For non-persistent entities
-  - `FileDocument` - For file document entities
-  - `Image` - For image entities
-  - `StoreCreatedDate` - For creation date tracking
-  - `StoreChangeDate` - For modification date tracking
-  - `StoreCreatedChangeDate` - For full audit tracking
-  - `StoreOwner` - For owner tracking
-  - `StoreChangeBy` - For modifier tracking
-
-#### Parameter Validation Errors
-- **Problem**: Invalid entityType or missing required parameters
-- **Solution**: Use valid entityType values: `persistent`, `non-persistent`, `filedocument`, `image`, `storecreateddate`, `storechangedate`, `storecreatedchangedate`, `storeowner`, `storechangeby`
-
-#### Legacy Parameter Support
-- **Problem**: Using old `persistable` parameter
-- **Solution**: Migrate to `entityType` parameter:
-  - `persistable: false` → `entityType: "non-persistent"`
-  - `persistable: true` → `entityType: "persistent"` (or omit for default)
-
-#### Association Creation Issues
-- **Problem**: Cannot create associations between entities
-- **Solution**: 
-  1. Ensure both entities exist in the domain model
-  2. Use the `diagnose_associations` tool for detailed troubleshooting
-  3. Check entity names match exactly (case-sensitive)
-
-### Association Type Mapping
-
-The extension correctly maps association types as follows:
-- **`"Reference"`** → **One-to-Many** associations (`AssociationType.Reference`)
-- **`"ReferenceSet"`** → **Many-to-Many** associations (`AssociationType.ReferenceSet`)
-
-**Note**: This mapping was fixed in August 2025 to ensure `ReferenceSet` properly creates many-to-many associations instead of incorrectly creating one-to-many associations.
+- MCP debug log: `{MendixProjectPath}/resources/mcp_debug.log`
+- Studio Pro logs: accessible via `get_studio_pro_logs` tool
 
 ## Development
 
+### Adding a New Tool
+
+1. Implement in `MendixDomainModelTools.cs` or `MendixAdditionalTools.cs`
+2. Register in `MendixMcpServer.cs` via `_mcpServer.RegisterTool()`
+3. Add description in `McpServer.GetToolDescription()`
+4. Add JSON schema in `McpServer.GetToolInputSchema()`
+5. Update `ListAvailableTools` arrays in both tool classes
+6. Update `registeredTools` count in `MendixMcpServer.GetStatusAsync()`
+
 ### Dependencies
 
-- **.NET 8.0** - Target framework
-- **Mendix.StudioPro.ExtensionsAPI** - Mendix Studio Pro integration
-- **Microsoft.AspNetCore** - HTTP server functionality
-- **System.Text.Json** - JSON serialization
-- **Eto.Forms** - UI framework
-
-### Building from Source
-
-```powershell
-# Clone the repository
-git clone https://github.com/rperdiga/MCPExtension.git
-cd MCPExtension
-
-# Build the solution
-dotnet build
-
-# The extension will be deployed to the configured Mendix project
-```
-
-### Extending the Framework
-
-To add new MCP tools:
-
-1. **Create Tool Implementation**
-   - Add a new method in `MendixDomainModelTools` or `MendixAdditionalTools`
-   - Implement the tool logic with proper error handling
-   - Return appropriate response objects
-
-2. **Register the Tool**
-   - Add tool registration in `MendixMcpServer.RegisterTools()`
-   - Use the pattern: `_mcpServer.RegisterTool("tool_name", async (JsonObject parameters) => { ... })`
-
-3. **Add Parameter Schema**
-   - Define the input schema in `McpServer.GetToolInputSchema()`
-   - Include all required and optional parameters
-   - Specify parameter types, descriptions, and validation rules
-   - Add enumeration values for choice parameters
-
-4. **Add Tool Description**
-   - Add comprehensive description in `McpServer.GetToolDescription()`
-   - Explain what the tool does and its key capabilities
-   - Mention any special requirements or dependencies
-
-5. **Update Documentation**
-   - Add examples to the `debug_info` tool output in `MendixAdditionalTools.cs`
-   - Include usage patterns and common parameter combinations
-   - Document any template requirements for entity-related tools
-
-#### Example Tool Addition
-
-```csharp
-// 1. Tool Implementation (in MendixDomainModelTools.cs)
-public async Task<object> CreateCustomEntity(JsonObject parameters)
-{
-    var entityName = parameters["entity_name"]?.ToString();
-    // Implementation logic here
-    return new { success = true, entityName = entityName };
-}
-
-// 2. Tool Registration (in MendixMcpServer.cs)
-_mcpServer.RegisterTool("create_custom_entity", async (JsonObject parameters) => 
-{
-    var result = await domainModelTools.CreateCustomEntity(parameters);
-    return (object)result;
-});
-
-// 3. Parameter Schema (in McpServer.cs - GetToolInputSchema)
-"create_custom_entity" => new
-{
-    type = "object",
-    properties = new
-    {
-        entity_name = new { 
-            type = "string", 
-            description = "Name of the custom entity to create" 
-        },
-        custom_type = new { 
-            type = "string", 
-            @enum = new[] { "type1", "type2" },
-            description = "Type of custom entity" 
-        }
-    },
-    required = new[] { "entity_name", "custom_type" }
-},
-
-// 4. Tool Description (in McpServer.cs - GetToolDescription)
-"create_custom_entity" => "Create a custom entity with specialized properties and behavior",
-```
+- .NET 8.0
+- Mendix.StudioPro.ExtensionsAPI (11.5)
+- Microsoft.AspNetCore (HTTP/SSE server)
+- System.Text.Json
 
 ## License
 
-This project is experimental and provided as-is for research and development purposes.
-
-## Contributing
-
-This is an experimental project. Feel free to submit issues and enhancement requests.
-
-## Support
-
-For issues and questions:
-1. Check the debug logs first
-2. Use the built-in diagnostic tools (`debug_info`, `get_last_error`)
-3. Submit issues with detailed error information and steps to reproduce
+Experimental — provided as-is for research and development purposes.
