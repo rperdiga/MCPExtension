@@ -659,7 +659,8 @@ namespace MCPExtension.MCP
                 "check_variable_name" => "Check if a variable name is already in use in a microflow. Returns whether the name is available, lists existing variables, and suggests an alternative if the name is taken.",
                 "modify_microflow_activity" => "Modify properties of an existing microflow activity by position. Supports changing caption, disabled state, output_variable, commit mode, refresh_in_client, and other action-specific properties. Use read_microflow_details first to see activity positions.",
                 "insert_before_activity" => "Insert a new activity before a specific position in a microflow. Uses the same activity format as create_microflow_activities. Use read_microflow_details to find the target position. Note: Position numbers in read_microflow_details may reflect creation order rather than visual flow order; verify positions after insertion.",
-                "list_pages" => "List all pages in a module or across all modules. Returns page name, module, qualified name, and excluded status.",
+                "list_pages" => "List all pages in a module or across all modules. Returns page name, module, qualified name, excluded status, widget count, layout name, whether page has parameters, and documentation excerpt.",
+                "read_page_details" => "Read comprehensive details of a page: widget tree structure (DataViews, ListViews, DataGrids, buttons, inputs, containers), data source bindings, layout info, page parameters with types, and widget type summary. Uses untyped model for deep introspection. READ-ONLY.",
                 "delete_document" => "Delete a document (page, microflow, or any document type) from a module. Searches recursively in subfolders. Optionally filter by document_type to prevent accidental deletion of wrong type.",
                 "sync_filesystem" => "Synchronize model with the file system. Imports changes from JavaScript actions, widgets, and other file-based resources. Equivalent to 'Synchronize App Directory' menu item. Note: IAppService may not be available in all extension contexts — returns a graceful error if unavailable.",
                 "update_microflow" => "Update microflow properties: return type, return variable name, and URL. WARNING: Changing return_type does NOT update the end event expression (API limitation — causes CE0117). To change return type safely, delete and recreate the microflow. Supported return types: void, boolean, string, integer, decimal, float, datetime, object:Module.Entity, list:Module.Entity.",
@@ -1643,6 +1644,17 @@ namespace MCPExtension.MCP
                         include_excluded = new { type = "boolean", description = "Include excluded pages (default: false)" }
                     },
                     required = new string[0]
+                },
+                "read_page_details" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        page_name = new { type = "string", description = "Name of the page (e.g. 'Customer_Overview' or 'MyModule.Customer_Overview')" },
+                        module_name = new { type = "string", description = "Module to search in (optional if using qualified name)" },
+                        max_depth = new { type = "integer", description = "Maximum depth for widget tree traversal (1-5, default: 3). Higher values show more nested detail but produce larger output." }
+                    },
+                    required = new[] { "page_name" }
                 },
                 "delete_document" => new
                 {

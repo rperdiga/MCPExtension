@@ -480,6 +480,13 @@ namespace MCPExtension
                 return (object)result;
             });
 
+            // Phase 25: Page Introspection
+            _mcpServer.RegisterTool("read_page_details", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.ReadPageDetails(parameters);
+                return (object)result;
+            });
+
             _mcpServer.RegisterTool("delete_document", async (JsonObject parameters) =>
             {
                 var result = await additionalTools.DeleteDocument(parameters);
@@ -576,7 +583,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 80, // Phase 24: +1 nanoflow introspection (read_nanoflow_details)
+                registeredTools = 81, // Phase 25: +1 page introspection (read_page_details)
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",

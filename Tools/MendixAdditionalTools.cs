@@ -1466,6 +1466,7 @@ namespace MCPExtension.Tools
                     "modify_microflow_activity",
                     "insert_before_activity",
                     "list_pages",
+                    "read_page_details",
                     "delete_document",
                     "sync_filesystem",
                     "update_microflow",
@@ -8456,6 +8457,9 @@ namespace MCPExtension.Tools
                     targetModules = modules;
                 }
 
+                // Get untyped model root for enriched info
+                var untypedRoot = GetUntypedModelRoot();
+
                 foreach (var module in targetModules)
                 {
                     var pages = new List<Mendix.StudioPro.ExtensionsAPI.Model.Pages.IPage>();
@@ -8471,13 +8475,28 @@ namespace MCPExtension.Tools
                         if (!includeExcluded && page.Excluded)
                             continue;
 
-                        results.Add(new
+                        var qualifiedName = $"{module.Name}.{page.Name}";
+                        var pageInfo = new Dictionary<string, object?>
                         {
-                            name = page.Name,
-                            module = module.Name,
-                            qualifiedName = $"{module.Name}.{page.Name}",
-                            excluded = page.Excluded
-                        });
+                            ["name"] = page.Name,
+                            ["module"] = module.Name,
+                            ["qualifiedName"] = qualifiedName,
+                            ["excluded"] = page.Excluded
+                        };
+
+                        // Enrich with untyped model data if available
+                        if (untypedRoot != null)
+                        {
+                            var (widgetCount, hasParameters, layoutName, documentation) = GetPageUntypedInfo(untypedRoot, qualifiedName);
+                            pageInfo["widgetCount"] = widgetCount;
+                            pageInfo["hasParameters"] = hasParameters;
+                            if (layoutName != null)
+                                pageInfo["layout"] = layoutName;
+                            if (documentation != null)
+                                pageInfo["documentation"] = documentation;
+                        }
+
+                        results.Add(pageInfo);
                     }
                 }
 
@@ -8965,6 +8984,387 @@ namespace MCPExtension.Tools
                 _logger.LogError(ex, "Error configuring constant values");
                 return JsonSerializer.Serialize(new { error = ex.Message });
             }
+        }
+
+        #endregion
+
+        #region Phase 25: Page Introspection
+
+        public async Task<string> ReadPageDetails(JsonObject parameters)
+        {
+            try
+            {
+                var root = GetUntypedModelRoot();
+                if (root == null)
+                    return JsonSerializer.Serialize(new { error = "IUntypedModelAccessService is not available" });
+
+                var pageName = parameters?["page_name"]?.ToString();
+                var moduleName = parameters?["module_name"]?.ToString();
+                var maxDepth = parameters?["max_depth"]?.GetValue<int>() ?? 3;
+                maxDepth = Math.Clamp(maxDepth, 1, 5);
+
+                if (string.IsNullOrEmpty(pageName))
+                    return JsonSerializer.Serialize(new { error = "page_name is required" });
+
+                // Parse qualified name
+                string? targetModule = moduleName;
+                string targetName = pageName;
+                if (pageName.Contains("."))
+                {
+                    var parts = pageName.Split('.', 2);
+                    targetModule = parts[0];
+                    targetName = parts[1];
+                }
+
+                var pages = GetUnitsWithFallback(root, "Pages$Page");
+                IModelUnit? found = null;
+
+                foreach (var pg in pages)
+                {
+                    var pgName = pg.Name ?? "";
+                    var pgQualified = pg.QualifiedName ?? "";
+
+                    if (!string.IsNullOrEmpty(targetModule))
+                    {
+                        if (!pgQualified.StartsWith(targetModule + ".", StringComparison.OrdinalIgnoreCase))
+                            continue;
+                    }
+
+                    if (pgName.Equals(targetName, StringComparison.OrdinalIgnoreCase) ||
+                        pgQualified.Equals(pageName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        found = pg;
+                        break;
+                    }
+                }
+
+                if (found == null)
+                    return JsonSerializer.Serialize(new { success = false, error = $"Page '{pageName}' not found" });
+
+                var result = new Dictionary<string, object?>();
+                result["success"] = true;
+                result["name"] = found.Name;
+                result["qualifiedName"] = found.QualifiedName;
+                result["module"] = found.QualifiedName?.Split('.').FirstOrDefault();
+                result["type"] = "Page";
+
+                // Basic properties
+                result["documentation"] = ReadPropValue(found, "documentation");
+                result["excluded"] = ReadPropValue(found, "excluded");
+                result["exportLevel"] = ReadPropValue(found, "exportLevel");
+                result["markAsUsed"] = ReadPropValue(found, "markAsUsed");
+                result["title"] = ReadPropValue(found, "title");
+                result["url"] = ReadPropValue(found, "url");
+                result["popupCloseAction"] = ReadPropValue(found, "popupCloseAction");
+                result["popupResizable"] = ReadPropValue(found, "popupResizable");
+
+                // Layout info
+                try
+                {
+                    var layoutCallProp = found.GetProperty("layoutCall");
+                    if (layoutCallProp?.Value is IModelStructure layoutCall)
+                    {
+                        var layoutRef = ReadPropValue(layoutCall, "layout");
+                        result["layout"] = layoutRef;
+                    }
+                    else
+                    {
+                        result["layout"] = null;
+                    }
+                }
+                catch { result["layout"] = null; }
+
+                // Page parameters
+                var parameterList = new List<object>();
+                try
+                {
+                    var paramsProp = found.GetProperty("parameters");
+                    if (paramsProp != null && paramsProp.IsList)
+                    {
+                        var vals = paramsProp.GetValues();
+                        if (vals != null)
+                        {
+                            foreach (var v in vals)
+                            {
+                                if (v is not IModelStructure param) continue;
+                                var pName = param.Name ?? ReadPropValue(param, "name")?.ToString();
+                                var pType = "Unknown";
+                                try
+                                {
+                                    var ptProp = param.GetProperty("parameterType");
+                                    if (ptProp?.Value is IModelStructure ptEl)
+                                    {
+                                        pType = SimplifyDataType(ptEl);
+                                    }
+                                }
+                                catch { }
+                                parameterList.Add(new { name = pName, type = pType });
+                            }
+                        }
+                    }
+                }
+                catch { }
+                result["parameters"] = parameterList;
+                result["parameterCount"] = parameterList.Count;
+
+                // Flat element analysis — GetElements() returns ALL descendants,
+                // so we call it ONCE on the page unit and classify the flat list
+                var widgetTypeCounts = new Dictionary<string, int>();
+                var meaningfulWidgets = new List<object>();
+
+                try
+                {
+                    var allElements = found.GetElements();
+                    if (allElements != null)
+                    {
+                        foreach (var el in allElements)
+                        {
+                            var rawType = el.Type ?? "";
+                            var simplifiedType = SimplifyWidgetType(rawType);
+
+                            // Skip noise types for both counting and listing
+                            if (IsPageNoiseType(rawType))
+                                continue;
+
+                            widgetTypeCounts[simplifiedType] = widgetTypeCounts.GetValueOrDefault(simplifiedType) + 1;
+
+                            // Build detail for meaningful/interesting widget types
+                            if (IsInterestingWidget(rawType))
+                            {
+                                var widgetInfo = new Dictionary<string, object?>();
+                                widgetInfo["type"] = simplifiedType;
+
+                                var elName = el.Name;
+                                if (!string.IsNullOrEmpty(elName))
+                                    widgetInfo["name"] = elName;
+
+                                // Extract data source info for data-bound widgets
+                                if (rawType.Contains("DataView") || rawType.Contains("ListView") || rawType.Contains("DataGrid") || rawType.Contains("TemplateGrid"))
+                                {
+                                    ExtractDataSourceInfo(el, widgetInfo);
+                                }
+
+                                // Extract action info for buttons
+                                if (rawType.Contains("Button"))
+                                {
+                                    try
+                                    {
+                                        var actionProp = el.GetProperty("action");
+                                        if (actionProp?.Value is IModelStructure actionEl)
+                                        {
+                                            widgetInfo["actionType"] = SimplifyWidgetType(actionEl.Type ?? "");
+                                        }
+                                    }
+                                    catch { }
+                                }
+
+                                // Extract attribute reference for input widgets
+                                if (rawType.Contains("TextBox") || rawType.Contains("DatePicker") || rawType.Contains("CheckBox") ||
+                                    rawType.Contains("DropDown") || rawType.Contains("TextArea") || rawType.Contains("NumericInput") ||
+                                    rawType.Contains("RadioButtons") || rawType.Contains("ReferenceSelector"))
+                                {
+                                    var attrRef = ReadPropValue(el, "attributeRef");
+                                    if (attrRef != null)
+                                        widgetInfo["attributeRef"] = attrRef;
+                                }
+
+                                meaningfulWidgets.Add(widgetInfo);
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    result["widgetError"] = ex.Message;
+                }
+
+                result["widgets"] = meaningfulWidgets;
+                result["widgetTypeSummary"] = widgetTypeCounts;
+                result["totalWidgets"] = widgetTypeCounts.Values.Sum();
+
+                return JsonSerializer.Serialize(result);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error reading page details");
+                return JsonSerializer.Serialize(new { error = ex.Message });
+            }
+        }
+
+        private void ExtractDataSourceInfo(IModelStructure element, Dictionary<string, object?> node)
+        {
+            try
+            {
+                var dsProp = element.GetProperty("dataSource");
+                if (dsProp?.Value is IModelStructure ds)
+                {
+                    node["dataSourceType"] = SimplifyWidgetType(ds.Type ?? "");
+                    var entityRef = ReadPropValue(ds, "entityRef");
+                    if (entityRef != null)
+                        node["entity"] = entityRef;
+                    var entityPath = ReadPropValue(ds, "entityPath");
+                    if (entityPath != null)
+                        node["entityPath"] = entityPath;
+                    var mfRef = ReadPropValue(ds, "microflow");
+                    if (mfRef != null)
+                        node["dataSourceMicroflow"] = mfRef;
+                    var nfRef = ReadPropValue(ds, "nanoflow");
+                    if (nfRef != null)
+                        node["dataSourceNanoflow"] = nfRef;
+                }
+            }
+            catch { }
+        }
+
+        private string SimplifyWidgetType(string rawType)
+        {
+            if (rawType.Contains("$"))
+            {
+                var parts = rawType.Split('$', 2);
+                return parts.Length > 1 ? parts[1] : rawType;
+            }
+            if (rawType.Contains("."))
+            {
+                var parts = rawType.Split('.', 2);
+                return parts.Length > 1 ? parts[1] : rawType;
+            }
+            return rawType;
+        }
+
+        private bool IsPageNoiseType(string rawType)
+        {
+            // Internal widget framework types that are not user-facing
+            return rawType.Contains("$Text") ||
+                   rawType.Contains("$Translation") ||
+                   rawType.Contains("$Appearance") ||
+                   rawType.Contains("$DesignPropertyValue") ||
+                   rawType.Contains("$OptionDesignPropertyValue") ||
+                   rawType.Contains("WidgetPropertyType") ||
+                   rawType.Contains("WidgetValueType") ||
+                   rawType.Contains("WidgetObjectType") ||
+                   rawType.Contains("WidgetEnumerationValue") ||
+                   rawType.Contains("WidgetReturnType") ||
+                   rawType.Contains("WidgetTranslation") ||
+                   rawType.Contains("WidgetObject$") ||
+                   rawType.Contains("$WidgetProperty") ||
+                   rawType.Contains("$WidgetValue") ||
+                   rawType.Contains("$NoClientAction") ||
+                   rawType.Contains("$ClientTemplate") ||
+                   rawType.Contains("CustomWidgetType") ||
+                   rawType.Contains("$IconCollectionIcon") ||
+                   rawType.Contains("$PageSettings") ||
+                   rawType.Contains("$DirectEntityRef") ||
+                   rawType.Contains("LayoutCallArgument") ||
+                   rawType.Contains("WebLayoutContent") ||
+                   rawType.Contains("NativeLayoutContent") ||
+                   rawType.Contains("$AttributeRef") ||
+                   rawType.Contains("$GridSortBar") ||
+                   rawType.Contains("ScrollContainerRegion");
+        }
+
+        private bool IsInterestingWidget(string rawType)
+        {
+            // User-facing widgets worth showing details for
+            return rawType.Contains("DataView") ||
+                   rawType.Contains("ListView") ||
+                   rawType.Contains("DataGrid") ||
+                   rawType.Contains("TemplateGrid") ||
+                   rawType.Contains("LayoutGrid") && !rawType.Contains("Row") && !rawType.Contains("Column") ||
+                   rawType.Contains("TabContainer") ||
+                   rawType.Contains("ActionButton") ||
+                   rawType.Contains("LinkButton") ||
+                   rawType.Contains("DynamicText") ||
+                   rawType.Contains("$CustomWidget") && !rawType.Contains("Type") && !rawType.Contains("XPath") ||
+                   rawType.Contains("GroupBox") ||
+                   rawType.Contains("ScrollContainer") && !rawType.Contains("Region") ||
+                   rawType.Contains("ReferenceSelector") ||
+                   rawType.Contains("TextBox") ||
+                   rawType.Contains("DatePicker") ||
+                   rawType.Contains("DropDown") ||
+                   rawType.Contains("CheckBox") ||
+                   rawType.Contains("TextArea") ||
+                   rawType.Contains("RadioButtons") ||
+                   rawType.Contains("NumericInput") ||
+                   rawType.Contains("DivContainer") ||
+                   rawType.Contains("SnippetCall");
+        }
+
+        private string SimplifyDataType(IModelStructure typeElement)
+        {
+            var type = typeElement.Type ?? "";
+            return type switch
+            {
+                "DataTypes$ObjectType" => ExtractEntityFromDataType(typeElement, "Object"),
+                "DataTypes$ListType" => ExtractEntityFromDataType(typeElement, "List"),
+                "DataTypes$BooleanType" => "Boolean",
+                "DataTypes$StringType" => "String",
+                "DataTypes$IntegerType" => "Integer",
+                "DataTypes$DecimalType" => "Decimal",
+                "DataTypes$DateTimeType" => "DateTime",
+                "DataTypes$EnumerationType" => ExtractEnumFromDataType(typeElement),
+                "DataTypes$VoidType" => "Void",
+                _ => type.Split('$').LastOrDefault() ?? "Unknown"
+            };
+        }
+
+        // Helper to get page summary for list_pages enhancement
+        private (int widgetCount, bool hasParameters, string? layoutName, string? documentation) GetPageUntypedInfo(IModelRoot root, string qualifiedName)
+        {
+            int widgetCount = 0;
+            bool hasParams = false;
+            string? layoutName = null;
+            string? doc = null;
+
+            try
+            {
+                var pages = GetUnitsWithFallback(root, "Pages$Page");
+                var found = pages.FirstOrDefault(p =>
+                    (p.QualifiedName ?? "").Equals(qualifiedName, StringComparison.OrdinalIgnoreCase));
+
+                if (found == null) return (0, false, null, null);
+
+                // Documentation
+                var docVal = ReadPropValue(found, "documentation")?.ToString();
+                if (!string.IsNullOrEmpty(docVal))
+                    doc = docVal.Length > 100 ? docVal.Substring(0, 100) + "..." : docVal;
+
+                // Parameters
+                try
+                {
+                    var paramsProp = found.GetProperty("parameters");
+                    if (paramsProp != null && paramsProp.IsList)
+                    {
+                        var vals = paramsProp.GetValues();
+                        hasParams = vals != null && vals.Any();
+                    }
+                }
+                catch { }
+
+                // Layout
+                try
+                {
+                    var layoutCallProp = found.GetProperty("layoutCall");
+                    if (layoutCallProp?.Value is IModelStructure layoutCall)
+                    {
+                        layoutName = ReadPropValue(layoutCall, "layout")?.ToString();
+                    }
+                }
+                catch { }
+
+                // Widget count — count non-noise elements from flat GetElements() list
+                try
+                {
+                    var allElements = found.GetElements();
+                    if (allElements != null)
+                    {
+                        widgetCount = allElements.Count(el => !IsPageNoiseType(el.Type ?? ""));
+                    }
+                }
+                catch { }
+            }
+            catch { }
+
+            return (widgetCount, hasParams, layoutName, doc);
         }
 
         #endregion
