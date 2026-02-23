@@ -10,6 +10,9 @@
     <Compile Remove="Presentation Resources\**" />
     <EmbeddedResource Remove="Presentation Resources\**" />
     <None Remove="Presentation Resources\**" />
+    <Compile Remove="backport-10x\**" />
+    <EmbeddedResource Remove="backport-10x\**" />
+    <None Remove="backport-10x\**" />
   </ItemGroup>
   <ItemGroup>
     <Compile Remove="AIPanel.cs" />
