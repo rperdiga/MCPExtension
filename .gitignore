@@ -12,3 +12,8 @@ mcp_debug.log
 # Stress test artifacts
 stress-test-call.sh
 stress-test-results.log
+
+# Backport 10.x build artifacts and reference snapshot
+backport-10x/bin/
+backport-10x/obj/
+backport-10x/reference/

@@ -1,18 +1,29 @@
 # Mendix Studio Pro MCP Extension
 
-A C# extension for **Mendix Studio Pro 11.5** that exposes the full modeling API through a **Model Context Protocol (MCP) server** over HTTP/SSE. Enables AI tools (Claude, Cursor, Copilot, etc.) to read, create, modify, and manage Mendix application models programmatically.
+A C# extension for **Mendix Studio Pro** that exposes the full modeling API through a **Model Context Protocol (MCP) server** over HTTP/SSE. Enables AI tools (Claude, Cursor, Copilot, etc.) to read, create, modify, and manage Mendix application models programmatically.
 
 **83 tools** across domain modeling, microflows, pages, security, workflows, and more.
+
+## Version Compatibility
+
+The same 83 tools work on both Studio Pro 10.x and 11.x. The Mendix Extensions API is 99% identical between versions.
+
+| Studio Pro Version | Status | Build Command | Setup Guide |
+|---|---|---|---|
+| **11.5, 11.6, 11.7** | Tested (11.5) | `dotnet build MCPExtension.csproj` | This README (below) |
+| **10.24.13+** | Tested (10.24.13) | `dotnet build backport-10x/MCPExtension.10x.csproj` | [backport-10x/README.md](backport-10x/README.md) |
+
+> **Studio Pro 10.x users**: See [backport-10x/README.md](backport-10x/README.md) for build, deploy, and launch instructions specific to your version. The tool reference, usage examples, and troubleshooting sections below apply to both versions.
 
 ## Mendix Marketplace Module
 
 A pre-built version for **Mendix 10.24.2** is available in the `.github/Mendix Marketplace Module/` folder with installation instructions.
 
-## Quick Start
+## Quick Start (Studio Pro 11.x)
 
 ### Prerequisites
 
-- Mendix Studio Pro 11.5+
+- Mendix Studio Pro 11.5+ (also supports 11.6, 11.7)
 - .NET 8.0 SDK
 - `--enable-extension-development` flag on Studio Pro
 
@@ -26,7 +37,7 @@ Post-build automatically copies to `{YourProject}/extensions/MCP/`.
 
 ### Launch Studio Pro
 
-All flags are required:
+All flags are required for Studio Pro 11.x:
 
 ```bash
 studiopro.exe "YourProject.mpr" \
@@ -36,6 +47,8 @@ studiopro.exe "YourProject.mpr" \
   --enable-workflow-generation \
   --enable-maia-session-story-attachment
 ```
+
+> **Note**: Studio Pro 10.x only needs `-enable-extension-development`. See [backport-10x/README.md](backport-10x/README.md).
 
 ### Start the MCP Server
 
@@ -344,9 +357,13 @@ The Extensions API has limited write support for some model element types:
 ### Dependencies
 
 - .NET 8.0
-- Mendix.StudioPro.ExtensionsAPI (11.5)
+- Mendix.StudioPro.ExtensionsAPI v10.21.1 (compatible with Studio Pro 10.x and 11.x)
 - Microsoft.AspNetCore (HTTP/SSE server)
 - System.Text.Json
+
+### Studio Pro 10.x Backport
+
+The `backport-10x/` folder contains a separate `.csproj` that compiles the same source code for Studio Pro 10.24.13+. See [backport-10x/README.md](backport-10x/README.md) for setup details, or [backport-10x/TOOLS-COMPARISON.md](backport-10x/TOOLS-COMPARISON.md) for the full before/after tool comparison.
 
 ## License
 

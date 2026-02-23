@@ -1,0 +1,58 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>preview</LangVersion>
+    <AssemblyName>MCPExtension</AssemblyName>
+    <RootNamespace>MCPExtension</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <!-- Include all source files from parent directory (no code duplication) -->
+  <ItemGroup>
+    <Compile Include="..\AIAPIEngine.cs" />
+    <Compile Include="..\AIAPIEngineViewModel.cs" />
+    <Compile Include="..\Core\BaseApiHandler.cs" />
+    <Compile Include="..\Core\IApiHandler.cs" />
+    <Compile Include="..\Handlers\AssociationDiagnosticHandler.cs" />
+    <Compile Include="..\Handlers\DebugHandler.cs" />
+    <Compile Include="..\Handlers\DeleteModelHandler.cs" />
+    <Compile Include="..\Handlers\GenerateOverviewHandler.cs" />
+    <Compile Include="..\Handlers\ListMicroflowsHandler.cs" />
+    <Compile Include="..\Handlers\ReadMicroflowActivitiesHandler.cs" />
+    <Compile Include="..\Handlers\ReadModelHandler.cs" />
+    <Compile Include="..\Handlers\SaveDataHandler.cs" />
+    <Compile Include="..\Handlers\WriteModelHandler.cs" />
+    <Compile Include="..\Mcp\McpServer.cs" />
+    <Compile Include="..\Mcp\MendixMcpServer.cs" />
+    <Compile Include="..\Mcp\ToolCallEventArgs.cs" />
+    <Compile Include="..\MenuExtension.cs" />
+    <Compile Include="..\Tools\MendixDomainModelTools.cs" />
+    <Compile Include="..\Tools\MendixAdditionalTools.cs" />
+    <Compile Include="..\Utils\Utils.cs" />
+  </ItemGroup>
+
+  <!-- Same NuGet packages as main project -->
+  <ItemGroup>
+    <PackageReference Include="Eto.Forms" Version="2.9.0" />
+    <PackageReference Include="Mendix.StudioPro.ExtensionsAPI" Version="10.21.1" />
+    <PackageReference Include="Microsoft.AspNetCore" Version="2.2.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.1" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="manifest.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <!-- Deploy to Studio Pro 10.24.13 project -->
+  <Target Name="PostBuild" AfterTargets="PostBuildEvent">
+    <Exec Command="xcopy /y /s /i &quot;$(TargetDir)&quot; &quot;C:\Mendix Projects\MCPExtension-main\extensions\MCP&quot;" />
+  </Target>
+</Project>
