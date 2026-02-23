@@ -28,9 +28,17 @@ Pre-built versions of the MCP Extension are available in the [`dist/`](dist/) fo
 
 1. Download the `.mxmodule` file for your Studio Pro version
 2. In Studio Pro, go to **App** > **Import Extension** and select the downloaded file
-3. Launch Studio Pro with the `-enable-extension-development` flag
-4. Open the **MCP dockable pane** (the server starts when the pane opens)
-5. Connect at `http://localhost:3001/health`
+3. **Enable the extension development flag** (required — extensions won't load without it):
+   - **Option A — Shortcut**: Right-click your Studio Pro desktop/taskbar shortcut > **Properties** > in the **Target** field, append `-enable-extension-development` after the `.exe"` path. Example:
+     ```
+     "C:\...\studiopro.exe" -enable-extension-development
+     ```
+   - **Option B — Command line**: Launch Studio Pro from a terminal:
+     ```bash
+     studiopro.exe "YourProject.mpr" -enable-extension-development
+     ```
+4. Open the **MCP dockable pane** in Studio Pro (the server starts when the pane opens)
+5. Verify at `http://localhost:3001/health`
 
 > These are builds of the same source code in this repository. For building from source, see the Quick Start section below.
 
