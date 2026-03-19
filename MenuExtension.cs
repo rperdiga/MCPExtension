@@ -18,7 +18,7 @@ class MyMenuExtension : MenuExtension
     public override IEnumerable<MenuViewModel> GetMenus()
     {
         yield return new MenuViewModel(
-            caption: "MCP Server",
+            caption: "SPMCP",
             action: () =>
             {
                 if (CurrentApp == null)

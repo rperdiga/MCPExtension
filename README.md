@@ -1,117 +1,58 @@
-# Mendix Studio Pro MCP Extension
+# SPMCP — Mendix Studio Pro MCP Extension
 
-A C# extension for **Mendix Studio Pro** that exposes the full modeling API through a **Model Context Protocol (MCP) server** over HTTP/SSE. Enables AI tools (Claude, Cursor, Copilot, etc.) to read, create, modify, and manage Mendix application models programmatically.
+A **Mendix Studio Pro extension** that exposes the full modeling API through a **Model Context Protocol (MCP) server** over HTTP/SSE. Enables AI tools (Claude, Cursor, Copilot, etc.) to read, create, modify, and manage Mendix application models programmatically.
 
-**83 tools** across domain modeling, microflows, pages, security, workflows, and more.
+**84 tools** across domain modeling, microflows, pages, security, workflows, and more.
 
-## Version Compatibility
+---
 
-The same 83 tools work on both Studio Pro 10.x and 11.x. The Mendix Extensions API is 99% identical between versions.
+## Installation (Studio Pro 10.24.13)
 
-| Studio Pro Version | Status | Build Command | Setup Guide |
-|---|---|---|---|
-| **11.5, 11.6, 11.7** | Tested (11.5) | `dotnet build MCPExtension.csproj` | This README (below) |
-| **10.24.13+** | Tested (10.24.13) | `dotnet build backport-10x/MCPExtension.10x.csproj` | [backport-10x/README.md](backport-10x/README.md) |
+### Step 1 — Import the module
 
-> **Studio Pro 10.x users**: See [backport-10x/README.md](backport-10x/README.md) for build, deploy, and launch instructions specific to your version. The tool reference, usage examples, and troubleshooting sections below apply to both versions.
+1. Download [`dist/SPMCP.mpk`](dist/SPMCP.mpk)
+2. In Studio Pro, go to **App > Import Module Package** and select `SPMCP.mpk`
+3. Accept the import — the **SPMCP** module will appear in your project
 
-## Pre-built Extension (No Build Required)
+### Step 2 — Enable extension development
 
-Pre-built versions of the MCP Extension are available in the [`dist/`](dist/) folder. Download the file for your Studio Pro version — no .NET SDK or compilation needed.
+Extensions require the `--enable-extension-development` flag when launching Studio Pro.
 
-| Studio Pro Version | Download |
-|---|---|
-| **11.5+** | [`MCP-StudioPro-11.5.mxmodule`](dist/MCP-StudioPro-11.5.mxmodule) |
-| **10.24.13+** | [`MCP-StudioPro-10.24.13.mxmodule`](dist/MCP-StudioPro-10.24.13.mxmodule) |
+**Option A — Shortcut (recommended):** Right-click your Studio Pro shortcut > **Properties** > append the flag to the **Target** field:
 
-**Installation:**
-
-1. Download the `.mxmodule` file for your Studio Pro version
-2. In Studio Pro, go to **App** > **Import Extension** and select the downloaded file
-3. **Enable the extension development flag** (required — extensions won't load without it):
-   - **Option A — Shortcut**: Right-click your Studio Pro desktop/taskbar shortcut > **Properties** > in the **Target** field, append `-enable-extension-development` after the `.exe"` path. Example:
-     ```
-     "C:\...\studiopro.exe" -enable-extension-development
-     ```
-   - **Option B — Command line**: Launch Studio Pro from a terminal:
-     ```bash
-     studiopro.exe "YourProject.mpr" -enable-extension-development
-     ```
-4. Open the **MCP dockable pane** in Studio Pro (the server starts when the pane opens)
-5. Verify at `http://localhost:3001/health`
-
-> These are builds of the same source code in this repository. For building from source, see the Quick Start section below.
-
-## Mendix Marketplace Module
-
-A pre-built version for **Mendix 10.24.2** is available in the `.github/Mendix Marketplace Module/` folder with installation instructions.
-
-## Quick Start — Build from Source (Studio Pro 11.x)
-
-### Prerequisites
-
-- Mendix Studio Pro 11.5+ (also supports 11.6, 11.7)
-- .NET 8.0 SDK
-- `--enable-extension-development` flag on Studio Pro
-
-### Build & Deploy
-
-```bash
-dotnet build MCPExtension.csproj
+```
+"C:\Users\...\studiopro.exe" --enable-extension-development
 ```
 
-Post-build automatically copies to `{YourProject}/extensions/MCP/`.
-
-### Launch Studio Pro
-
-All flags are required for Studio Pro 11.x:
+**Option B — Command line:**
 
 ```bash
-studiopro.exe "YourProject.mpr" \
-  --enable-extension-development \
-  --enable-universal-maia \
-  --enable-microflow-generation \
-  --enable-workflow-generation \
-  --enable-maia-session-story-attachment
+studiopro.exe "YourProject.mpr" --enable-extension-development
 ```
 
-> **Note**: Studio Pro 10.x only needs `-enable-extension-development`. See [backport-10x/README.md](backport-10x/README.md).
+### Step 3 — Start the MCP server
 
-### Start the MCP Server
+Open the **SPMCP dockable pane** in Studio Pro (View menu or toolbar). The MCP server starts automatically when the pane opens.
 
-Open the **MCP dockable pane** in Studio Pro (the server starts when the pane opens).
+Verify it's running:
 
-### Connect
+```
+http://localhost:3001/health
+```
+
+### Step 4 — Connect your AI tool
 
 | Endpoint | URL |
 |----------|-----|
 | SSE | `http://localhost:3001/sse` |
 | Messages | `http://localhost:3001/message` |
 | Health | `http://localhost:3001/health` |
-| MCP Metadata | `http://localhost:3001/.well-known/mcp` |
 
 Port auto-increments from 3001 if occupied.
 
-## Architecture
+---
 
-| Component | File | Purpose |
-|-----------|------|---------|
-| Entry Point | `AIAPIEngine.cs` | DockablePaneExtension, starts MCP server on pane open |
-| MCP Server | `Mcp/McpServer.cs` | HTTP/SSE server, tool descriptions & JSON schemas |
-| Tool Wiring | `Mcp/MendixMcpServer.cs` | Registers all 83 tools, routes calls to implementations |
-| Domain Tools | `Tools/MendixDomainModelTools.cs` | Entities, associations, attributes, domain model ops |
-| Additional Tools | `Tools/MendixAdditionalTools.cs` | Microflows, pages, security, workflows, settings |
-| Utilities | `Utils/Utils.cs` | Module/entity resolution helpers |
-
-### Dependency Injection (MEF)
-
-Services injected via `[ImportingConstructor]`:
-- `IMicroflowService`, `IMicroflowExpressionService`, `IMicroflowActivitiesService`
-- `IPageGenerationService`, `INavigationManagerService`
-- `INameValidationService`, `IVersionControlService` (optional)
-- `IUntypedModelAccessService` (optional, for metamodel escape-hatch)
-
-## Tool Reference (83 Tools)
+## Tool Reference (84 Tools)
 
 ### Domain Model — CRUD (15 tools)
 
@@ -168,7 +109,7 @@ Services injected via `[ImportingConstructor]`:
 | `list_java_actions` | List Java actions with parameters |
 | `validate_name` | Validate candidate name for model elements |
 
-### Constants & Enumerations (6 tools)
+### Constants & Enumerations (7 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -224,10 +165,11 @@ Services injected via `[ImportingConstructor]`:
 | `read_version_control` | Version control status: branch, commit, VC type |
 | `manage_navigation` | Add pages to responsive web navigation |
 
-### Module & Folder Management (3 tools)
+### Module & Folder Management (4 tools)
 
 | Tool | Description |
 |------|-------------|
+| `list_modules` | List all modules in the project with metadata (name, source, entity count) |
 | `create_module` | Create new module |
 | `manage_folders` | Create, list, or move documents between folders |
 | `sync_filesystem` | Import changes from JavaScript actions, widgets, external files |
@@ -245,152 +187,93 @@ Services injected via `[ImportingConstructor]`:
 | `get_studio_pro_logs` | Read Studio Pro and MCP extension logs |
 | `get_last_error` | Get last error details with stack trace |
 
-### Meta & Discovery (4 tools)
+### Meta & Discovery (6 tools)
 
 | Tool | Description |
 |------|-------------|
-| `list_available_tools` | List all 83 tools with capabilities |
+| `list_available_tools` | List all 84 tools with capabilities |
 | `debug_info` | Comprehensive domain model debug info with usage examples |
 | `list_scheduled_events` | List scheduled events with interval and status |
 | `list_rest_services` | List published REST services with paths and authentication |
 | `query_model_elements` | Generic metamodel escape-hatch: query any type by name |
+| `analyze_project_patterns` | Analyze naming conventions, structural patterns, and best practices across modules. Optionally writes a skill file to `.claude/skills/` so future AI sessions follow the project's established conventions |
 
-## Usage Examples
+---
 
-### Create a Domain Model
+## MCP Endpoints
 
-```json
-{
-  "name": "tools/call",
-  "params": {
-    "name": "create_domain_model_from_schema",
-    "arguments": {
-      "module_name": "CRM",
-      "entities": [
-        {
-          "entity_name": "Customer",
-          "attributes": [
-            {"name": "firstName", "type": "String"},
-            {"name": "lastName", "type": "String"},
-            {"name": "email", "type": "String"},
-            {"name": "isActive", "type": "Boolean"}
-          ]
-        },
-        {
-          "entity_name": "Order",
-          "entityType": "storecreateddate",
-          "attributes": [
-            {"name": "orderNumber", "type": "String"},
-            {"name": "totalAmount", "type": "Decimal"}
-          ]
-        }
-      ],
-      "associations": [
-        {
-          "name": "Order_Customer",
-          "parent": "Order",
-          "child": "Customer",
-          "type": "Reference"
-        }
-      ]
-    }
-  }
-}
+```
+http://localhost:3001/sse       SSE stream (connect here from Claude/Cursor)
+http://localhost:3001/message   POST endpoint for tool calls
+http://localhost:3001/health    Server health check
 ```
 
-### Create a Microflow with Activities
+---
+
+## Setting Up Sample Data Import (After Startup)
+
+The SPMCP module includes a Java action (`SPMCP.InsertDataFromJSON`) that loads sample data into your app on startup. After generating sample data via the `generate_sample_data` MCP tool, wire it up as follows:
+
+### Using the MCP tool (recommended)
+
+Call `generate_sample_data` — it auto-creates the `ASu_LoadSampleData` microflow and wires it to **After Startup** in one call:
 
 ```json
 {
-  "name": "create_microflow",
+  "name": "generate_sample_data",
   "arguments": {
-    "module_name": "CRM",
-    "microflow_name": "CreateCustomer",
-    "parameters": [
-      {"name": "Name", "type": "String"},
-      {"name": "Email", "type": "String"}
-    ],
-    "return_type": "Boolean"
+    "module_names": ["MyFirstModule"],
+    "auto_setup": true
   }
 }
 ```
 
-### Inspect a Page
+If an **After Startup** microflow already exists, use `force_after_startup`:
 
 ```json
 {
-  "name": "read_page_details",
+  "name": "setup_data_import",
   "arguments": {
-    "page_name": "Customer_NewEdit",
-    "module_name": "CRM"
+    "force_after_startup": true
   }
 }
 ```
 
-### Security Audit
+### Manual wiring
 
-```json
-{
-  "name": "audit_security",
-  "arguments": {}
-}
-```
+1. In Studio Pro, open **App Settings** > **Runtime** tab
+2. Set **After startup** to `SPMCP.ASu_LoadSampleData`
+3. Run the app — sample data loads on first startup and the JSON file is deleted on success
 
-## Known Limitations
-
-### Write Capabilities
-
-The Extensions API has limited write support for some model element types:
-
-- **Pages**: Only overview page generation (`GenerateOverviewPages`). No widget-level creation/editing — use read tools for introspection
-- **Nanoflows**: Read-only introspection via untyped model. No creation API
-- **Workflows**: Read-only introspection via untyped model. No creation/editing API
-- **Log Message Activity**: `CreateLogMessageActivity` does not exist in the Extensions API
-- **IDomainModelService**: Not injectable via MEF (crashes on load). Use `entity.GetAssociations()` instead
-
-### Microflow Activity Quirks
-
-- `retrieve` and `change_object` activity types in `create_microflow_activities` may create the wrong action type — use `modify_microflow_activity` to fix after creation
-- `output_variable` parameter is ignored during activity creation — set it via `modify_microflow_activity`
-- `return_type` on `create_microflow` may not apply — use `update_microflow` after creation
+---
 
 ## Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
-| Server won't start | Open the MCP dockable pane in Studio Pro |
-| Extension not loading | Verify all `--enable-*` flags on Studio Pro launch |
+| Extension not visible | Ensure `--enable-extension-development` flag is set on Studio Pro launch |
+| Server won't start | Open the SPMCP dockable pane in Studio Pro (View menu) |
 | Port conflict | Server auto-finds next available port from 3001 |
 | Connection refused | Check `http://localhost:3001/health` and Windows Firewall |
 | Tool errors | Use `get_last_error` for stack traces, `check_project_errors` for CE codes |
-| Entity type errors | Ensure AIExtension module has required templates (NPE, FileDocument, Image, etc.) |
+| Sample data not loading | Verify `SPMCP.ASu_LoadSampleData` is set as After Startup in App Settings |
 
 ### Logs
 
 - MCP debug log: `{MendixProjectPath}/resources/mcp_debug.log`
 - Studio Pro logs: accessible via `get_studio_pro_logs` tool
 
-## Development
+---
 
-### Adding a New Tool
+## Known Limitations
 
-1. Implement in `MendixDomainModelTools.cs` or `MendixAdditionalTools.cs`
-2. Register in `MendixMcpServer.cs` via `_mcpServer.RegisterTool()`
-3. Add description in `McpServer.GetToolDescription()`
-4. Add JSON schema in `McpServer.GetToolInputSchema()`
-5. Update `ListAvailableTools` arrays in both tool classes
-6. Update `registeredTools` count in `MendixMcpServer.GetStatusAsync()`
+- **Pages**: Only overview page generation. No widget-level creation/editing via Extensions API
+- **Nanoflows**: Read-only introspection. No creation API
+- **Workflows**: Read-only introspection. No creation/editing API
+- **Log Message Activity**: `CreateLogMessageActivity` does not exist in the Extensions API
+- `retrieve` and `change_object` in `create_microflow_activities` may produce wrong action type — use `modify_microflow_activity` to correct after creation
 
-### Dependencies
-
-- .NET 8.0
-- Mendix.StudioPro.ExtensionsAPI v10.21.1 (compatible with Studio Pro 10.x and 11.x)
-- Microsoft.AspNetCore (HTTP/SSE server)
-- System.Text.Json
-
-### Studio Pro 10.x Backport
-
-The `backport-10x/` folder contains a separate `.csproj` that compiles the same source code for Studio Pro 10.24.13+. See [backport-10x/README.md](backport-10x/README.md) for setup details, or [backport-10x/TOOLS-COMPARISON.md](backport-10x/TOOLS-COMPARISON.md) for the full before/after tool comparison.
+---
 
 ## License
 

@@ -792,19 +792,22 @@ namespace MCPExtension.Tools
         {
             try
             {
-                var name = parameters?["name"]?.ToString();
+                var name = Utils.Utils.GetParam(parameters, "name", "enumeration_name", "enumerationName");
                 var moduleName = parameters?["module_name"]?.ToString();
                 var valuesArray = parameters?["values"]?.AsArray();
 
                 if (string.IsNullOrEmpty(name))
-                    return JsonSerializer.Serialize(new { error = "Enumeration name is required" });
+                    return JsonSerializer.Serialize(new { error = "Enumeration name is required. Use the 'name' parameter (aliases accepted: 'enumeration_name')." });
 
                 if (valuesArray == null || valuesArray.Count == 0)
                     return JsonSerializer.Serialize(new { error = "At least one value is required for enumeration" });
 
                 var module = Utils.Utils.ResolveModule(_model, moduleName);
                 if (module == null)
-                    return JsonSerializer.Serialize(new { error = $"Module '{moduleName ?? "default"}' not found" });
+                {
+                    var available = Utils.Utils.ListUserModules(_model);
+                    return JsonSerializer.Serialize(new { error = $"Module '{moduleName ?? "default"}' not found. Available user modules: {available}" });
+                }
 
                 // Check for duplicate
                 var existingEnums = _model.Root.GetModuleDocuments<IEnumeration>(module);
@@ -1182,9 +1185,9 @@ namespace MCPExtension.Tools
             {
                 using (var transaction = _model.StartTransaction("create association"))
                 {
-                    var name = parameters["name"]?.ToString();
-                    var parent = parameters["parent"]?.ToString();
-                    var child = parameters["child"]?.ToString();
+                    var name = Utils.Utils.GetParam(parameters, "name", "association_name", "associationName");
+                    var parent = Utils.Utils.GetParam(parameters, "parent", "parent_entity", "parentEntity", "from_entity");
+                    var child = Utils.Utils.GetParam(parameters, "child", "child_entity", "childEntity", "to_entity");
                     var type = parameters["type"]?.ToString() ?? "one-to-many";
 
                     // Add debugging to understand what parameters are being passed
@@ -1794,7 +1797,11 @@ namespace MCPExtension.Tools
                 var module = Utils.Utils.ResolveModule(_model, moduleName);
                 if (module == null)
                 {
-                    return JsonSerializer.Serialize(new { error = string.IsNullOrWhiteSpace(moduleName) ? "No module found" : $"Module '{moduleName}' not found" });
+                    var available = Utils.Utils.ListUserModules(_model);
+                    var msg = string.IsNullOrWhiteSpace(moduleName)
+                        ? $"No user module found. Available modules: {available}"
+                        : $"Module '{moduleName}' not found. Available user modules: {available}";
+                    return JsonSerializer.Serialize(new { error = msg });
                 }
 
                 switch (elementType.ToLower())
@@ -1821,9 +1828,19 @@ namespace MCPExtension.Tools
                         return DeleteAssociation(module.DomainModel, entityName, associationName);
 
                     case "microflow":
-                        if (string.IsNullOrEmpty(documentName))
-                            return JsonSerializer.Serialize(new { error = "document_name (or entity_name) is required for microflow deletion" });
-                        return DeleteDocument<IMicroflow>(module, documentName, "Microflow");
+                        return JsonSerializer.Serialize(new
+                        {
+                            error = "delete_model_element does not support microflow deletion. Use the delete_document tool instead.",
+                            suggestion = "Call delete_document with: document_name='" + (documentName ?? "<microflow_name>") + "', module_name='" + module.Name + "', document_type='microflow'",
+                            example = new { tool = "delete_document", document_name = documentName ?? "<microflow_name>", module_name = module.Name, document_type = "microflow" }
+                        });
+
+                    case "nanoflow":
+                        return JsonSerializer.Serialize(new
+                        {
+                            error = "Nanoflow deletion is not supported by the Extensions API.",
+                            suggestion = "Nanoflows cannot be deleted programmatically via MCP tools. Delete the nanoflow manually in Studio Pro."
+                        });
 
                     case "constant":
                         if (string.IsNullOrEmpty(documentName))

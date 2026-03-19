@@ -137,6 +137,37 @@ public class Utils
     }
 
     /// <summary>
+    /// Reads a parameter by canonical name, falling back to aliases if the canonical name is absent.
+    /// Prevents silent failures when LLMs use slightly wrong parameter names.
+    /// Example: GetParam(p, "name", "microflow_name", "microflowName")
+    /// </summary>
+    public static string? GetParam(System.Text.Json.Nodes.JsonObject? p, string canonical, params string[] aliases)
+    {
+        if (p == null) return null;
+        var v = p[canonical]?.ToString();
+        if (v != null) return v;
+        foreach (var alias in aliases)
+        {
+            v = p[alias]?.ToString();
+            if (v != null) return v;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Returns a comma-separated list of all user module names for helpful error messages.
+    /// </summary>
+    public static string ListUserModules(IModel? model)
+    {
+        if (model == null) return "(no model)";
+        var names = model.Root.GetModules()
+            .Where(m => m != null && !m.FromAppStore)
+            .Select(m => m.Name)
+            .ToList();
+        return names.Count == 0 ? "(no user modules)" : string.Join(", ", names);
+    }
+
+    /// <summary>
     /// Converts a string representation to a DataType
     /// </summary>
     public static DataType DataTypeFromString(string typeName)

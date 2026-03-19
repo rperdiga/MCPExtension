@@ -41,7 +41,7 @@ namespace MCPExtension
         {
             try
             {
-                _logger.LogInformation("Starting Mendix MCP Server...");
+                _logger.LogInformation("Starting SPMCP...");
 
                 var mcpLogger = _serviceProvider.GetRequiredService<ILogger<McpServer>>();
                 _mcpServer = new McpServer(mcpLogger, _port, _projectDirectory);
@@ -62,12 +62,12 @@ namespace MCPExtension
                 await Task.Delay(2000); // Increased delay to ensure server starts
 
                 _isRunning = true;
-                _logger.LogInformation($"Mendix MCP Server started successfully on http://localhost:{_port}");
+                _logger.LogInformation($"SPMCP started successfully on http://localhost:{_port}");
             }
             catch (Exception ex)
             {
                 _isRunning = false;
-                _logger.LogError(ex, "Failed to start Mendix MCP Server");
+                _logger.LogError(ex, "Failed to start SPMCP");
                 throw;
             }
         }
@@ -557,6 +557,13 @@ namespace MCPExtension
                 return (object)result;
             });
 
+            // Phase 27: Project Pattern Analysis
+            _mcpServer.RegisterTool("analyze_project_patterns", async (JsonObject parameters) =>
+            {
+                var result = await additionalTools.AnalyzeProjectPatterns(parameters);
+                return (object)result;
+            });
+
             _logger.LogInformation("MCP tools registered successfully");
         }
 
@@ -564,7 +571,7 @@ namespace MCPExtension
         {
             try
             {
-                _logger.LogInformation("Stopping Mendix MCP Server...");
+                _logger.LogInformation("Stopping SPMCP...");
 
                 if (_mcpServer != null)
                 {
@@ -582,11 +589,11 @@ namespace MCPExtension
                 }
 
                 _isRunning = false;
-                _logger.LogInformation("Mendix MCP Server stopped successfully");
+                _logger.LogInformation("SPMCP stopped successfully");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error stopping Mendix MCP Server");
+                _logger.LogError(ex, "Error stopping SPMCP");
             }
         }
 
@@ -596,7 +603,7 @@ namespace MCPExtension
             {
                 isRunning = _isRunning && _serverTask != null && !_serverTask.IsCompleted,
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
-                registeredTools = 83, // Phase 26: +2 workflow introspection (list_workflows, read_workflow_details)
+                registeredTools = 84, // Phase 27: +1 analyze_project_patterns
                 port = _port,
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",
@@ -608,7 +615,7 @@ namespace MCPExtension
 
         public string GetConnectionInfo()
         {
-            return $"MCP Server running on http://localhost:{_port}\n" +
+            return $"SPMCP running on http://localhost:{_port}\n" +
                    $"SSE Endpoint: http://localhost:{_port}/sse\n" +
                    $"Health Check: http://localhost:{_port}/health\n" +
                    $"MCP Metadata: http://localhost:{_port}/.well-known/mcp";

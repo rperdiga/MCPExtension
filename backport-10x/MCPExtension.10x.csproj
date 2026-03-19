@@ -37,7 +37,12 @@
   <!-- Same NuGet packages as main project -->
   <ItemGroup>
     <PackageReference Include="Eto.Forms" Version="2.9.0" />
-    <PackageReference Include="Mendix.StudioPro.ExtensionsAPI" Version="10.21.1" />
+    <PackageReference Include="System.ComponentModel.Composition" Version="8.0.0" />
+    <PackageReference Include="Mendix.StudioPro.ExtensionsAPI" Version="10.24.4" ExcludeAssets="compile;runtime" />
+    <Reference Include="Mendix.StudioPro.ExtensionsAPI">
+      <HintPath>C:\Users\ricardo.perdigao\AppData\Local\Programs\Mendix\10.24.13.86719\modeler\Mendix.StudioPro.ExtensionsAPI.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
     <PackageReference Include="Microsoft.AspNetCore" Version="2.2.0" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
@@ -53,6 +58,10 @@
 
   <!-- Deploy to Studio Pro 10.24.13 project -->
   <Target Name="PostBuild" AfterTargets="PostBuildEvent">
-    <Exec Command="xcopy /y /s /i &quot;$(TargetDir)&quot; &quot;C:\Mendix Projects\MCPExtension-main\extensions\MCP&quot;" />
+    <!-- Force the correct 10.24.13 ExtensionsAPI DLL (override any NuGet-resolved version) -->
+    <Copy SourceFiles="C:\Users\ricardo.perdigao\AppData\Local\Programs\Mendix\10.24.13.86719\modeler\Mendix.StudioPro.ExtensionsAPI.dll"
+          DestinationFolder="$(TargetDir)"
+          OverwriteReadOnlyFiles="true" />
+    <Exec Command="xcopy /y /s /i &quot;$(TargetDir)&quot; &quot;C:\Mendix Projects\MCPExtension-main\extensions\SPMCP&quot;" />
   </Target>
 </Project>

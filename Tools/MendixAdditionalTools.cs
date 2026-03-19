@@ -1701,10 +1701,10 @@ namespace MCPExtension.Tools
         {
             try
             {
-                var microflowName = arguments["name"]?.ToString();
+                var microflowName = Utils.Utils.GetParam(arguments, "name", "microflow_name", "microflowName");
                 if (string.IsNullOrWhiteSpace(microflowName))
                 {
-                    var error = "Microflow name is required.";
+                    var error = "Microflow name is required. Use the 'name' parameter (aliases accepted: 'microflow_name').";
                     SetLastError(error);
                     _logger.LogError("[create_microflow] Microflow name is missing in arguments.");
                     return JsonSerializer.Serialize(new { error });
@@ -1714,7 +1714,10 @@ namespace MCPExtension.Tools
                 var module = Utils.Utils.ResolveModule(_model, mfModuleName);
                 if (module == null)
                 {
-                    var error = string.IsNullOrWhiteSpace(mfModuleName) ? "No module found." : $"Module '{mfModuleName}' not found.";
+                    var available = Utils.Utils.ListUserModules(_model);
+                    var error = string.IsNullOrWhiteSpace(mfModuleName)
+                        ? $"No user module found. Available modules: {available}"
+                        : $"Module '{mfModuleName}' not found. Available user modules: {available}";
                     SetLastError(error);
                     _logger.LogError($"[create_microflow] {error}");
                     return JsonSerializer.Serialize(new { error });
@@ -3066,7 +3069,7 @@ namespace MCPExtension.Tools
             var qualifiedMfName = $"{module.Name}.{microflowName}";
 
             // --- STEP 2: Check Java action existence ---
-            // Must search ALL modules including marketplace (AIExtension is a marketplace module)
+            // Must search ALL modules including marketplace (SPMCP is a marketplace module)
             string? javaActionQualifiedName = null;
             try
             {
@@ -3115,7 +3118,7 @@ namespace MCPExtension.Tools
                             {
                                 if (elem.Name == "InsertDataFromJSON")
                                 {
-                                    javaActionQualifiedName = elem.QualifiedName ?? "AIExtension.InsertDataFromJSON";
+                                    javaActionQualifiedName = elem.QualifiedName ?? "SPMCP.InsertDataFromJSON";
                                     break;
                                 }
                             }
@@ -3134,8 +3137,8 @@ namespace MCPExtension.Tools
                 return new
                 {
                     success = false,
-                    error = "Java action 'InsertDataFromJSON' not found in model. The AIExtension marketplace module must be installed.",
-                    hint = "Add the AIExtension module to your project, which provides the InsertDataFromJSON Java action for loading sample data at startup.",
+                    error = "Java action 'InsertDataFromJSON' not found in model. The SPMCP marketplace module must be installed.",
+                    hint = "Add the SPMCP module to your project, which provides the InsertDataFromJSON Java action for loading sample data at startup.",
                     steps_completed = stepsCompleted
                 };
             }
@@ -5638,6 +5641,18 @@ namespace MCPExtension.Tools
                             }
                         }
 
+                        // Warn if any activity requested output_variable — the API ignores it during creation.
+                        // The caller must use modify_microflow_activity afterwards to rename the output variable.
+                        var outputVarWarnings = new List<string>();
+                        for (int wi = 0; wi < activitiesArray.Count; wi++)
+                        {
+                            var wDef = activitiesArray[wi]?.AsObject();
+                            var wCfg = wDef?["activity_config"]?.AsObject() ?? wDef;
+                            var ov = wCfg?["output_variable"]?.ToString() ?? wCfg?["outputVariable"]?.ToString();
+                            if (!string.IsNullOrEmpty(ov))
+                                outputVarWarnings.Add($"Activity {wi + 1}: output_variable='{ov}' was ignored — use modify_microflow_activity to rename the output variable after creation.");
+                        }
+
                         return JsonSerializer.Serialize(new
                         {
                             success = true,
@@ -5645,7 +5660,8 @@ namespace MCPExtension.Tools
                             microflow = microflowName,
                             module = module.Name,
                             activitiesCreated = createdActivities.Count,
-                            activities = activityResults
+                            activities = activityResults,
+                            warnings = outputVarWarnings.Count > 0 ? outputVarWarnings : null
                         });
                     }
                     catch (Exception ex)
@@ -9696,6 +9712,496 @@ namespace MCPExtension.Tools
                    rawType.Contains("OptionDesignPropertyValue") ||
                    rawType.Contains("MicroflowParameterMapping") ||
                    rawType.Contains("$Annotation");
+        }
+
+        #endregion
+
+        #region Phase 27: Project Pattern Analysis
+
+        public async Task<string> AnalyzeProjectPatterns(JsonObject parameters)
+        {
+            try
+            {
+                var scopeModuleName = parameters["module_name"]?.ToString();
+                var saveSkill = parameters["save_skill"]?.ToString()?.ToLowerInvariant() != "false";
+                var customSkillPath = parameters["skill_file_path"]?.ToString();
+
+                var project = _model.Root as Mendix.StudioPro.ExtensionsAPI.Model.Projects.IProject;
+                var projectName = project?.Name ?? System.IO.Path.GetFileName(_projectDirectory ?? "UnknownProject");
+
+                // Gather user modules to analyze
+                var allModules = _model.Root.GetModules()
+                    .Where(m => m != null && !m.FromAppStore)
+                    .ToList();
+
+                if (!string.IsNullOrEmpty(scopeModuleName))
+                    allModules = allModules.Where(m => m.Name.Equals(scopeModuleName, StringComparison.OrdinalIgnoreCase)).ToList();
+
+                if (allModules.Count == 0)
+                    return JsonSerializer.Serialize(new { error = $"No user modules found{(string.IsNullOrEmpty(scopeModuleName) ? "" : $" matching '{scopeModuleName}'")}. Available: {Utils.Utils.ListUserModules(_model)}" });
+
+                // ── Accumulators ──────────────────────────────────────────────
+                var entityNames = new List<string>();
+                var attributeNames = new List<string>();
+                var attrTypeCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                var baseEntityCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                var commonAttrNames = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                int assocOneToMany = 0, assocManyToMany = 0;
+                var deleteBehaviorCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                int entitiesWithCreatedDate = 0, entitiesWithChangedDate = 0;
+                int totalEventHandlers = 0;
+                var eventHandlerTypes = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+                var microflowPrefixCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["ACT_"] = 0, ["SUB_"] = 0, ["BCO_"] = 0, ["ACO_"] = 0,
+                    ["RUL_"] = 0, ["IVK_"] = 0, ["DS_"] = 0, ["none"] = 0
+                };
+                var pageSuffixCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["_Overview"] = 0, ["_NewEdit"] = 0, ["_Detail"] = 0, ["_Edit"] = 0,
+                    ["_New"] = 0, ["_Select"] = 0, ["_Popup"] = 0, ["other"] = 0
+                };
+
+                var moduleStats = new List<object>();
+                int totalEntities = 0, totalMicroflows = 0, totalPages = 0, totalAssociations = 0;
+
+                // Track which associations have already been counted (avoid double-count from both-direction traversal)
+                var seenAssociations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                // ── Per-module analysis ───────────────────────────────────────
+                foreach (var module in allModules)
+                {
+                    int modEntities = 0, modMicroflows = 0, modPages = 0, modAssociations = 0;
+
+                    // Entities + attributes + associations
+                    var entities = module.DomainModel?.GetEntities().ToList() ?? new List<Mendix.StudioPro.ExtensionsAPI.Model.DomainModels.IEntity>();
+                    modEntities = entities.Count;
+                    totalEntities += modEntities;
+
+                    foreach (var entity in entities)
+                    {
+                        entityNames.Add(entity.Name);
+
+                        // Base entity / generalization
+                        var genParent = (entity.Generalization as Mendix.StudioPro.ExtensionsAPI.Model.DomainModels.IGeneralization)?.Generalization?.FullName ?? "System.Object";
+                        if (!baseEntityCounts.ContainsKey(genParent)) baseEntityCounts[genParent] = 0;
+                        baseEntityCounts[genParent]++;
+
+                        // Attributes
+                        var attrs = entity.GetAttributes().ToList();
+                        bool hasCreatedDate = false, hasChangedDate = false;
+
+                        foreach (var attr in attrs)
+                        {
+                            attributeNames.Add(attr.Name);
+
+                            // Track common audit fields
+                            var attrNameLower = attr.Name.ToLowerInvariant();
+                            if (!commonAttrNames.ContainsKey(attr.Name)) commonAttrNames[attr.Name] = 0;
+                            commonAttrNames[attr.Name]++;
+                            if (attrNameLower == "createddate" || attrNameLower == "createdby") hasCreatedDate = true;
+                            if (attrNameLower == "changeddate" || attrNameLower == "lastchanged" || attrNameLower == "modifieddate") hasChangedDate = true;
+
+                            // Attribute type distribution
+                            var typeName = SimplifyAttributeTypeName(attr.Type?.GetType().Name ?? "Unknown");
+                            if (!attrTypeCounts.ContainsKey(typeName)) attrTypeCounts[typeName] = 0;
+                            attrTypeCounts[typeName]++;
+                        }
+
+                        if (hasCreatedDate) entitiesWithCreatedDate++;
+                        if (hasChangedDate) entitiesWithChangedDate++;
+
+                        // Associations (count each once)
+                        var associations = entity.GetAssociations(Mendix.StudioPro.ExtensionsAPI.Model.DomainModels.AssociationDirection.Both, null).ToList();
+                        foreach (var assocInfo in associations)
+                        {
+                            var assocKey = $"{module.Name}.{assocInfo.Association.Name}";
+                            if (seenAssociations.Contains(assocKey)) continue;
+                            seenAssociations.Add(assocKey);
+                            modAssociations++;
+                            totalAssociations++;
+
+                            if (assocInfo.Association.Type == Mendix.StudioPro.ExtensionsAPI.Model.DomainModels.AssociationType.Reference)
+                                assocOneToMany++;
+                            else
+                                assocManyToMany++;
+
+                            // Delete behaviors
+                            var pb = assocInfo.Association.ParentDeleteBehavior.ToString();
+                            var cb = assocInfo.Association.ChildDeleteBehavior.ToString();
+                            if (!deleteBehaviorCounts.ContainsKey(pb)) deleteBehaviorCounts[pb] = 0;
+                            deleteBehaviorCounts[pb]++;
+                            if (!deleteBehaviorCounts.ContainsKey(cb)) deleteBehaviorCounts[cb] = 0;
+                            deleteBehaviorCounts[cb]++;
+                        }
+
+                        // Event handlers
+                        var handlers = entity.GetEventHandlers().ToList();
+                        totalEventHandlers += handlers.Count;
+                        foreach (var h in handlers)
+                        {
+                            var key = $"{h.Moment}_{h.Event}";
+                            if (!eventHandlerTypes.ContainsKey(key)) eventHandlerTypes[key] = 0;
+                            eventHandlerTypes[key]++;
+                        }
+                    }
+
+                    // Microflows (names only — fast)
+                    var microflows = module.GetDocuments().OfType<Mendix.StudioPro.ExtensionsAPI.Model.Microflows.IMicroflow>().ToList();
+                    modMicroflows = microflows.Count;
+                    totalMicroflows += modMicroflows;
+
+                    foreach (var mf in microflows)
+                    {
+                        var name = mf.Name ?? "";
+                        var matched = false;
+                        foreach (var prefix in new[] { "ACT_", "SUB_", "BCO_", "ACO_", "RUL_", "IVK_", "DS_" })
+                        {
+                            if (name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                            {
+                                microflowPrefixCounts[prefix]++;
+                                matched = true;
+                                break;
+                            }
+                        }
+                        if (!matched) microflowPrefixCounts["none"]++;
+                    }
+
+                    // Pages (names only — fast)
+                    var pages = module.GetDocuments()
+                        .OfType<Mendix.StudioPro.ExtensionsAPI.Model.Pages.IPage>()
+                        .ToList();
+                    modPages = pages.Count;
+                    totalPages += modPages;
+
+                    foreach (var page in pages)
+                    {
+                        var name = page.Name ?? "";
+                        var matched = false;
+                        foreach (var suffix in new[] { "_Overview", "_NewEdit", "_Detail", "_Edit", "_New", "_Select", "_Popup" })
+                        {
+                            if (name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+                            {
+                                pageSuffixCounts[suffix]++;
+                                matched = true;
+                                break;
+                            }
+                        }
+                        if (!matched) pageSuffixCounts["other"]++;
+                    }
+
+                    moduleStats.Add(new
+                    {
+                        name = module.Name,
+                        entities = modEntities,
+                        associations = modAssociations,
+                        microflows = modMicroflows,
+                        pages = modPages
+                    });
+                }
+
+                // ── Naming convention analysis ────────────────────────────────
+                int entityPascalCount = entityNames.Count(n => IsPascalCase(n));
+                int attrPascalCount = attributeNames.Count(n => IsPascalCase(n));
+                double entityPascalPct = entityNames.Count > 0 ? entityPascalCount * 100.0 / entityNames.Count : 0;
+                double attrPascalPct = attributeNames.Count > 0 ? attrPascalCount * 100.0 / attributeNames.Count : 0;
+
+                var topAttrTypes = attrTypeCounts.OrderByDescending(kv => kv.Value)
+                    .Select(kv => new { type = kv.Key, count = kv.Value, pct = totalEntities > 0 ? (int)(kv.Value * 100.0 / attributeNames.Count) : 0 })
+                    .Take(8).ToList();
+
+                var topBaseEntities = baseEntityCounts.OrderByDescending(kv => kv.Value)
+                    .Select(kv => new { parent = kv.Key, count = kv.Value })
+                    .Take(5).ToList();
+
+                // Standard audit attributes (present on ≥40% of entities)
+                var standardAttrs = commonAttrNames
+                    .Where(kv => kv.Value >= Math.Max(1, totalEntities * 0.4))
+                    .OrderByDescending(kv => kv.Value)
+                    .Select(kv => kv.Key)
+                    .Take(8)
+                    .ToList();
+
+                var mostCommonDeleteBehavior = deleteBehaviorCounts.Count > 0
+                    ? deleteBehaviorCounts.OrderByDescending(kv => kv.Value).First().Key
+                    : "DeleteMeButKeepReferences";
+
+                // ── Build result ──────────────────────────────────────────────
+                var conventions = new
+                {
+                    entityNaming = new
+                    {
+                        pattern = entityPascalPct >= 90 ? "PascalCase" : entityPascalPct >= 70 ? "Mostly PascalCase" : "Mixed",
+                        consistency = $"{(int)entityPascalPct}%",
+                        examples = entityNames.Where(IsPascalCase).Take(5).ToList()
+                    },
+                    attributeNaming = new
+                    {
+                        pattern = attrPascalPct >= 90 ? "PascalCase" : attrPascalPct >= 70 ? "Mostly PascalCase" : "Mixed",
+                        consistency = $"{(int)attrPascalPct}%"
+                    },
+                    microflowPrefixes = microflowPrefixCounts,
+                    standardAuditAttributes = standardAttrs,
+                    commonBaseEntities = baseEntityCounts.OrderByDescending(kv => kv.Value).ToDictionary(kv => kv.Key, kv => kv.Value)
+                };
+
+                var statistics = new
+                {
+                    totalEntities,
+                    totalAssociations,
+                    totalMicroflows,
+                    totalPages,
+                    totalEventHandlers,
+                    attributeTypeDistribution = topAttrTypes,
+                    associationTypeRatio = new
+                    {
+                        oneToMany = assocOneToMany,
+                        manyToMany = assocManyToMany,
+                        oneToManyPct = totalAssociations > 0 ? $"{(int)(assocOneToMany * 100.0 / totalAssociations)}%" : "n/a"
+                    },
+                    commonDeleteBehavior = mostCommonDeleteBehavior,
+                    deleteBehaviorDistribution = deleteBehaviorCounts,
+                    eventHandlerDistribution = eventHandlerTypes,
+                    entitiesWithCreatedDate = new { count = entitiesWithCreatedDate, pct = totalEntities > 0 ? $"{(int)(entitiesWithCreatedDate * 100.0 / totalEntities)}%" : "0%" },
+                    entitiesWithChangedDate = new { count = entitiesWithChangedDate, pct = totalEntities > 0 ? $"{(int)(entitiesWithChangedDate * 100.0 / totalEntities)}%" : "0%" },
+                    pageSuffixPatterns = pageSuffixCounts,
+                    baseEntityDistribution = topBaseEntities
+                };
+
+                // ── Generate and optionally save skill file ───────────────────
+                string? skillFilePath = null;
+                bool skillFileWritten = false;
+                if (saveSkill)
+                {
+                    var skillContent = GenerateProjectConventionSkill(projectName, conventions, statistics, moduleStats, totalEntities, totalMicroflows, totalPages);
+                    skillFilePath = !string.IsNullOrEmpty(customSkillPath)
+                        ? customSkillPath
+                        : GetProjectSkillFilePath();
+
+                    try
+                    {
+                        var dir = System.IO.Path.GetDirectoryName(skillFilePath);
+                        if (!string.IsNullOrEmpty(dir) && !System.IO.Directory.Exists(dir))
+                            System.IO.Directory.CreateDirectory(dir);
+                        await System.IO.File.WriteAllTextAsync(skillFilePath, skillContent);
+                        skillFileWritten = true;
+                        _logger.LogInformation($"Project conventions skill written to {skillFilePath}");
+                    }
+                    catch (Exception fileEx)
+                    {
+                        _logger.LogWarning(fileEx, $"Could not write skill file to {skillFilePath}");
+                        skillFilePath = $"(write failed: {fileEx.Message})";
+                    }
+                }
+
+                var result = new
+                {
+                    success = true,
+                    projectName,
+                    analyzedAt = DateTime.Now.ToString("o"),
+                    modulesAnalyzed = allModules.Select(m => m.Name).ToList(),
+                    conventions,
+                    statistics,
+                    modules = moduleStats,
+                    skillFilePath,
+                    skillFileWritten
+                };
+
+                return JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error analyzing project patterns");
+                return JsonSerializer.Serialize(new { error = $"Failed to analyze project patterns: {ex.Message}" });
+            }
+        }
+
+        private static string SimplifyAttributeTypeName(string rawTypeName)
+        {
+            if (rawTypeName.Contains("String")) return "String";
+            if (rawTypeName.Contains("Integer") || rawTypeName.Contains("Long")) return "Integer/Long";
+            if (rawTypeName.Contains("Decimal")) return "Decimal";
+            if (rawTypeName.Contains("Boolean")) return "Boolean";
+            if (rawTypeName.Contains("DateTime")) return "DateTime";
+            if (rawTypeName.Contains("AutoNumber")) return "AutoNumber";
+            if (rawTypeName.Contains("Enumeration")) return "Enumeration";
+            if (rawTypeName.Contains("Binary")) return "Binary";
+            if (rawTypeName.Contains("Hashed")) return "HashedString";
+            return rawTypeName;
+        }
+
+        private static bool IsPascalCase(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            return char.IsUpper(name[0]) && !name.Contains('_') && !name.Contains(' ');
+        }
+
+        private string GetProjectSkillFilePath()
+        {
+            // Derive skills folder from the extension DLL location
+            try
+            {
+                var assemblyDir = System.IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
+                if (!string.IsNullOrEmpty(assemblyDir))
+                {
+                    // Walk up from e.g. C:\Mendix Projects\MCPExtension-main\extensions\MCP\
+                    // to find C:\Extensions\MCPExtension\.claude\skills\
+                    // Try DLL-adjacent .claude\skills first (for deployed builds)
+                    // Fallback: use a sibling path from project directory
+                }
+            }
+            catch { /* ignore */ }
+
+            // Hardcoded known path for this installation
+            return @"C:\Extensions\MCPExtension\.claude\skills\mendix-project-context.md";
+        }
+
+        private string GenerateProjectConventionSkill(
+            string projectName,
+            dynamic conventions,
+            dynamic statistics,
+            List<object> moduleStats,
+            int totalEntities,
+            int totalMicroflows,
+            int totalPages)
+        {
+            var sb = new System.Text.StringBuilder();
+            var now = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+
+            sb.AppendLine("---");
+            sb.AppendLine("name: mendix-project-context");
+            sb.AppendLine($"description: Auto-generated project conventions from '{projectName}' on {now}. Load before building anything in this project.");
+            sb.AppendLine("---");
+            sb.AppendLine();
+            sb.AppendLine($"# Project Conventions: {projectName}");
+            sb.AppendLine($"*Generated: {now} — {totalEntities} entities, {totalMicroflows} microflows, {totalPages} pages*");
+            sb.AppendLine();
+
+            // Naming conventions
+            sb.AppendLine("## Naming Conventions");
+            sb.AppendLine();
+
+            var entityPattern = (string)conventions.entityNaming.pattern;
+            var entityConsistency = (string)conventions.entityNaming.consistency;
+            var entityExamples = string.Join(", ", ((System.Collections.Generic.List<string>)conventions.entityNaming.examples).Take(4));
+            sb.AppendLine($"**Entities:** {entityPattern} ({entityConsistency} consistent){(entityExamples.Length > 0 ? $" — e.g. {entityExamples}" : "")}");
+
+            var attrPattern = (string)conventions.attributeNaming.pattern;
+            var attrConsistency = (string)conventions.attributeNaming.consistency;
+            sb.AppendLine($"**Attributes:** {attrPattern} ({attrConsistency} consistent)");
+
+            sb.AppendLine();
+            sb.AppendLine("**Microflow prefix patterns:**");
+            var prefixes = (Dictionary<string, int>)conventions.microflowPrefixes;
+            foreach (var kv in prefixes.OrderByDescending(x => x.Value).Where(x => x.Value > 0))
+            {
+                double pct = totalMicroflows > 0 ? kv.Value * 100.0 / totalMicroflows : 0;
+                string label = kv.Key switch
+                {
+                    "ACT_" => "main action microflows",
+                    "SUB_" => "sub-microflows (called by other microflows)",
+                    "BCO_" => "before-commit event handlers",
+                    "ACO_" => "after-commit event handlers",
+                    "RUL_" => "business rules",
+                    "IVK_" => "invoked/API microflows",
+                    "DS_" => "data source microflows",
+                    "none" => "no prefix (utility/other)",
+                    _ => ""
+                };
+                sb.AppendLine($"  - `{kv.Key}` — {kv.Value} microflows ({(int)pct}%) → {label}");
+            }
+
+            // Structural patterns
+            sb.AppendLine();
+            sb.AppendLine("## Standard Patterns");
+            sb.AppendLine();
+
+            var auditAttrs = (List<string>)conventions.standardAuditAttributes;
+            // Separate system-reserved names (must use configure_system_attributes) from safe manual attrs
+            var systemReservedAuditNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                { "createddate", "changeddate", "owner", "changedby" };
+            var systemAttrs = auditAttrs.Where(a => systemReservedAuditNames.Contains(a.ToLower())).ToList();
+            var manualAttrs = auditAttrs.Where(a => !systemReservedAuditNames.Contains(a.ToLower())).ToList();
+
+            if (systemAttrs.Count > 0)
+            {
+                sb.AppendLine($"**System audit tracking** ({string.Join(", ", systemAttrs)}): These are Mendix reserved names.");
+                sb.AppendLine($"⚠️ Do NOT add via `add_attribute` — use `configure_system_attributes` instead:");
+                sb.AppendLine($"```");
+                sb.AppendLine($"configure_system_attributes  entity_name=<Entity>  module_name=<Module>");
+                var hasCreated = systemAttrs.Any(a => a.Equals("CreatedDate", StringComparison.OrdinalIgnoreCase));
+                var hasChanged = systemAttrs.Any(a => a.Equals("ChangedDate", StringComparison.OrdinalIgnoreCase));
+                var hasOwner = systemAttrs.Any(a => a.Equals("Owner", StringComparison.OrdinalIgnoreCase));
+                var hasChangedBy = systemAttrs.Any(a => a.Equals("ChangedBy", StringComparison.OrdinalIgnoreCase));
+                if (hasCreated) sb.Append("  has_created_date=true  ");
+                if (hasChanged) sb.Append("has_changed_date=true  ");
+                if (hasOwner) sb.Append("has_owner=true  ");
+                if (hasChangedBy) sb.Append("has_changed_by=true");
+                sb.AppendLine();
+                sb.AppendLine($"```");
+            }
+            if (manualAttrs.Count > 0)
+                sb.AppendLine($"**Standard attributes** (add via `add_attribute`): {string.Join(", ", manualAttrs)} — present on most entities.");
+            if (auditAttrs.Count == 0)
+                sb.AppendLine("**Standard attributes:** No common audit attributes detected — add as needed.");
+
+            var baseEntities = (Dictionary<string, int>)conventions.commonBaseEntities;
+            var topBase = baseEntities.OrderByDescending(kv => kv.Value).FirstOrDefault();
+            if (topBase.Key != null)
+            {
+                sb.AppendLine($"**Default base entity:** `{topBase.Key}` (used by {topBase.Value}/{totalEntities} entities)");
+                var fileDocCount = baseEntities.Where(kv => kv.Key.Contains("FileDocument")).Sum(kv => kv.Value);
+                var imageCount = baseEntities.Where(kv => kv.Key.Contains("Image")).Sum(kv => kv.Value);
+                if (fileDocCount > 0) sb.AppendLine($"**File storage:** `System.FileDocument` — used by {fileDocCount} entities for attachments/uploads.");
+                if (imageCount > 0) sb.AppendLine($"**Image storage:** `System.Image` — used by {imageCount} entities.");
+            }
+
+            var oneToManyPct = (string)statistics.associationTypeRatio.oneToManyPct;
+            var manyToMany = (int)statistics.associationTypeRatio.manyToMany;
+            sb.AppendLine($"**Associations:** {oneToManyPct} one-to-many{(manyToMany > 0 ? $", {manyToMany} many-to-many" : " (no many-to-many)")}");
+            sb.AppendLine($"**Most common delete behavior:** `{(string)statistics.commonDeleteBehavior}`");
+
+            // Module structure
+            sb.AppendLine();
+            sb.AppendLine("## Module Structure");
+            sb.AppendLine();
+            sb.AppendLine("| Module | Entities | Associations | Microflows | Pages |");
+            sb.AppendLine("|--------|----------|--------------|------------|-------|");
+            foreach (dynamic mod in moduleStats)
+            {
+                sb.AppendLine($"| {mod.name} | {mod.entities} | {mod.associations} | {mod.microflows} | {mod.pages} |");
+            }
+
+            // Attribute type distribution
+            sb.AppendLine();
+            sb.AppendLine("## Attribute Type Distribution");
+            sb.AppendLine();
+            var topTypes = ((System.Collections.IEnumerable)statistics.attributeTypeDistribution)
+                .Cast<dynamic>()
+                .Take(6)
+                .ToList();
+            foreach (var t in topTypes)
+                sb.AppendLine($"  - {t.type}: {t.count} ({t.pct}%)");
+
+            // Apply these conventions
+            sb.AppendLine();
+            sb.AppendLine("## Apply These Conventions");
+            sb.AppendLine();
+            sb.AppendLine("When creating anything new in this project:");
+            sb.AppendLine($"1. **Names:** Use {entityPattern} for entities and attributes");
+            if (prefixes.TryGetValue("ACT_", out int actCount) && actCount > 0)
+                sb.AppendLine("2. **Microflows:** Prefix with `ACT_<Entity>_<Verb>` for actions, `SUB_` for sub-flows, `BCO_`/`ACO_` for event handlers");
+            if (systemAttrs.Count > 0)
+                sb.AppendLine($"3. **Audit fields:** Call `configure_system_attributes` (has_created_date/has_changed_date=true){(manualAttrs.Count > 0 ? $" + add `{string.Join("`, `", manualAttrs)}` via `add_attribute`" : "")}");
+            else if (manualAttrs.Count > 0)
+                sb.AppendLine($"3. **Standard fields:** Add {string.Join(", ", manualAttrs)} to every new entity via `add_attribute`");
+            if (topBase.Key != null && topBase.Key != "System.Object")
+                sb.AppendLine($"4. **Base entity:** Use `{topBase.Key}` as default generalization unless overriding");
+            sb.AppendLine($"5. **Associations:** Default to one-to-many with `{(string)statistics.commonDeleteBehavior}` delete behavior");
+            sb.AppendLine("6. **Before building:** Call `list_modules` + `read_domain_model` to see existing state");
+
+            return sb.ToString();
         }
 
         #endregion

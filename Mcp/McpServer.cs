@@ -51,8 +51,8 @@ namespace MCPExtension.MCP
         public async Task RunAsync(CancellationToken cancellationToken = default)
         {
             _isRunning = true;
-            LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] MCP Server starting on port {_port}...");
-            _logger.LogInformation($"MCP Server starting on port {_port}...");
+            LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] SPMCP starting on port {_port}...");
+            _logger.LogInformation($"SPMCP starting on port {_port}...");
 
             try
             {
@@ -107,7 +107,7 @@ namespace MCPExtension.MCP
                         {
                             healthApp.Run(async context =>
                             {
-                                await context.Response.WriteAsync("MCP Server is running");
+                                await context.Response.WriteAsync("SPMCP is running");
                             });
                         });
                         
@@ -153,7 +153,7 @@ namespace MCPExtension.MCP
                 LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] WebHost built, starting...");
                 await _webHost.StartAsync(cancellationToken);
                 
-                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] MCP Server started successfully on http://localhost:{_port}");
+                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] SPMCP started successfully on http://localhost:{_port}");
                 LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Available endpoints:");
                 LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] - SSE: http://localhost:{_port}/sse");
                 LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] - Messages: http://localhost:{_port}/message");
@@ -161,7 +161,7 @@ namespace MCPExtension.MCP
                 LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] - Health: http://localhost:{_port}/health");
                 LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] - Metadata: http://localhost:{_port}/.well-known/mcp");
                 LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Registered {_tools.Count} tools");
-                _logger.LogInformation($"MCP Server started successfully on http://localhost:{_port}");
+                _logger.LogInformation($"SPMCP started successfully on http://localhost:{_port}");
                 
                 // Keep the server running
                 while (!cancellationToken.IsCancellationRequested && _isRunning)
@@ -171,8 +171,8 @@ namespace MCPExtension.MCP
             }
             catch (Exception ex)
             {
-                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] MCP Server error: {ex}");
-                _logger.LogError(ex, "MCP Server error");
+                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] SPMCP error: {ex}");
+                _logger.LogError(ex, "SPMCP error");
                 throw;
             }
         }
@@ -342,7 +342,7 @@ namespace MCPExtension.MCP
             try
             {
                 // Send initial connection message
-                await SendSseMessage(context.Response, "connected", "MCP Server ready");
+                await SendSseMessage(context.Response, "connected", "SPMCP ready");
                 LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Sent SSE connected message");
 
                 // Keep connection alive and handle incoming messages via POST to /message endpoint
@@ -605,7 +605,7 @@ namespace MCPExtension.MCP
                 "create_multiple_associations" => "Create multiple associations at once. Supports cross-module via per-association parent_module/child_module. Configure delete behavior and owner per association.",
                 "create_domain_model_from_schema" => "Create a complete domain model from a schema definition. Specify module_name to target a specific module.",
                 "save_data" => "Generate realistic sample data for Mendix domain model entities. Specify module_name to target a specific module.",
-                "generate_overview_pages" => "Generate overview pages for entities. Specify module_name to target a specific module.",
+                "generate_overview_pages" => "Generate overview pages for entities and automatically adds them to the navigation menu. WARNING: Do NOT call manage_navigation afterwards — navigation items are added here automatically, and a second call will create duplicates. Specify module_name to target a specific module.",
                 "list_microflows" => "List all microflows in a module. Specify module_name or omit for default module.",
                 "check_model" => "Validate the model for common issues: broken generalizations, missing event handler microflows, broken associations, calculated attributes with missing microflows. Use this after making changes to verify model health. Returns errors, warnings, and module statistics.",
                 "get_studio_pro_logs" => "Read Studio Pro log files and MCP extension error logs. Filter by level (ERROR, WARN, INFO, ALL) and time window (last_minutes). Use this to see if Studio Pro encountered any errors from recent operations.",
@@ -668,10 +668,11 @@ namespace MCPExtension.MCP
                 "update_microflow" => "Update microflow properties: return type, return variable name, and URL. WARNING: Changing return_type does NOT update the end event expression (API limitation — causes CE0117). To change return type safely, delete and recreate the microflow. Supported return types: void, boolean, string, integer, decimal, float, datetime, object:Module.Entity, list:Module.Entity.",
                 "read_attribute_details" => "Read detailed information about a single attribute: type details (string length, datetime localization, enumeration), default value, calculated microflow, and documentation.",
                 "configure_constant_values" => "Set a constant value override for a specific run configuration (e.g. Development, Production). Creates or updates the constant value in the specified configuration.",
-                "generate_sample_data" => "Auto-generate realistic sample data (v2 format) from domain model schema. Produces self-describing JSON with _metadata section (enum types, association definitions) for reliable import. Supports multi-module: use module_names array for cross-module data generation with cross-module association support. Automatically wires up the import pipeline (After Startup microflow + InsertDataFromJSON Java action call) unless auto_setup=false. Requires the AIExtension marketplace module for auto-setup.",
+                "generate_sample_data" => "Auto-generate realistic sample data (v2 format) from domain model schema. Produces self-describing JSON with _metadata section (enum types, association definitions) for reliable import. Supports multi-module: use module_names array for cross-module data generation with cross-module association support. Automatically wires up the import pipeline (After Startup microflow + InsertDataFromJSON Java action call) unless auto_setup=false. Requires the SPMCP marketplace module for auto-setup.",
                 "read_sample_data" => "Read previously saved sample data from SampleData.json (or a custom file path). Returns the JSON content and file size.",
-                "setup_data_import" => "Wire up the sample data import pipeline: checks for AIExtension.InsertDataFromJSON Java action, creates an After Startup microflow that calls it, and configures the After Startup project setting. Idempotent — safe to call multiple times. Run after generate_sample_data or after manually placing a SampleData.json in resources/.",
+                "setup_data_import" => "Wire up the sample data import pipeline: checks for SPMCP.InsertDataFromJSON Java action, creates an After Startup microflow that calls it, and configures the After Startup project setting. Idempotent — safe to call multiple times. Run after generate_sample_data or after manually placing a SampleData.json in resources/.",
                 "arrange_domain_model" => "Arrange entities on the domain model canvas using smart association-aware layout. Groups related entities together in hierarchical trees based on their associations. Use optional root_entity to specify which entity appears at the top of the hierarchy. Disconnected entity groups are placed side by side. Orphan entities (no associations) go in a grid row at the bottom. Call after creating entities and associations to get a clean visual layout.",
+                "analyze_project_patterns" => "Analyze the current Mendix project to extract naming conventions, structural patterns, and best practices. Scans all user modules (or a specific one) and extracts: entity/attribute/microflow/page naming conventions, attribute type distributions, association type ratios, common base entities, standard audit attributes, event handler patterns, and module statistics. Optionally writes a Claude Code skill file (mendix-project-context.md) to .claude/skills/ so future Claude sessions automatically follow the project's established conventions. Use save_skill=true (default) to persist patterns as a skill file.",
                 _ => "Tool description not available"
             };
         }
@@ -999,7 +1000,8 @@ namespace MCPExtension.MCP
                         entity_names = new
                         {
                             type = "array",
-                            items = new { type = "string" }
+                            items = new { type = "string" },
+                            description = "List of entity names to generate overview pages for. NOTE: navigation items are added automatically — do NOT call manage_navigation after this tool."
                         },
                         generate_index_snippet = new { type = "boolean" },
                         module_name = new { type = "string", description = "Module containing the entities. Falls back to default module if omitted." }
@@ -1735,12 +1737,12 @@ namespace MCPExtension.MCP
                     type = "object",
                     properties = new
                     {
-                        module_name = new { type = "string", description = "Single target module. Falls back to default module if omitted." },
+                        module_name = new { type = "string", description = "Single target module. Falls back to default module if omitted. WARNING: If entities span multiple modules, use module_names instead — calling this tool separately per module breaks cross-module association references and creates duplicate After Startup microflows." },
                         module_names = new
                         {
                             type = "array",
                             items = new { type = "string" },
-                            description = "Multiple target modules for cross-module data generation. Takes precedence over module_name."
+                            description = "PREFERRED for multi-module projects: pass all modules in one call (e.g. [\"Catalog\",\"OrderManagement\"]). Cross-module associations are resolved correctly and only one After Startup microflow is created. Takes precedence over module_name."
                         },
                         records_per_entity = new { type = "integer", description = "Number of records to generate per entity (default 5, max 50)." },
                         entity_names = new
@@ -1783,6 +1785,17 @@ namespace MCPExtension.MCP
                         root_entity = new { type = "string", description = "Optional: entity name to place at the top of the hierarchy (overrides automatic root selection)" }
                     },
                     required = new[] { "module_name" }
+                },
+                "analyze_project_patterns" => new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        module_name = new { type = "string", description = "Optional: scope analysis to a specific module. Omit to analyze all user modules." },
+                        save_skill = new { type = "boolean", description = "Write extracted conventions to .claude/skills/mendix-project-context.md as a Claude Code skill. Default: true. Set false to only get the JSON analysis without saving." },
+                        skill_file_path = new { type = "string", description = "Optional: custom file path for the generated skill file. Defaults to C:\\Extensions\\MCPExtension\\.claude\\skills\\mendix-project-context.md." }
+                    },
+                    required = new string[0]
                 },
                 _ => new
                 {

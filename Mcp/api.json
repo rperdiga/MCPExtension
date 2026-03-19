@@ -1,0 +1,48 @@
+{
+  "version": "0.5.0",
+  "modelerVersion": "10.24.13 (build 86719)",
+  "api": [
+    {
+      "$ID": "afbb11d6-04f5-42c5-975b-d5179ca27f77",
+      "$Type": "Projects$ModuleImpl",
+      "contents": {
+        "appStoreGuid": "",
+        "appStorePackageId": 0,
+        "appStoreVersion": "",
+        "appStoreVersionGuid": "",
+        "fromAppStore": false,
+        "isThemeModule": false,
+        "name": "MCP",
+        "sortIndex": 3.4936725062267553
+      }
+    },
+    {
+      "$ID": "9bb962e4-79c5-44da-9521-4ebddc04a915",
+      "$Type": "DomainModels$DomainModel",
+      "containerID": "afbb11d6-04f5-42c5-975b-d5179ca27f77",
+      "containmentName": "domainModel",
+      "contents": {
+        "associations": [],
+        "crossAssociations": [],
+        "documentation": "",
+        "entities": []
+      }
+    },
+    {
+      "$ID": "ba502126-631a-4990-b0b0-2c96630979e4",
+      "$Type": "Security$ModuleSecurity",
+      "containerID": "afbb11d6-04f5-42c5-975b-d5179ca27f77",
+      "containmentName": "moduleSecurity",
+      "contents": {
+        "moduleRoles": []
+      }
+    },
+    {
+      "$ID": "d59e2e49-5151-4c92-8629-b83d88bb1fc6",
+      "$Type": "Projects$ModuleSettings",
+      "containerID": "afbb11d6-04f5-42c5-975b-d5179ca27f77",
+      "containmentName": "moduleSettings",
+      "contents": {}
+    }
+  ]
+}

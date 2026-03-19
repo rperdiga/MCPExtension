@@ -93,7 +93,7 @@ namespace MCPExtension
             }
 
             // Create the ViewModel FIRST so the WebView is ready for status updates
-            _currentViewModel = new AIAPIEngineViewModel("MCP Server", this);
+            _currentViewModel = new AIAPIEngineViewModel("SPMCP", this);
 
             // Auto-start the MCP server if not already running
             if (_mcpServer != null && !_mcpServer.IsRunning)
@@ -194,15 +194,15 @@ namespace MCPExtension
 
                 // Start server asynchronously to avoid deadlock
                 await _mcpServer.StartAsync();
-                _logger?.LogInformation("MCP Server started successfully");
+                _logger?.LogInformation("SPMCP started successfully");
                 
                 // Return immediately with connection info
                 var connectionInfo = _mcpServer.GetConnectionInfo();
-                return SerializeResponse($"MCP Server started successfully.\n\n{connectionInfo}");
+                return SerializeResponse($"SPMCP started successfully.\n\n{connectionInfo}");
             }
             catch (Exception ex)
             {
-                return SerializeResponse($"Error starting MCP Server: {ex.Message}", false);
+                return SerializeResponse($"Error starting SPMCP: {ex.Message}", false);
             }
         }
 
@@ -212,18 +212,18 @@ namespace MCPExtension
             {
                 if (_mcpServer == null)
                 {
-                    return SerializeResponse("MCP Server is not initialized.");
+                    return SerializeResponse("SPMCP is not initialized.");
                 }
 
                 // Stop server asynchronously to avoid deadlock
                 await _mcpServer.StopAsync();
-                _logger?.LogInformation("MCP Server stopped successfully");
+                _logger?.LogInformation("SPMCP stopped successfully");
 
-                return SerializeResponse("MCP Server stopped successfully.");
+                return SerializeResponse("SPMCP stopped successfully.");
             }
             catch (Exception ex)
             {
-                return SerializeResponse($"Error stopping MCP Server: {ex.Message}", false);
+                return SerializeResponse($"Error stopping SPMCP: {ex.Message}", false);
             }
         }
 
@@ -244,15 +244,15 @@ namespace MCPExtension
 
                 // Start server synchronously like the old version
                 _mcpServer.StartAsync().Wait();
-                _logger?.LogInformation("MCP Server started successfully");
+                _logger?.LogInformation("SPMCP started successfully");
                 
                 // Return immediately with connection info
                 var connectionInfo = _mcpServer.GetConnectionInfo();
-                return SerializeResponse($"MCP Server started successfully.\n\n{connectionInfo}");
+                return SerializeResponse($"SPMCP started successfully.\n\n{connectionInfo}");
             }
             catch (Exception ex)
             {
-                return SerializeResponse($"Error starting MCP Server: {ex.Message}", false);
+                return SerializeResponse($"Error starting SPMCP: {ex.Message}", false);
             }
         }
 
@@ -262,18 +262,18 @@ namespace MCPExtension
             {
                 if (_mcpServer == null)
                 {
-                    return SerializeResponse("MCP Server is not initialized.");
+                    return SerializeResponse("SPMCP is not initialized.");
                 }
 
                 // Stop server synchronously like the old version
                 _mcpServer.StopAsync().Wait();
-                _logger?.LogInformation("MCP Server stopped successfully");
+                _logger?.LogInformation("SPMCP stopped successfully");
 
-                return SerializeResponse("MCP Server stopped successfully.");
+                return SerializeResponse("SPMCP stopped successfully.");
             }
             catch (Exception ex)
             {
-                return SerializeResponse($"Error stopping MCP Server: {ex.Message}", false);
+                return SerializeResponse($"Error stopping SPMCP: {ex.Message}", false);
             }
         }
 
@@ -283,12 +283,12 @@ namespace MCPExtension
             {
                 if (_mcpServer == null)
                 {
-                    return SerializeResponse("MCP Server is not initialized.");
+                    return SerializeResponse("SPMCP is not initialized.");
                 }
 
                 // Get status without blocking UI thread
                 var isRunning = _mcpServer.IsRunning;
-                return SerializeResponse(isRunning ? "MCP Server is Running" : "MCP Server is Stopped");
+                return SerializeResponse(isRunning ? "SPMCP is Running" : "SPMCP is Stopped");
             }
             catch (Exception ex)
             {

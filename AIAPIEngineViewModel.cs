@@ -24,7 +24,7 @@ namespace MCPExtension
 <html>
 <head>
     <meta charset=""UTF-8"">
-    <title>MCP Server</title>
+    <title>SPMCP</title>
     <style>
         :root {
             --primary: #3b82f6;
@@ -395,7 +395,7 @@ namespace MCPExtension
                     label.textContent = 'Starting...';
                     startBtn.disabled = true;
                     stopBtn.disabled = true;
-                    statusMsg.textContent = 'Starting MCP Server...';
+                    statusMsg.textContent = 'Starting SPMCP...';
                     statusMsg.className = 'info';
                     break;
 
@@ -527,7 +527,7 @@ namespace MCPExtension
     <div class=""header"">
         <div class=""header-left"">
             <div class=""header-icon"">M</div>
-            MCP Server
+            SPMCP
         </div>
         <div class=""header-right"">
             <span id=""statusDot"" class=""status-dot""></span>
