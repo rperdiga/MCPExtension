@@ -605,9 +605,11 @@ namespace MCPExtension
                 serverTaskStatus = _serverTask?.Status.ToString() ?? "Not Started",
                 registeredTools = 84, // Phase 27: +1 analyze_project_patterns
                 port = _port,
+                mcpEndpoint = $"http://localhost:{_port}/mcp",
                 sseEndpoint = $"http://localhost:{_port}/sse",
                 healthEndpoint = $"http://localhost:{_port}/health",
-                metadataEndpoint = $"http://localhost:{_port}/.well-known/mcp"
+                metadataEndpoint = $"http://localhost:{_port}/.well-known/mcp",
+                activeStreamableConnections = _mcpServer?.ActiveStreamableConnections ?? 0
             };
 
             return status;
@@ -616,7 +618,8 @@ namespace MCPExtension
         public string GetConnectionInfo()
         {
             return $"SPMCP running on http://localhost:{_port}\n" +
-                   $"SSE Endpoint: http://localhost:{_port}/sse\n" +
+                   $"MCP Endpoint: http://localhost:{_port}/mcp (Streamable HTTP)\n" +
+                   $"SSE Endpoint: http://localhost:{_port}/sse (legacy)\n" +
                    $"Health Check: http://localhost:{_port}/health\n" +
                    $"MCP Metadata: http://localhost:{_port}/.well-known/mcp";
         }

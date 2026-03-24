@@ -11,6 +11,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using MCPExtension.Tools;
 using System.Text.Json;
+using System.IO;
 using System.Linq;
 
 namespace MCPExtension
@@ -24,7 +25,7 @@ namespace MCPExtension
         private IServiceProvider? _serviceProvider;
         private ILogger<AIAPIEngine>? _logger;
         private readonly JsonSerializerOptions _jsonOptions;
-        private readonly int _mcpPort;
+        private int _mcpPort;
         private AIAPIEngineViewModel? _currentViewModel;
         private readonly IPageGenerationService _pageGenerationService;
         private readonly INavigationManagerService _navigationManagerService;
@@ -66,9 +67,9 @@ namespace MCPExtension
                 WriteIndented = true,
                 Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
             };
-            
-            // Use a random available port starting from 3001
-            _mcpPort = FindAvailablePort(3001);
+
+            // Port is resolved later in Open() when we have access to project directory for settings
+            _mcpPort = 3001;
         }
 
         private int FindAvailablePort(int startPort)
@@ -86,6 +87,13 @@ namespace MCPExtension
 
         public override DockablePaneViewModelBase Open()
         {
+            // Load saved port preference (requires CurrentApp for project directory)
+            if (CurrentApp != null)
+            {
+                var settings = LoadSettings();
+                _mcpPort = FindAvailablePort(settings.Port);
+            }
+
             // Initialize services when the pane is opened and we have access to CurrentApp
             if (CurrentApp != null && _mcpServer == null)
             {
@@ -337,6 +345,91 @@ namespace MCPExtension
             {
                 // Ignore errors when clearing log file - don't want to break server start
                 System.Diagnostics.Debug.WriteLine($"Could not clear log file: {ex.Message}");
+            }
+        }
+
+        // ========== Settings Persistence ==========
+
+        public class ExtensionSettings
+        {
+            public int Port { get; set; } = 3001;
+        }
+
+        private string GetSettingsFilePath()
+        {
+            var project = CurrentApp?.Root as IProject;
+            if (project?.DirectoryPath == null) return null;
+            var resourcesDir = Path.Combine(project.DirectoryPath, "resources");
+            if (!Directory.Exists(resourcesDir)) Directory.CreateDirectory(resourcesDir);
+            return Path.Combine(resourcesDir, "spmcp-settings.json");
+        }
+
+        public ExtensionSettings LoadSettings()
+        {
+            try
+            {
+                var path = GetSettingsFilePath();
+                if (path != null && File.Exists(path))
+                {
+                    var json = File.ReadAllText(path);
+                    var settings = JsonSerializer.Deserialize<ExtensionSettings>(json);
+                    if (settings != null) return settings;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "Failed to load settings, using defaults");
+            }
+            return new ExtensionSettings();
+        }
+
+        public void SaveSettings(ExtensionSettings settings)
+        {
+            try
+            {
+                var path = GetSettingsFilePath();
+                if (path != null)
+                {
+                    var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
+                    File.WriteAllText(path, json);
+                    _logger?.LogInformation($"Settings saved: port={settings.Port}");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Failed to save settings");
+            }
+        }
+
+        public int CurrentPort => _mcpPort;
+
+        public async Task ChangePortAsync(int newPort)
+        {
+            if (newPort < 1024 || newPort > 65535)
+                throw new ArgumentException("Port must be between 1024 and 65535");
+
+            // Save to settings
+            var settings = new ExtensionSettings { Port = newPort };
+            SaveSettings(settings);
+
+            // If server is running, restart on new port
+            if (_mcpServer?.IsRunning == true)
+            {
+                await _mcpServer.StopAsync();
+                _mcpServer = null;
+                _mcpPort = FindAvailablePort(newPort);
+                InitializeServices();
+                await _mcpServer.StartAsync();
+            }
+            else
+            {
+                _mcpPort = FindAvailablePort(newPort);
+                // Re-initialize services with new port if they exist
+                if (_serviceProvider != null)
+                {
+                    _mcpServer = null;
+                    InitializeServices();
+                }
             }
         }
 

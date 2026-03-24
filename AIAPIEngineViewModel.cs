@@ -184,6 +184,145 @@ namespace MCPExtension
             background: #f8fafc;
         }
 
+        .endpoint-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 0;
+        }
+
+        .endpoint-label {
+            color: var(--text-muted);
+            min-width: 100px;
+            flex-shrink: 0;
+        }
+
+        .endpoint-url {
+            color: var(--primary);
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .btn-copy {
+            background: none;
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            padding: 3px 5px;
+            color: var(--text-dim);
+            cursor: pointer;
+            flex-shrink: 0;
+            transition: all 0.15s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            line-height: 1;
+        }
+
+        .btn-copy:hover {
+            background: var(--primary);
+            color: #fff;
+            border-color: var(--primary);
+        }
+
+        .btn-copy.copied {
+            background: var(--success);
+            color: #fff;
+            border-color: var(--success);
+        }
+
+        /* Settings Modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-overlay.visible {
+            display: flex;
+        }
+
+        .modal {
+            background: var(--bg-card);
+            border-radius: var(--radius);
+            padding: 24px;
+            width: 340px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+
+        .modal-title {
+            font-size: 16px;
+            font-weight: 700;
+            margin-bottom: 16px;
+            color: var(--text);
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-label {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-dim);
+            margin-bottom: 6px;
+            display: block;
+        }
+
+        .form-input {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            font-size: 14px;
+            font-family: var(--mono);
+            color: var(--text);
+            background: #fff;
+            outline: none;
+            transition: border-color 0.15s ease;
+        }
+
+        .form-input:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }
+
+        .form-hint {
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+            margin-top: 20px;
+        }
+
+        .btn-settings {
+            background: none;
+            border: none;
+            color: #64748b;
+            cursor: pointer;
+            font-size: 16px;
+            padding: 4px 6px;
+            border-radius: 4px;
+            transition: all 0.15s ease;
+            display: flex;
+            align-items: center;
+        }
+
+        .btn-settings:hover {
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+        }
+
         /* Controls */
         .controls {
             display: flex;
@@ -359,6 +498,7 @@ namespace MCPExtension
             switch (data.type) {
                 case 'serverStatus': updateServerUI(data.status, data); break;
                 case 'toolCallEvent': handleToolCallEvent(data); break;
+                case 'settingsResponse': handleSettingsResponse(data); break;
             }
         }
 
@@ -379,13 +519,13 @@ namespace MCPExtension
                     startBtn.disabled = true;
                     stopBtn.disabled = false;
                     statsPanel.classList.add('visible');
-                    if (data.port) document.getElementById('statPort').textContent = data.port;
+                    if (data.port) {
+                        document.getElementById('statPort').textContent = data.port;
+                        renderEndpoints(data.port);
+                    }
                     if (data.toolCount) document.getElementById('statTools').textContent = data.toolCount;
                     if (data.sseConnections !== undefined) document.getElementById('statSSE').textContent = data.sseConnections;
                     if (data.totalToolCalls !== undefined) document.getElementById('statCalls').textContent = data.totalToolCalls;
-                    if (data.connectionInfo) {
-                        document.getElementById('endpoints').innerHTML = data.connectionInfo.replace(/\n/g, '<br>');
-                    }
                     statusMsg.textContent = 'Server started successfully';
                     statusMsg.className = 'success';
                     break;
@@ -521,6 +661,89 @@ namespace MCPExtension
         function stopEngine() {
             chrome.webview.postMessage({ message: 'stopEngine' });
         }
+
+        // ---- Settings ----
+        let currentPort = 3001;
+
+        function openSettings() {
+            document.getElementById('portInput').value = currentPort;
+            document.getElementById('currentPortDisplay').textContent = currentPort;
+            document.getElementById('settingsModal').classList.add('visible');
+            chrome.webview.postMessage({ message: 'getSettings' });
+        }
+
+        function closeSettings() {
+            document.getElementById('settingsModal').classList.remove('visible');
+        }
+
+        function saveSettings() {
+            const port = parseInt(document.getElementById('portInput').value, 10);
+            if (isNaN(port) || port < 1024 || port > 65535) {
+                alert('Port must be between 1024 and 65535');
+                return;
+            }
+            chrome.webview.postMessage({ message: 'saveSettings:' + port });
+            closeSettings();
+            updateServerUI('starting', {});
+        }
+
+        function handleSettingsResponse(data) {
+            if (data.port) {
+                currentPort = data.port;
+                document.getElementById('portInput').value = data.port;
+                document.getElementById('currentPortDisplay').textContent = data.port;
+            }
+        }
+
+        // ---- Copy to clipboard ----
+        function copyUrl(url, btn) {
+            navigator.clipboard.writeText(url).then(function() {
+                btn.innerHTML = checkIcon;
+                btn.classList.add('copied');
+                setTimeout(function() {
+                    btn.innerHTML = copyIcon;
+                    btn.classList.remove('copied');
+                }, 1500);
+            }).catch(function() {
+                // Fallback for older WebView
+                var ta = document.createElement('textarea');
+                ta.value = url;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                btn.innerHTML = checkIcon;
+                btn.classList.add('copied');
+                setTimeout(function() {
+                    btn.innerHTML = copyIcon;
+                    btn.classList.remove('copied');
+                }, 1500);
+            });
+        }
+
+        var copyIcon = '<svg width=""14"" height=""14"" viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><rect x=""9"" y=""9"" width=""13"" height=""13"" rx=""2"" ry=""2""></rect><path d=""M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1""></path></svg>';
+        var checkIcon = '<svg width=""14"" height=""14"" viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2.5"" stroke-linecap=""round"" stroke-linejoin=""round""><polyline points=""20 6 9 17 4 12""></polyline></svg>';
+
+        function renderEndpoints(port) {
+            currentPort = port;
+            var endpoints = [
+                { label: 'Streamable HTTP', url: 'http://localhost:' + port + '/mcp' },
+                { label: 'SSE (legacy)', url: 'http://localhost:' + port + '/sse' },
+                { label: 'Health Check', url: 'http://localhost:' + port + '/health' },
+                { label: 'Metadata', url: 'http://localhost:' + port + '/.well-known/mcp' }
+            ];
+
+            var html = '';
+            for (var i = 0; i < endpoints.length; i++) {
+                var ep = endpoints[i];
+                html += '<div class=""endpoint-row"">' +
+                    '<span class=""endpoint-label"">' + ep.label + '</span>' +
+                    '<span class=""endpoint-url"">' + ep.url + '</span>' +
+                    '<button class=""btn-copy"" onclick=""copyUrl(\'' + ep.url + '\', this)"" title=""Copy to clipboard"">' + copyIcon + '</button>' +
+                    '</div>';
+            }
+            document.getElementById('endpoints').innerHTML = html;
+        }
     </script>
 </head>
 <body onload=""init()"">
@@ -530,6 +753,7 @@ namespace MCPExtension
             SPMCP
         </div>
         <div class=""header-right"">
+            <button class=""btn-settings"" onclick=""openSettings()"" title=""Settings"">&#9881;</button>
             <span id=""statusDot"" class=""status-dot""></span>
             <span id=""statusLabel"" class=""status-label"">Stopped</span>
         </div>
@@ -578,6 +802,25 @@ namespace MCPExtension
     <div class=""status-bar"">
         <span id=""statusMsg""></span>
         <span>MCP Extension v1.0</span>
+    </div>
+
+    <div id=""settingsModal"" class=""modal-overlay"" onclick=""if(event.target===this)closeSettings()"">
+        <div class=""modal"">
+            <div class=""modal-title"">Server Settings</div>
+            <div class=""form-group"">
+                <label class=""form-label"">Server Port</label>
+                <input id=""portInput"" type=""number"" class=""form-input"" min=""1024"" max=""65535"" value=""3001"">
+                <div class=""form-hint"">Default: 3001. The server will use the next available port if this one is busy.</div>
+            </div>
+            <div class=""form-group"">
+                <label class=""form-label"">Current Port</label>
+                <div style=""font-family: var(--mono); font-size: 13px; color: var(--text);"" id=""currentPortDisplay"">--</div>
+            </div>
+            <div class=""modal-actions"">
+                <button class=""btn btn-ghost"" onclick=""closeSettings()"">Cancel</button>
+                <button class=""btn btn-primary"" onclick=""saveSettings()"">Save &amp; Restart</button>
+            </div>
+        </div>
     </div>
 </body>
 </html>";
@@ -717,6 +960,78 @@ namespace MCPExtension
                         }
                     });
                 }
+                else if (e.Message.Contains("getSettings"))
+                {
+                    var settings = parentPanel.LoadSettings();
+                    PostJsonMessage(new
+                    {
+                        type = "settingsResponse",
+                        port = parentPanel.CurrentPort
+                    });
+                }
+                else if (e.Message.Contains("saveSettings"))
+                {
+                    int newPort = 3001;
+                    bool parsed = false;
+
+                    // Parse port from "saveSettings:3002" format (Mendix WebView only passes message string)
+                    try
+                    {
+                        var colonIdx = e.Message.IndexOf("saveSettings:");
+                        if (colonIdx >= 0)
+                        {
+                            var portStr = e.Message.Substring(colonIdx + "saveSettings:".Length).Trim();
+                            parsed = int.TryParse(portStr, out newPort);
+                        }
+                    }
+                    catch { }
+
+                    // Fallback: try full JSON parse in case WebView passes the whole object
+                    if (!parsed)
+                    {
+                        try
+                        {
+                            var msgObj = JsonSerializer.Deserialize<JsonElement>(e.Message);
+                            newPort = msgObj.GetProperty("port").GetInt32();
+                            parsed = true;
+                        }
+                        catch { }
+                    }
+
+                    if (!parsed)
+                    {
+                        LogToFile($"[{DateTime.Now:HH:mm:ss.fff}] saveSettings: could not parse port from: {e.Message}");
+                        NotifyServerStartFailed("Could not parse port from settings");
+                        return;
+                    }
+
+                    var portToSet = newPort;
+                    Task.Run(async () =>
+                    {
+                        try
+                        {
+                            // Unsubscribe from old server events before port change
+                            UnsubscribeFromToolCallEvents();
+
+                            await parentPanel.ChangePortAsync(portToSet);
+                            var connectionInfo = parentPanel.McpServer?.GetConnectionInfo() ?? "";
+                            Application.Instance.Invoke(() =>
+                            {
+                                if (parentPanel.McpServer?.IsRunning == true)
+                                    NotifyServerStarted(connectionInfo);
+                                else
+                                    PostJsonMessage(new { type = "serverStatus", status = "stopped" });
+                            });
+                        }
+                        catch (Exception ex)
+                        {
+                            Application.Instance.Invoke(() =>
+                            {
+                                NotifyServerStartFailed($"Port change failed: {ex.Message}");
+                            });
+                        }
+                    });
+                }
             }
             catch (Exception ex)
             {
@@ -742,21 +1057,36 @@ namespace MCPExtension
             }
         }
 
+        private MendixMcpServer? _subscribedServer;
+
         private void SubscribeToToolCallEvents()
         {
-            if (parentPanel.McpServer != null && _toolCallHandler == null)
-            {
-                _toolCallHandler = HandleToolCallEvent;
-                parentPanel.McpServer.OnToolCallEvent += _toolCallHandler;
-            }
+            var server = parentPanel.McpServer;
+            if (server == null) return;
+
+            // If already subscribed to this exact server instance, nothing to do
+            if (_toolCallHandler != null && _subscribedServer == server) return;
+
+            // Unsubscribe from old server if it changed (e.g. port change recreated it)
+            UnsubscribeFromToolCallEvents();
+
+            _toolCallHandler = HandleToolCallEvent;
+            server.OnToolCallEvent += _toolCallHandler;
+            _subscribedServer = server;
         }
 
         private void UnsubscribeFromToolCallEvents()
         {
-            if (parentPanel.McpServer != null && _toolCallHandler != null)
+            if (_toolCallHandler != null)
             {
-                parentPanel.McpServer.OnToolCallEvent -= _toolCallHandler;
+                // Unsubscribe from whichever server we were tracking
+                var server = _subscribedServer ?? parentPanel.McpServer;
+                if (server != null)
+                {
+                    server.OnToolCallEvent -= _toolCallHandler;
+                }
                 _toolCallHandler = null;
+                _subscribedServer = null;
             }
         }
 

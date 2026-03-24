@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using System.Collections.Concurrent;
 using System.Text;
 using System.IO;
 using Mendix.StudioPro.ExtensionsAPI.Model;
@@ -19,21 +20,60 @@ namespace MCPExtension.MCP
 {
     public class McpServer
     {
+        private const string PROTOCOL_VERSION_LEGACY = "2024-11-05";
+        private const string PROTOCOL_VERSION_STREAMABLE = "2025-03-26";
+
         private readonly ILogger<McpServer> _logger;
         private readonly Dictionary<string, Func<JsonObject, Task<object>>> _tools;
         private bool _isRunning;
         private IWebHost? _webHost;
         private int _port;
         private int _activeSseConnections;
+        private int _activeStreamableConnections;
         private int _totalToolCalls;
 
         private readonly string? _projectDirectory;
+        private readonly ConcurrentDictionary<string, McpSession> _sessions = new();
+        // SSE transport: maps sessionId → async queue for relaying JSON-RPC responses through the SSE stream
+        private readonly ConcurrentDictionary<string, SseResponseQueue> _sseChannels = new();
+
+        private class SseResponseQueue
+        {
+            private readonly ConcurrentQueue<string> _queue = new();
+            private readonly SemaphoreSlim _signal = new(0);
+
+            public void Enqueue(string message)
+            {
+                _queue.Enqueue(message);
+                _signal.Release();
+            }
+
+            public async Task<string?> DequeueAsync(CancellationToken ct)
+            {
+                await _signal.WaitAsync(ct);
+                _queue.TryDequeue(out var message);
+                return message;
+            }
+
+            public void Complete() => _signal.Release();
+        }
 
         public int Port => _port;
         public int ActiveSseConnections => _activeSseConnections;
+        public int ActiveStreamableConnections => _activeStreamableConnections;
         public int TotalToolCalls => _totalToolCalls;
         public int RegisteredToolCount => _tools.Count;
         public event Action<ToolCallEventArgs>? OnToolCallEvent;
+
+        private class McpSession
+        {
+            public string SessionId { get; set; } = "";
+            public DateTime CreatedAt { get; set; }
+            public DateTime LastActivityAt { get; set; }
+            public long NextEventId;
+            public string? ClientName { get; set; }
+            public string? ClientVersion { get; set; }
+        }
 
         public McpServer(ILogger<McpServer> logger, int port = 3001, string? projectDirectory = null)
         {
@@ -79,7 +119,35 @@ namespace MCPExtension.MCP
                             await next();
                         });
                         
-                        // Handle SSE endpoint
+                        // Handle Streamable HTTP endpoint (MCP spec 2025-03-26)
+                        app.Map("/mcp", mcpApp =>
+                        {
+                            mcpApp.Run(async context =>
+                            {
+                                switch (context.Request.Method)
+                                {
+                                    case "POST":
+                                        await HandleStreamablePost(context);
+                                        break;
+                                    case "GET":
+                                        await HandleStreamableGet(context);
+                                        break;
+                                    case "DELETE":
+                                        await HandleStreamableDelete(context);
+                                        break;
+                                    case "OPTIONS":
+                                        SetCorsHeaders(context.Response);
+                                        context.Response.StatusCode = 204;
+                                        break;
+                                    default:
+                                        context.Response.StatusCode = 405;
+                                        await context.Response.WriteAsync("Method not allowed");
+                                        break;
+                                }
+                            });
+                        });
+
+                        // Handle SSE endpoint (legacy, for backwards compatibility)
                         app.Map("/sse", HandleSseApp);
                         
                         // Handle MCP message endpoint - this is where clients send MCP requests
@@ -118,7 +186,11 @@ namespace MCPExtension.MCP
                             {
                                 var metadata = new
                                 {
-                                    transport = "sse",
+                                    transport = new[] { "streamable-http", "sse" },
+                                    streamableHttp = new
+                                    {
+                                        endpoint = "/mcp"
+                                    },
                                     sse = new
                                     {
                                         endpoint = "/sse"
@@ -155,8 +227,9 @@ namespace MCPExtension.MCP
                 
                 LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] SPMCP started successfully on http://localhost:{_port}");
                 LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Available endpoints:");
-                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] - SSE: http://localhost:{_port}/sse");
-                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] - Messages: http://localhost:{_port}/message");
+                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] - Streamable HTTP: http://localhost:{_port}/mcp (primary)");
+                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] - SSE (legacy): http://localhost:{_port}/sse");
+                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] - Messages (legacy): http://localhost:{_port}/message");
                 LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] - Root POST: http://localhost:{_port}/");
                 LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] - Health: http://localhost:{_port}/health");
                 LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] - Metadata: http://localhost:{_port}/.well-known/mcp");
@@ -176,6 +249,300 @@ namespace MCPExtension.MCP
                 throw;
             }
         }
+
+        // ========== Streamable HTTP Transport (MCP spec 2025-03-26) ==========
+
+        private async Task HandleStreamablePost(HttpContext context)
+        {
+            try
+            {
+                SetCorsHeaders(context.Response);
+
+                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Streamable HTTP POST from {context.Connection.RemoteIpAddress}");
+
+                // Read request body
+                string requestBody;
+                using (var reader = new StreamReader(context.Request.Body))
+                {
+                    requestBody = await reader.ReadToEndAsync();
+                }
+
+                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Streamable HTTP body: {requestBody}");
+
+                if (string.IsNullOrWhiteSpace(requestBody))
+                {
+                    context.Response.StatusCode = 400;
+                    await context.Response.WriteAsync("Empty request body");
+                    return;
+                }
+
+                // Parse JSON
+                JsonNode parsed;
+                try
+                {
+                    parsed = JsonNode.Parse(requestBody);
+                }
+                catch (JsonException ex)
+                {
+                    context.Response.StatusCode = 400;
+                    await context.Response.WriteAsync($"Invalid JSON: {ex.Message}");
+                    return;
+                }
+
+                if (parsed == null)
+                {
+                    context.Response.StatusCode = 400;
+                    await context.Response.WriteAsync("Invalid JSON");
+                    return;
+                }
+
+                // Handle JSON-RPC batch (array)
+                if (parsed is JsonArray batchArray)
+                {
+                    await HandleStreamableBatch(context, batchArray);
+                    return;
+                }
+
+                // Single request
+                var request = parsed.AsObject();
+                var method = request["method"]?.ToString();
+                var id = request["id"];
+
+                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Streamable HTTP method: {method}, id: {id}");
+
+                // Session validation for non-initialize requests
+                if (method != "initialize")
+                {
+                    var sessionId = context.Request.Headers["Mcp-Session-Id"].FirstOrDefault();
+                    if (sessionId != null && !_sessions.ContainsKey(sessionId))
+                    {
+                        LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Streamable HTTP: unknown session {sessionId}");
+                        context.Response.StatusCode = 404;
+                        await context.Response.WriteAsync("Session not found");
+                        return;
+                    }
+                    if (sessionId != null && _sessions.TryGetValue(sessionId, out var existingSession))
+                    {
+                        existingSession.LastActivityAt = DateTime.Now;
+                    }
+                }
+
+                // JSON-RPC notification (no id) — return 202 Accepted
+                if (id == null)
+                {
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Streamable HTTP: notification '{method}' — 202 Accepted");
+                    context.Response.StatusCode = 202;
+                    return;
+                }
+
+                // Process the request
+                object response;
+                if (method == "initialize")
+                {
+                    var session = CreateSession(request);
+                    context.Response.Headers["Mcp-Session-Id"] = session.SessionId;
+                    response = CreateStreamableInitializeResponse(id);
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Streamable HTTP: created session {session.SessionId}");
+                }
+                else
+                {
+                    response = await ProcessRequest(request);
+                }
+
+                // Content negotiation via Accept header
+                var acceptHeader = context.Request.Headers["Accept"].ToString();
+                bool clientAcceptsSseOnly = !string.IsNullOrEmpty(acceptHeader)
+                    && acceptHeader.Contains("text/event-stream")
+                    && !acceptHeader.Contains("application/json")
+                    && !acceptHeader.Contains("*/*");
+
+                if (clientAcceptsSseOnly)
+                {
+                    // Wrap response in SSE event
+                    context.Response.ContentType = "text/event-stream";
+                    context.Response.Headers["Cache-Control"] = "no-cache";
+                    var sessionIdForEvent = context.Request.Headers["Mcp-Session-Id"].FirstOrDefault();
+                    var eventId = GetNextEventId(sessionIdForEvent);
+                    var ssePayload = $"id: {eventId}\nevent: message\ndata: {JsonSerializer.Serialize(response)}\n\n";
+                    await context.Response.WriteAsync(ssePayload);
+                    await context.Response.Body.FlushAsync();
+                }
+                else
+                {
+                    // Standard JSON response (default)
+                    context.Response.ContentType = "application/json";
+                    await context.Response.WriteAsync(JsonSerializer.Serialize(response));
+                }
+
+                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Streamable HTTP response sent for method: {method}");
+            }
+            catch (Exception ex)
+            {
+                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Streamable HTTP POST error: {ex}");
+                _logger.LogError(ex, "Streamable HTTP POST error");
+                if (!context.Response.HasStarted)
+                {
+                    context.Response.StatusCode = 500;
+                    await context.Response.WriteAsync($"Internal server error: {ex.Message}");
+                }
+            }
+        }
+
+        private async Task HandleStreamableBatch(HttpContext context, JsonArray batchArray)
+        {
+            var responses = new List<object>();
+            foreach (var item in batchArray)
+            {
+                var req = item?.AsObject();
+                if (req == null) continue;
+
+                var id = req["id"];
+                if (id == null)
+                {
+                    // Notification in batch — no response
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Streamable HTTP batch: notification '{req["method"]}'");
+                    continue;
+                }
+
+                var response = await ProcessRequest(req);
+                responses.Add(response);
+            }
+
+            if (responses.Count == 0)
+            {
+                context.Response.StatusCode = 202;
+                return;
+            }
+
+            context.Response.ContentType = "application/json";
+            await context.Response.WriteAsync(JsonSerializer.Serialize(responses));
+        }
+
+        private async Task HandleStreamableGet(HttpContext context)
+        {
+            SetCorsHeaders(context.Response);
+
+            // Validate session
+            var sessionId = context.Request.Headers["Mcp-Session-Id"].FirstOrDefault();
+            if (sessionId == null || !_sessions.TryGetValue(sessionId, out var session))
+            {
+                context.Response.StatusCode = 404;
+                await context.Response.WriteAsync("Session not found. Send initialize first.");
+                return;
+            }
+
+            context.Response.ContentType = "text/event-stream";
+            context.Response.Headers["Cache-Control"] = "no-cache";
+            context.Response.Headers["Connection"] = "keep-alive";
+
+            Interlocked.Increment(ref _activeStreamableConnections);
+            LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Streamable HTTP GET: SSE stream opened for session {sessionId}");
+
+            try
+            {
+                // Send initial connected event
+                var eventId = Interlocked.Increment(ref session.NextEventId);
+                await context.Response.WriteAsync($"id: {eventId}\nevent: connected\ndata: SPMCP ready\n\n");
+                await context.Response.Body.FlushAsync();
+
+                // Keep alive
+                while (!context.RequestAborted.IsCancellationRequested && _isRunning)
+                {
+                    await Task.Delay(30000, context.RequestAborted);
+                    eventId = Interlocked.Increment(ref session.NextEventId);
+                    await context.Response.WriteAsync($"id: {eventId}\nevent: keepalive\ndata: \n\n");
+                    await context.Response.Body.FlushAsync();
+                    session.LastActivityAt = DateTime.Now;
+                }
+            }
+            catch (TaskCanceledException) { }
+            catch (Exception ex)
+            {
+                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Streamable HTTP GET error: {ex.Message}");
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _activeStreamableConnections);
+                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Streamable HTTP GET: SSE stream closed for session {sessionId}");
+            }
+        }
+
+        private async Task HandleStreamableDelete(HttpContext context)
+        {
+            SetCorsHeaders(context.Response);
+
+            var sessionId = context.Request.Headers["Mcp-Session-Id"].FirstOrDefault();
+            if (sessionId == null || !_sessions.TryRemove(sessionId, out _))
+            {
+                context.Response.StatusCode = 404;
+                await context.Response.WriteAsync("Session not found");
+                return;
+            }
+
+            LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Session terminated: {sessionId}");
+            context.Response.StatusCode = 200;
+            await context.Response.WriteAsync("Session terminated");
+        }
+
+        private McpSession CreateSession(JsonObject initializeRequest)
+        {
+            var clientInfo = initializeRequest["params"]?["clientInfo"]?.AsObject();
+            var session = new McpSession
+            {
+                SessionId = Guid.NewGuid().ToString("N"),
+                CreatedAt = DateTime.Now,
+                LastActivityAt = DateTime.Now,
+                ClientName = clientInfo?["name"]?.ToString(),
+                ClientVersion = clientInfo?["version"]?.ToString()
+            };
+            _sessions[session.SessionId] = session;
+            return session;
+        }
+
+        private void SetCorsHeaders(HttpResponse response)
+        {
+            if (!response.Headers.ContainsKey("Access-Control-Allow-Origin"))
+                response.Headers["Access-Control-Allow-Origin"] = "*";
+            response.Headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS";
+            response.Headers["Access-Control-Allow-Headers"] = "Content-Type, Accept, Mcp-Session-Id, Last-Event-ID, Cache-Control";
+            response.Headers["Access-Control-Expose-Headers"] = "Mcp-Session-Id";
+        }
+
+        private long GetNextEventId(string? sessionId)
+        {
+            if (sessionId != null && _sessions.TryGetValue(sessionId, out var session))
+            {
+                return Interlocked.Increment(ref session.NextEventId);
+            }
+            return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        }
+
+        private object CreateStreamableInitializeResponse(JsonNode id)
+        {
+            return new
+            {
+                jsonrpc = "2.0",
+                id = id?.AsValue(),
+                result = new
+                {
+                    protocolVersion = PROTOCOL_VERSION_STREAMABLE,
+                    capabilities = new
+                    {
+                        tools = new
+                        {
+                            listChanged = false
+                        }
+                    },
+                    serverInfo = new
+                    {
+                        name = "mendix-mcp-server",
+                        version = "1.0.0"
+                    }
+                }
+            };
+        }
+
+        // ========== Legacy SSE Transport ==========
 
         private void HandleSseApp(IApplicationBuilder app)
         {
@@ -206,14 +573,17 @@ namespace MCPExtension.MCP
             {
                 // Add detailed logging
                 LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] MCP Message received - Method: {context.Request.Method}, ContentType: {context.Request.ContentType}");
-                
+
                 if (context.Request.Method != "POST")
                 {
                     LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Invalid method: {context.Request.Method}, expected POST");
-                    context.Response.StatusCode = 405; // Method Not Allowed
+                    context.Response.StatusCode = 405;
                     await context.Response.WriteAsync("Method not allowed. Use POST.");
                     return;
                 }
+
+                // Extract sessionId from query string
+                var sessionId = context.Request.Query["sessionId"].FirstOrDefault();
 
                 // Read the request body
                 string requestBody;
@@ -222,12 +592,12 @@ namespace MCPExtension.MCP
                     requestBody = await reader.ReadToEndAsync();
                 }
 
-                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] MCP Request body: {requestBody}");
+                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] MCP Request body (session: {sessionId}): {requestBody}");
 
                 if (string.IsNullOrWhiteSpace(requestBody))
                 {
                     LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Empty request body");
-                    context.Response.StatusCode = 400; // Bad Request
+                    context.Response.StatusCode = 400;
                     await context.Response.WriteAsync("Empty request body");
                     return;
                 }
@@ -241,7 +611,7 @@ namespace MCPExtension.MCP
                 catch (JsonException ex)
                 {
                     LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] JSON parsing error: {ex.Message}");
-                    context.Response.StatusCode = 400; // Bad Request
+                    context.Response.StatusCode = 400;
                     await context.Response.WriteAsync($"Invalid JSON: {ex.Message}");
                     return;
                 }
@@ -249,28 +619,53 @@ namespace MCPExtension.MCP
                 if (request == null)
                 {
                     LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Request is null after parsing");
-                    context.Response.StatusCode = 400; // Bad Request
+                    context.Response.StatusCode = 400;
                     await context.Response.WriteAsync("Invalid JSON object");
                     return;
                 }
 
                 LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Processing MCP request...");
 
-                // Process the MCP request
+                // Check if this is a JSON-RPC notification (no "id" field)
+                var hasId = request.ContainsKey("id") && request["id"] != null;
+                var method = request["method"]?.ToString();
+
+                if (!hasId)
+                {
+                    // Notifications get 202 Accepted with no response body and nothing queued to SSE
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Notification '{method}' — returning 202 (no response)");
+                    context.Response.StatusCode = 202;
+                    return;
+                }
+
+                // Process the MCP request (has id → expects a response)
                 var response = await ProcessRequest(request);
+                var responseJson = JsonSerializer.Serialize(response);
 
-                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] MCP Response: {JsonSerializer.Serialize(response)}");
+                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] MCP Response: {responseJson}");
 
-                // Send response
-                context.Response.ContentType = "application/json";
-                await context.Response.WriteAsync(JsonSerializer.Serialize(response));
+                // MCP SSE spec: relay response through SSE stream, return 202 Accepted
+                if (sessionId != null && _sseChannels.TryGetValue(sessionId, out var queue))
+                {
+                    queue.Enqueue(responseJson);
+                    context.Response.StatusCode = 202;
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Response relayed via SSE (session: {sessionId})");
+                }
+                else
+                {
+                    // Fallback: no SSE session found, return response directly in HTTP body
+                    // This handles clients that POST to /message without an SSE session
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] No SSE session found, returning response in HTTP body");
+                    context.Response.ContentType = "application/json";
+                    await context.Response.WriteAsync(responseJson);
+                }
             }
             catch (Exception ex)
             {
                 LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] HandleMcpMessage error: {ex}");
                 _logger.LogError(ex, "Error handling MCP message");
-                
-                context.Response.StatusCode = 500; // Internal Server Error
+
+                context.Response.StatusCode = 500;
                 await context.Response.WriteAsync($"Internal server error: {ex.Message}");
             }
         }
@@ -329,43 +724,69 @@ namespace MCPExtension.MCP
 
         private async Task HandleSseConnection(HttpContext context)
         {
-            context.Response.Headers.Add("Content-Type", "text/event-stream");
-            context.Response.Headers.Add("Cache-Control", "no-cache");
-            context.Response.Headers.Add("Connection", "keep-alive");
-            context.Response.Headers.Add("Access-Control-Allow-Origin", "*");
-            context.Response.Headers.Add("Access-Control-Allow-Headers", "Cache-Control");
+            context.Response.ContentType = "text/event-stream";
+            context.Response.Headers["Cache-Control"] = "no-cache";
+            context.Response.Headers["Connection"] = "keep-alive";
+            context.Response.Headers["Access-Control-Allow-Origin"] = "*";
+            context.Response.Headers["Access-Control-Allow-Headers"] = "Content-Type, Cache-Control";
+
+            // Generate session ID for this SSE connection
+            var sessionId = Guid.NewGuid().ToString("N");
+            var queue = new SseResponseQueue();
+            _sseChannels[sessionId] = queue;
 
             Interlocked.Increment(ref _activeSseConnections);
-            LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] SSE client connected from {context.Connection.RemoteIpAddress} (active: {_activeSseConnections})");
-            _logger.LogInformation("SSE client connected");
+            LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] SSE client connected from {context.Connection.RemoteIpAddress} (session: {sessionId}, active: {_activeSseConnections})");
+            _logger.LogInformation($"SSE client connected (session: {sessionId})");
 
             try
             {
-                // Send initial connection message
-                await SendSseMessage(context.Response, "connected", "SPMCP ready");
-                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Sent SSE connected message");
+                // MCP SSE spec: first event MUST be "endpoint" with the message POST URL
+                var messageUrl = $"http://localhost:{_port}/message?sessionId={sessionId}";
+                await WriteSseEvent(context.Response, "endpoint", messageUrl);
+                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Sent SSE endpoint event: {messageUrl}");
 
-                // Keep connection alive and handle incoming messages via POST to /message endpoint
-                while (!context.RequestAborted.IsCancellationRequested && _isRunning)
+                // Loop: relay responses from queue + send keepalives
+                var ct = context.RequestAborted;
+                while (!ct.IsCancellationRequested && _isRunning)
                 {
-                    await Task.Delay(30000, context.RequestAborted); // Send keepalive every 30 seconds
-                    await SendSseMessage(context.Response, "keepalive", "");
+                    // Wait for a message from the queue, or timeout for keepalive
+                    using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    cts.CancelAfter(30000);
+
+                    try
+                    {
+                        var responseJson = await queue.DequeueAsync(cts.Token);
+                        if (responseJson != null)
+                        {
+                            // Send the JSON-RPC response as an SSE message event
+                            await WriteSseEvent(context.Response, "message", responseJson);
+                            LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] SSE [{sessionId}] relayed message event");
+                        }
+                    }
+                    catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                    {
+                        // Timeout — send keepalive ping
+                        await WriteSseEvent(context.Response, "ping", "");
+                    }
                 }
             }
+            catch (OperationCanceledException) { }
             catch (Exception ex)
             {
-                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] SSE connection error: {ex}");
+                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] SSE connection error (session: {sessionId}): {ex}");
                 _logger.LogError(ex, "SSE connection error");
             }
             finally
             {
+                _sseChannels.TryRemove(sessionId, out _);
                 Interlocked.Decrement(ref _activeSseConnections);
-                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] SSE client disconnected (active: {_activeSseConnections})");
-                _logger.LogInformation("SSE client disconnected");
+                LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] SSE client disconnected (session: {sessionId}, active: {_activeSseConnections})");
+                _logger.LogInformation($"SSE client disconnected (session: {sessionId})");
             }
         }
 
-        private async Task SendSseMessage(HttpResponse response, string eventType, string data)
+        private async Task WriteSseEvent(HttpResponse response, string eventType, string data)
         {
             var message = $"event: {eventType}\ndata: {data}\n\n";
             var bytes = Encoding.UTF8.GetBytes(message);
@@ -413,6 +834,19 @@ namespace MCPExtension.MCP
                     LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] tools/call missing params");
                     return CreateErrorResponse(id, "Invalid parameters", "Missing params");
 
+                // JSON-RPC notifications — no response expected, but handle gracefully if they arrive with an id
+                case "notifications/initialized":
+                case "notifications/cancelled":
+                case "notifications/progress":
+                case "notifications/roots/list_changed":
+                    LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Notification method: {method} (acknowledged)");
+                    return new
+                    {
+                        jsonrpc = "2.0",
+                        id = id,
+                        result = new { }
+                    };
+
                 default:
                     LogToFile($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Unknown method: {method}");
                     return CreateErrorResponse(id, "Method not found", $"Unknown method: {method}");
@@ -427,7 +861,7 @@ namespace MCPExtension.MCP
                 id = id?.AsValue(),
                 result = new
                 {
-                    protocolVersion = "2024-11-05",
+                    protocolVersion = PROTOCOL_VERSION_LEGACY,
                     capabilities = new
                     {
                         tools = new
@@ -531,6 +965,9 @@ namespace MCPExtension.MCP
                     DurationMs = durationMs
                 });
 
+                // MCP spec: text field MUST be a string — serialize objects to JSON string
+                var textValue = result is string s ? s : JsonSerializer.Serialize(result);
+
                 return new
                 {
                     jsonrpc = "2.0",
@@ -542,7 +979,7 @@ namespace MCPExtension.MCP
                             new
                             {
                                 type = "text",
-                                text = result
+                                text = textValue
                             }
                         }
                     }
@@ -1809,6 +2246,13 @@ namespace MCPExtension.MCP
         public void Stop()
         {
             _isRunning = false;
+            _sessions.Clear();
+            // Signal all SSE queues so readers unblock
+            foreach (var kvp in _sseChannels)
+            {
+                kvp.Value.Complete();
+            }
+            _sseChannels.Clear();
             _webHost?.StopAsync().Wait(5000);
             _webHost?.Dispose();
         }
