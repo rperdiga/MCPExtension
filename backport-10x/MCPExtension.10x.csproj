@@ -14,17 +14,6 @@
   <ItemGroup>
     <Compile Include="..\AIAPIEngine.cs" />
     <Compile Include="..\AIAPIEngineViewModel.cs" />
-    <Compile Include="..\Core\BaseApiHandler.cs" />
-    <Compile Include="..\Core\IApiHandler.cs" />
-    <Compile Include="..\Handlers\AssociationDiagnosticHandler.cs" />
-    <Compile Include="..\Handlers\DebugHandler.cs" />
-    <Compile Include="..\Handlers\DeleteModelHandler.cs" />
-    <Compile Include="..\Handlers\GenerateOverviewHandler.cs" />
-    <Compile Include="..\Handlers\ListMicroflowsHandler.cs" />
-    <Compile Include="..\Handlers\ReadMicroflowActivitiesHandler.cs" />
-    <Compile Include="..\Handlers\ReadModelHandler.cs" />
-    <Compile Include="..\Handlers\SaveDataHandler.cs" />
-    <Compile Include="..\Handlers\WriteModelHandler.cs" />
     <Compile Include="..\Mcp\McpServer.cs" />
     <Compile Include="..\Mcp\MendixMcpServer.cs" />
     <Compile Include="..\Mcp\ToolCallEventArgs.cs" />
@@ -43,7 +32,7 @@
       <HintPath>C:\Users\ricardo.perdigao\AppData\Local\Programs\Mendix\10.24.13.86719\modeler\Mendix.StudioPro.ExtensionsAPI.dll</HintPath>
       <Private>true</Private>
     </Reference>
-    <PackageReference Include="Microsoft.AspNetCore" Version="2.2.0" />
+
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.1" />

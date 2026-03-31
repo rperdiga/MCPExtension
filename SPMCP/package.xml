@@ -12,31 +12,6 @@
       <file path="extensions/SPMCP/MCPExtension.dll" />
       <file path="extensions/SPMCP/MCPExtension.pdb" />
       <file path="extensions/SPMCP/Mendix.StudioPro.ExtensionsAPI.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Authentication.Abstractions.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Authentication.Core.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Connections.Abstractions.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Diagnostics.Abstractions.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Diagnostics.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.HostFiltering.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Hosting.Abstractions.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Hosting.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Hosting.Server.Abstractions.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Http.Abstractions.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Http.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Http.Extensions.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Http.Features.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.HttpOverrides.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Routing.Abstractions.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Routing.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Server.IIS.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Server.IISIntegration.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Server.Kestrel.Core.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Server.Kestrel.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Server.Kestrel.Https.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Server.Kestrel.Transport.Abstractions.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.dll" />
-      <file path="extensions/SPMCP/Microsoft.AspNetCore.WebUtilities.dll" />
       <file path="extensions/SPMCP/Microsoft.Extensions.Configuration.Abstractions.dll" />
       <file path="extensions/SPMCP/Microsoft.Extensions.Configuration.Binder.dll" />
       <file path="extensions/SPMCP/Microsoft.Extensions.Configuration.CommandLine.dll" />
@@ -61,18 +36,13 @@
       <file path="extensions/SPMCP/Microsoft.Extensions.Logging.dll" />
       <file path="extensions/SPMCP/Microsoft.Extensions.Logging.EventLog.dll" />
       <file path="extensions/SPMCP/Microsoft.Extensions.Logging.EventSource.dll" />
-      <file path="extensions/SPMCP/Microsoft.Extensions.ObjectPool.dll" />
       <file path="extensions/SPMCP/Microsoft.Extensions.Options.ConfigurationExtensions.dll" />
       <file path="extensions/SPMCP/Microsoft.Extensions.Options.dll" />
       <file path="extensions/SPMCP/Microsoft.Extensions.Primitives.dll" />
-      <file path="extensions/SPMCP/Microsoft.Net.Http.Headers.dll" />
       <file path="extensions/SPMCP/System.ComponentModel.Composition.dll" />
       <file path="extensions/SPMCP/System.Diagnostics.EventLog.dll" />
-      <file path="extensions/SPMCP/System.IO.Pipelines.dll" />
       <file path="extensions/SPMCP/runtimes/win/lib/net8.0/System.Diagnostics.EventLog.dll" />
       <file path="extensions/SPMCP/runtimes/win/lib/net8.0/System.Diagnostics.EventLog.Messages.dll" />
-      <file path="extensions/SPMCP/runtimes/win-x64/nativeassets/netcoreapp2.2/aspnetcorev2_inprocess.dll" />
-      <file path="extensions/SPMCP/runtimes/win-x86/nativeassets/netcoreapp2.2/aspnetcorev2_inprocess.dll" />
     </files>
   </modelerProject>
 </package>

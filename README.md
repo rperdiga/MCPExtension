@@ -42,13 +42,14 @@ http://localhost:3001/health
 
 ### Step 4 — Connect your AI tool
 
-| Endpoint | URL |
-|----------|-----|
-| SSE | `http://localhost:3001/sse` |
-| Messages | `http://localhost:3001/message` |
-| Health | `http://localhost:3001/health` |
+| Transport | Endpoint | Description |
+|-----------|----------|-------------|
+| Streamable HTTP | `http://localhost:3001/mcp` | Primary (MCP spec 2025-03-26) |
+| SSE (legacy) | `http://localhost:3001/sse` | Legacy SSE transport (MCP spec 2024-11-05) |
+| Health | `http://localhost:3001/health` | Health check |
+| Metadata | `http://localhost:3001/.well-known/mcp` | Server capabilities |
 
-Port auto-increments from 3001 if occupied.
+Default port is 3001. Change it via the settings button in the SPMCP pane.
 
 ---
 
