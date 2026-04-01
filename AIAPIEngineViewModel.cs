@@ -697,28 +697,35 @@ namespace MCPExtension
 
         // ---- Copy to clipboard ----
         function copyUrl(url, btn) {
-            navigator.clipboard.writeText(url).then(function() {
+            function showCopied() {
                 btn.innerHTML = checkIcon;
                 btn.classList.add('copied');
                 setTimeout(function() {
                     btn.innerHTML = copyIcon;
                     btn.classList.remove('copied');
                 }, 1500);
-            }).catch(function() {
-                // Fallback for older WebView
+            }
+            function fallbackCopy() {
                 var ta = document.createElement('textarea');
                 ta.value = url;
+                ta.style.position = 'fixed';
+                ta.style.left = '-9999px';
                 document.body.appendChild(ta);
+                ta.focus();
                 ta.select();
                 document.execCommand('copy');
                 document.body.removeChild(ta);
-                btn.innerHTML = checkIcon;
-                btn.classList.add('copied');
-                setTimeout(function() {
-                    btn.innerHTML = copyIcon;
-                    btn.classList.remove('copied');
-                }, 1500);
-            });
+                showCopied();
+            }
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(url).then(showCopied).catch(fallbackCopy);
+                } else {
+                    fallbackCopy();
+                }
+            } catch(e) {
+                fallbackCopy();
+            }
         }
 
         var copyIcon = '<svg width=""14"" height=""14"" viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><rect x=""9"" y=""9"" width=""13"" height=""13"" rx=""2"" ry=""2""></rect><path d=""M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1""></path></svg>';
@@ -733,16 +740,29 @@ namespace MCPExtension
                 { label: 'Metadata', url: 'http://localhost:' + port + '/.well-known/mcp' }
             ];
 
-            var html = '';
+            var container = document.getElementById('endpoints');
+            container.innerHTML = '';
             for (var i = 0; i < endpoints.length; i++) {
-                var ep = endpoints[i];
-                html += '<div class=""endpoint-row"">' +
-                    '<span class=""endpoint-label"">' + ep.label + '</span>' +
-                    '<span class=""endpoint-url"">' + ep.url + '</span>' +
-                    '<button class=""btn-copy"" onclick=""copyUrl(\'' + ep.url + '\', this)"" title=""Copy to clipboard"">' + copyIcon + '</button>' +
-                    '</div>';
+                (function(ep) {
+                    var row = document.createElement('div');
+                    row.className = 'endpoint-row';
+                    var lbl = document.createElement('span');
+                    lbl.className = 'endpoint-label';
+                    lbl.textContent = ep.label;
+                    var urlSpan = document.createElement('span');
+                    urlSpan.className = 'endpoint-url';
+                    urlSpan.textContent = ep.url;
+                    var btn = document.createElement('button');
+                    btn.className = 'btn-copy';
+                    btn.title = 'Copy to clipboard';
+                    btn.innerHTML = copyIcon;
+                    btn.addEventListener('click', function() { copyUrl(ep.url, btn); });
+                    row.appendChild(lbl);
+                    row.appendChild(urlSpan);
+                    row.appendChild(btn);
+                    container.appendChild(row);
+                })(endpoints[i]);
             }
-            document.getElementById('endpoints').innerHTML = html;
         }
     </script>
 </head>
